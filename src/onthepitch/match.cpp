@@ -50,8 +50,17 @@ Match::Match(MatchData *matchData, const std::vector<IHIDevice*> &controllers) :
   nettingHasChanged = false;
 
   matchDurationFactor = GetConfiguration()->GetReal("match_duration", 1.0) * 0.2f + 0.05f;
-  matchDifficulty = 1.0f;
-  printf("[MANAGER MODE] matchDifficulty forced to %.2f\n", matchDifficulty);
+  const bool managerMode =
+    GetConfiguration()->GetReal("manager_mode", 0.0f) > 0.5f;
+
+  if (managerMode) {
+    matchDifficulty = GetConfiguration()->GetReal("manager_ai_difficulty", 1.0f);
+    if (matchDifficulty < 0.0f) matchDifficulty = 0.0f;
+    if (matchDifficulty > 1.0f) matchDifficulty = 1.0f;
+    printf("[MANAGER MODE] AI difficulty set to %.2f\n", matchDifficulty);
+  } else {
+    matchDifficulty = GetConfiguration()->GetReal("match_difficulty", 0.8f);
+  }
 
   Log(e_Notice, "Match", "Match", "Creating dynamicNode");
 
