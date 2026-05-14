@@ -50,7 +50,8 @@ Match::Match(MatchData *matchData, const std::vector<IHIDevice*> &controllers) :
   nettingHasChanged = false;
 
   matchDurationFactor = GetConfiguration()->GetReal("match_duration", 1.0) * 0.2f + 0.05f;
-  matchDifficulty = GetConfiguration()->GetReal("match_difficulty", 0.8f);
+  matchDifficulty = 1.0f;
+  printf("[MANAGER MODE] matchDifficulty forced to %.2f\n", matchDifficulty);
 
   Log(e_Notice, "Match", "Match", "Creating dynamicNode");
 

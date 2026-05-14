@@ -95,17 +95,7 @@ MenuTask::MenuTask(float aspectRatio, float margin, TTF_Font *defaultFont, TTF_F
 
   } else {
 
-    int size = GetControllers().size();
-    for (int i = 0; i < size; i++) {
-      SideSelection side;
-      side.controllerID = i;
-      if ((size > 1 && i == 1) || (size == 1 && i == 0)) {
-        side.side = -1;
-      } else {
-        side.side = 0;
-      }
-      queuedFixture->sides.push_back(side);
-    }
+    queuedFixture->sides.clear();
 
     // 1 == ajax
     // 2 == arsenal
@@ -119,6 +109,9 @@ MenuTask::MenuTask(float aspectRatio, float margin, TTF_Font *defaultFont, TTF_F
     queuedFixture->teamID2 = "8";
     queuedFixture->team1KitNum = 2;
     queuedFixture->team2KitNum = 2;
+
+    printf("[MANAGER MODE] QuickStart forced. Controller sides cleared. sides=%lu\n",
+           queuedFixture->sides.size());
 
     menuAction = e_MenuAction_Menu;
 
@@ -167,7 +160,7 @@ void MenuTask::ProcessPhase() {
 }
 
 bool MenuTask::QuickStart() {
-  return !IsReleaseVersion() && EnvironmentManager::GetInstance().GetTime_ms() < 10000; // after 5 seconds, quickstart disabled (== after > 0 matches have been played)
+  return true;
 }
 
 void MenuTask::QuitGame() {
