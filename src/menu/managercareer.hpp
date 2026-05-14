@@ -84,16 +84,34 @@ class ManagerMainScreenPage : public Gui2Page {
   ManagerMainScreenPage(Gui2WindowManager *windowManager, const Gui2PageData &pageData);
   virtual ~ManagerMainScreenPage();
 
+  void OpenTab(int tab);
   void PlayMatch();
   void BackToMainMenu();
 
  protected:
   int managerId;
   int clubId;
+  int activeTab;
 
-  Gui2Grid *grid;
+  Gui2Grid *navGrid;
+  Gui2Grid *managerGrid;
+  Gui2Grid *clubGrid;
+  Gui2Grid *matchesGrid;
+  Gui2Grid *standingsGrid;
+
+  Gui2Button *managerButton;
+  Gui2Button *clubButton;
+  Gui2Button *matchesButton;
+  Gui2Button *standingsButton;
   Gui2Button *playMatchButton;
-  Gui2Button *backButton;
+  Gui2Button *mainMenuButton;
+
+  void BuildNavigation();
+  void BuildManagerView();
+  void BuildClubView();
+  void BuildMatchesView();
+  void BuildStandingsView();
+  void ShowActiveView();
 };
 
 #endif

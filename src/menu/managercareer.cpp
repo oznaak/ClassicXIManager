@@ -443,44 +443,108 @@ ManagerMainScreenPage::ManagerMainScreenPage(
 ) : Gui2Page(wm, pd) {
   managerId = pd.properties->GetInt("managerId");
   clubId    = 0;
+  activeTab = 0;
 
   std::stringstream mq;
-  mq << "SELECT managers.name, managers.age, managers.nationality, managers.gender,"
-     << " managers.club_id, teams.name"
-     << " FROM managers LEFT JOIN teams ON managers.club_id = teams.id"
-     << " WHERE managers.id = " << managerId << " LIMIT 1;";
-
+  mq << "SELECT managers.club_id FROM managers WHERE id = " << managerId << " LIMIT 1;";
   DatabaseResult *mr = GetDB()->Query(mq.str());
-  std::string mgrName   = Cell(mr, 0, 0);
-  std::string mgrAge    = Cell(mr, 0, 1);
-  std::string mgrNat    = Cell(mr, 0, 2);
-  std::string mgrGender = Cell(mr, 0, 3);
-  clubId                = atoi(Cell(mr, 0, 4).c_str());
-  std::string clubName  = Cell(mr, 0, 5);
+  clubId = atoi(Cell(mr, 0, 0).c_str());
   delete mr;
 
-  Gui2Caption *title = new Gui2Caption(wm, "mgr_main_title", 8, 7, 84, 5, "Career");
-  this->AddView(title);
-  title->Show();
+  BuildNavigation();
+  BuildManagerView();
+  BuildClubView();
+  BuildMatchesView();
+  BuildStandingsView();
+  ShowActiveView();
+  this->Show();
+}
 
-  std::stringstream hdr;
-  hdr << mgrName << "  |  Age " << mgrAge
-      << "  |  " << mgrNat << "  |  " << mgrGender
-      << "  |  Club: " << clubName;
-  Gui2Caption *header = new Gui2Caption(wm, "mgr_main_hdr", 8, 14, 84, 4, hdr.str());
-  this->AddView(header);
-  header->Show();
+ManagerMainScreenPage::~ManagerMainScreenPage() {}
 
-  grid = new Gui2Grid(wm, "mgr_main_grid", 8, 22, 84, 60);
+void ManagerMainScreenPage::BuildNavigation() {
+  navGrid = new Gui2Grid(windowManager, "mgr_nav_grid", 2, 2, 96, 6);
 
-  Gui2Caption *pTitle = new Gui2Caption(wm, "mgr_players_title", 0, 0, 60, 3, "Squad");
-  grid->AddView(pTitle, 0, 0);
+  managerButton   = new Gui2Button(windowManager, "mgr_nav_manager",    0, 0, 14, 4, "Manager");
+  clubButton      = new Gui2Button(windowManager, "mgr_nav_club",       0, 0, 14, 4, "Club");
+  matchesButton   = new Gui2Button(windowManager, "mgr_nav_matches",    0, 0, 14, 4, "Matches");
+  standingsButton = new Gui2Button(windowManager, "mgr_nav_standings",  0, 0, 14, 4, "Standings");
+  playMatchButton = new Gui2Button(windowManager, "mgr_nav_playmatch",  0, 0, 14, 4, "Play Match");
+  mainMenuButton  = new Gui2Button(windowManager, "mgr_nav_mainmenu",   0, 0, 14, 4, "Main Menu");
+
+  managerButton->sig_OnClick.connect(
+    boost::bind(&ManagerMainScreenPage::OpenTab, this, 0));
+  clubButton->sig_OnClick.connect(
+    boost::bind(&ManagerMainScreenPage::OpenTab, this, 1));
+  matchesButton->sig_OnClick.connect(
+    boost::bind(&ManagerMainScreenPage::OpenTab, this, 2));
+  standingsButton->sig_OnClick.connect(
+    boost::bind(&ManagerMainScreenPage::OpenTab, this, 3));
+  playMatchButton->sig_OnClick.connect(
+    boost::bind(&ManagerMainScreenPage::PlayMatch, this));
+  mainMenuButton->sig_OnClick.connect(
+    boost::bind(&ManagerMainScreenPage::BackToMainMenu, this));
+
+  navGrid->AddView(managerButton,   0, 0);
+  navGrid->AddView(clubButton,      0, 1);
+  navGrid->AddView(matchesButton,   0, 2);
+  navGrid->AddView(standingsButton, 0, 3);
+  navGrid->AddView(playMatchButton, 0, 4);
+  navGrid->AddView(mainMenuButton,  0, 5);
+
+  navGrid->UpdateLayout(0.25, 0.25, 0.25, 0.25);
+  this->AddView(navGrid);
+  navGrid->Show();
+}
+
+void ManagerMainScreenPage::BuildManagerView() {
+  managerGrid = new Gui2Grid(windowManager, "mgr_view_manager", 2, 10, 96, 80);
+
+  std::stringstream q;
+  q << "SELECT managers.name, managers.age, managers.nationality, managers.gender, teams.name"
+    << " FROM managers LEFT JOIN teams ON managers.club_id = teams.id"
+    << " WHERE managers.id = " << managerId << " LIMIT 1;";
+  DatabaseResult *r = GetDB()->Query(q.str());
+
+  std::string mgrName   = Cell(r, 0, 0);
+  std::string mgrAge    = Cell(r, 0, 1);
+  std::string mgrNat    = Cell(r, 0, 2);
+  std::string mgrGender = Cell(r, 0, 3);
+  std::string clubName  = Cell(r, 0, 4);
+  delete r;
+
+  int row = 0;
+  managerGrid->AddView(new Gui2Caption(windowManager, "mgr_v_title",  0, 0, 60, 4, "Manager Profile"), row++, 0);
+  managerGrid->AddView(new Gui2Caption(windowManager, "mgr_v_name",   0, 0, 60, 3, "Name: " + mgrName), row++, 0);
+  managerGrid->AddView(new Gui2Caption(windowManager, "mgr_v_age",    0, 0, 60, 3, "Age: " + mgrAge), row++, 0);
+  managerGrid->AddView(new Gui2Caption(windowManager, "mgr_v_nat",    0, 0, 60, 3, "Nationality: " + mgrNat), row++, 0);
+  managerGrid->AddView(new Gui2Caption(windowManager, "mgr_v_gender", 0, 0, 60, 3, "Gender: " + mgrGender), row++, 0);
+  managerGrid->AddView(new Gui2Caption(windowManager, "mgr_v_club",   0, 0, 60, 3, "Club: " + clubName), row++, 0);
+
+  managerGrid->UpdateLayout(0.25, 0.25, 0.25, 0.25);
+  this->AddView(managerGrid);
+  managerGrid->Hide();
+}
+
+void ManagerMainScreenPage::BuildClubView() {
+  clubGrid = new Gui2Grid(windowManager, "mgr_view_club", 2, 10, 96, 80);
+
+  std::stringstream cq;
+  cq << "SELECT name, shortname FROM teams WHERE id = " << clubId << " LIMIT 1;";
+  DatabaseResult *cr = GetDB()->Query(cq.str());
+  std::string clubName  = Cell(cr, 0, 0);
+  std::string clubShort = Cell(cr, 0, 1);
+  delete cr;
+
+  int row = 0;
+  std::string clubHeader = clubShort.empty() ? clubName : clubShort + " - " + clubName;
+  clubGrid->AddView(new Gui2Caption(windowManager, "mgr_c_title", 0, 0, 60, 4, clubHeader), row++, 0);
+  clubGrid->AddView(new Gui2Caption(windowManager, "mgr_c_squad", 0, 0, 60, 3, "Squad"), row++, 0);
 
   std::stringstream pq;
   pq << "SELECT firstname, lastname, role, age, base_stat"
      << " FROM players WHERE team_id = " << clubId
-     << " ORDER BY formationorder ASC, base_stat DESC LIMIT 18;";
-
+     << " ORDER BY formationorder ASC, base_stat DESC LIMIT 22;";
   DatabaseResult *pr = GetDB()->Query(pq.str());
   for (unsigned int i = 0; i < pr->data.size(); i++) {
     std::stringstream line;
@@ -488,31 +552,152 @@ ManagerMainScreenPage::ManagerMainScreenPage(
          << "  " << Cell(pr, i, 2)
          << "  Age " << Cell(pr, i, 3)
          << "  " << Cell(pr, i, 4);
-    Gui2Caption *pl = new Gui2Caption(wm,
-      "mgr_player_" + int_to_str(i), 0, 0, 60, 3, line.str());
-    grid->AddView(pl, (int)i + 1, 0);
+    clubGrid->AddView(new Gui2Caption(windowManager,
+      "mgr_c_player_" + int_to_str(i), 0, 0, 60, 3, line.str()), row++, 0);
   }
   delete pr;
 
-  playMatchButton = new Gui2Button(wm, "mgr_play_match",  0, 0, 24, 3, "Play Match");
-  backButton      = new Gui2Button(wm, "mgr_main_back",   0, 0, 24, 3, "Main Menu");
-
-  playMatchButton->sig_OnClick.connect(
-    boost::bind(&ManagerMainScreenPage::PlayMatch, this));
-  backButton->sig_OnClick.connect(
-    boost::bind(&ManagerMainScreenPage::BackToMainMenu, this));
-
-  grid->AddView(playMatchButton, 0, 1);
-  grid->AddView(backButton,      1, 1);
-
-  grid->UpdateLayout(0.25, 0.25, 0.25, 0.25);
-  this->AddView(grid);
-  grid->Show();
-  playMatchButton->SetFocus();
-  this->Show();
+  clubGrid->UpdateLayout(0.25, 0.25, 0.25, 0.25);
+  this->AddView(clubGrid);
+  clubGrid->Hide();
 }
 
-ManagerMainScreenPage::~ManagerMainScreenPage() {}
+void ManagerMainScreenPage::BuildMatchesView() {
+  matchesGrid = new Gui2Grid(windowManager, "mgr_view_matches", 2, 10, 96, 80);
+
+  std::stringstream q;
+  q << "SELECT leagues.name, fixtures.matchday, fixtures.round,"
+    << " home.shortname, away.shortname, fixtures.status,"
+    << " fixtures.home_score, fixtures.away_score"
+    << " FROM fixtures"
+    << " JOIN leagues ON fixtures.league_id = leagues.id"
+    << " JOIN teams home ON fixtures.home_team_id = home.id"
+    << " JOIN teams away ON fixtures.away_team_id = away.id"
+    << " WHERE fixtures.manager_id = " << managerId
+    << " ORDER BY leagues.id ASC, fixtures.matchday ASC, fixtures.round ASC;";
+  DatabaseResult *r = GetDB()->Query(q.str());
+
+  int row = 0;
+  std::string lastLeague = "";
+  for (unsigned int i = 0; i < r->data.size(); i++) {
+    std::string league   = Cell(r, i, 0);
+    std::string matchday = Cell(r, i, 1);
+    std::string round    = Cell(r, i, 2);
+    std::string home     = Cell(r, i, 3);
+    std::string away     = Cell(r, i, 4);
+    std::string status   = Cell(r, i, 5);
+    std::string hscore   = Cell(r, i, 6);
+    std::string ascore   = Cell(r, i, 7);
+
+    if (league != lastLeague) {
+      matchesGrid->AddView(new Gui2Caption(windowManager,
+        "mgr_m_league_" + int_to_str(row), 0, 0, 90, 4, league), row++, 0);
+      lastLeague = league;
+    }
+
+    std::stringstream line;
+    line << "MD " << matchday << " R" << round
+         << "  " << home << " vs " << away
+         << "  " << status;
+    if (status != "scheduled" && !hscore.empty()) {
+      line << "  " << hscore << " - " << ascore;
+    }
+    matchesGrid->AddView(new Gui2Caption(windowManager,
+      "mgr_m_fix_" + int_to_str(row), 0, 0, 90, 3, line.str()), row++, 0);
+  }
+  delete r;
+
+  if (row == 0) {
+    matchesGrid->AddView(new Gui2Caption(windowManager,
+      "mgr_m_empty", 0, 0, 90, 3, "No fixtures generated yet."), 0, 0);
+  }
+
+  matchesGrid->UpdateLayout(0.25, 0.25, 0.25, 0.25);
+  this->AddView(matchesGrid);
+  matchesGrid->Hide();
+}
+
+void ManagerMainScreenPage::BuildStandingsView() {
+  standingsGrid = new Gui2Grid(windowManager, "mgr_view_standings", 2, 10, 96, 80);
+
+  std::stringstream q;
+  q << "SELECT leagues.name, teams.shortname,"
+    << " standings.played, standings.won, standings.drawn, standings.lost,"
+    << " standings.goals_for, standings.goals_against,"
+    << " standings.goal_difference, standings.points"
+    << " FROM standings"
+    << " JOIN leagues ON standings.league_id = leagues.id"
+    << " JOIN teams ON standings.team_id = teams.id"
+    << " WHERE standings.manager_id = " << managerId
+    << " ORDER BY leagues.id ASC, standings.points DESC,"
+    << " standings.goal_difference DESC, standings.goals_for DESC;";
+  DatabaseResult *r = GetDB()->Query(q.str());
+
+  int row = 0;
+  std::string lastLeague = "";
+  for (unsigned int i = 0; i < r->data.size(); i++) {
+    std::string league = Cell(r, i, 0);
+    std::string team   = Cell(r, i, 1);
+    std::string played = Cell(r, i, 2);
+    std::string won    = Cell(r, i, 3);
+    std::string drawn  = Cell(r, i, 4);
+    std::string lost   = Cell(r, i, 5);
+    std::string gf     = Cell(r, i, 6);
+    std::string ga     = Cell(r, i, 7);
+    std::string gd     = Cell(r, i, 8);
+    std::string pts    = Cell(r, i, 9);
+
+    if (league != lastLeague) {
+      standingsGrid->AddView(new Gui2Caption(windowManager,
+        "mgr_s_league_" + int_to_str(row), 0, 0, 90, 4, league), row++, 0);
+      lastLeague = league;
+    }
+
+    std::stringstream line;
+    line << team
+         << "  P " << played
+         << "  W " << won
+         << "  D " << drawn
+         << "  L " << lost
+         << "  GF " << gf
+         << "  GA " << ga
+         << "  GD " << gd
+         << "  Pts " << pts;
+    standingsGrid->AddView(new Gui2Caption(windowManager,
+      "mgr_s_row_" + int_to_str(row), 0, 0, 90, 3, line.str()), row++, 0);
+  }
+  delete r;
+
+  if (row == 0) {
+    standingsGrid->AddView(new Gui2Caption(windowManager,
+      "mgr_s_empty", 0, 0, 90, 3, "No standings generated yet."), 0, 0);
+  }
+
+  standingsGrid->UpdateLayout(0.25, 0.25, 0.25, 0.25);
+  this->AddView(standingsGrid);
+  standingsGrid->Hide();
+}
+
+void ManagerMainScreenPage::OpenTab(int tab) {
+  if (tab < 0 || tab > 3) return;
+  activeTab = tab;
+  ShowActiveView();
+}
+
+void ManagerMainScreenPage::ShowActiveView() {
+  managerGrid->Hide();
+  clubGrid->Hide();
+  matchesGrid->Hide();
+  standingsGrid->Hide();
+
+  switch (activeTab) {
+    case 0: managerGrid->Show();   managerButton->SetFocus();   break;
+    case 1: clubGrid->Show();      clubButton->SetFocus();      break;
+    case 2: matchesGrid->Show();   matchesButton->SetFocus();   break;
+    case 3: standingsGrid->Show(); standingsButton->SetFocus(); break;
+    default: managerGrid->Show();  managerButton->SetFocus();   break;
+  }
+}
 
 void ManagerMainScreenPage::PlayMatch() {
   if (clubId == 0) return;
