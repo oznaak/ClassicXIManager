@@ -27,6 +27,7 @@
 #include "league/league_standings.hpp"
 #include "league/league_system.hpp"
 #include "league/league_team.hpp"
+#include "managercareer.hpp"
 
 #include "../main.hpp"
 
@@ -150,6 +151,25 @@ Gui2Page *PageFactory::CreatePage(const Gui2PageData &pageData) {
 
     case e_PageID_Audio:
       page = new AudioPage(windowManager, pageData);
+      break;
+
+
+    // manager career mode
+
+    case e_PageID_Manager_CreateProfile:
+      page = new ManagerCreateProfilePage(windowManager, pageData);
+      break;
+
+    case e_PageID_Manager_SelectLeague:
+      page = new ManagerSelectLeaguePage(windowManager, pageData);
+      break;
+
+    case e_PageID_Manager_SelectClub:
+      page = new ManagerSelectClubPage(windowManager, pageData);
+      break;
+
+    case e_PageID_Manager_MainScreen:
+      page = new ManagerMainScreenPage(windowManager, pageData);
       break;
 
 

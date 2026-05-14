@@ -97,7 +97,7 @@ MainMenuPage::MainMenuPage(Gui2WindowManager *windowManager, const Gui2PageData 
   buttons.push_back(new Gui2Button(windowManager, "button_main_settings", 0, 0, 24, 3, "Settings"));
   buttons.push_back(new Gui2Button(windowManager, "button_main_quit",     0, 0, 24, 3, "Quit"));
 
-  buttons.at(0)->sig_OnClick.connect(boost::bind(&MainMenuPage::GoNewManagerGame, this));
+  buttons.at(0)->sig_OnClick.connect(boost::bind(&MainMenuPage::GoCreateManagerProfile, this));
   buttons.at(2)->sig_OnClick.connect(boost::bind(&MainMenuPage::GoSettings, this));
   buttons.at(3)->sig_OnClick.connect(boost::bind(&MenuTask::QuitGame, GetMenuTask()));
 
@@ -138,6 +138,13 @@ void MainMenuPage::GoNewManagerGame() {
   Properties properties;
   windowManager->GetPageFactory()->CreatePage((int)e_PageID_LoadingMatch, properties, 0);
 
+  delete this;
+}
+
+void MainMenuPage::GoCreateManagerProfile() {
+  this->Exit();
+  Properties properties;
+  windowManager->GetPageFactory()->CreatePage((int)e_PageID_Manager_CreateProfile, properties, 0);
   delete this;
 }
 

@@ -39,6 +39,11 @@ enum e_PageID {
   e_PageID_Graphics,
   e_PageID_Audio,
 
+  e_PageID_Manager_CreateProfile,
+  e_PageID_Manager_SelectLeague,
+  e_PageID_Manager_SelectClub,
+  e_PageID_Manager_MainScreen,
+
   e_PageID_League_Start,
   e_PageID_League_Start_Load,
   e_PageID_League_Start_New,

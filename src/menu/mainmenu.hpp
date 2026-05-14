@@ -101,6 +101,7 @@ class MainMenuPage : public Gui2Page {
     virtual ~MainMenuPage();
 
     void GoNewManagerGame();
+    void GoCreateManagerProfile();
     void GoControllerSelect();
     void GoLeague();
     void GoSettings();
