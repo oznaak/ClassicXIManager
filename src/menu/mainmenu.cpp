@@ -101,7 +101,7 @@ MainMenuPage::MainMenuPage(Gui2WindowManager *windowManager, const Gui2PageData 
   buttons.at(2)->sig_OnClick.connect(boost::bind(&MainMenuPage::GoSettings, this));
   buttons.at(3)->sig_OnClick.connect(boost::bind(&MenuTask::QuitGame, GetMenuTask()));
 
-  buttons.at(1)->SetActive(false);
+  buttons.at(1)->sig_OnClick.connect(boost::bind(&MainMenuPage::GoLoadGame, this));
 
   grid = new Gui2Grid(windowManager, "grid_main", 38, 50, 24, 28);
 
@@ -145,6 +145,13 @@ void MainMenuPage::GoCreateManagerProfile() {
   this->Exit();
   Properties properties;
   windowManager->GetPageFactory()->CreatePage((int)e_PageID_Manager_CreateProfile, properties, 0);
+  delete this;
+}
+
+void MainMenuPage::GoLoadGame() {
+  this->Exit();
+  Properties properties;
+  windowManager->GetPageFactory()->CreatePage((int)e_PageID_Manager_LoadGame, properties, 0);
   delete this;
 }
 

@@ -102,6 +102,7 @@ class MainMenuPage : public Gui2Page {
 
     void GoNewManagerGame();
     void GoCreateManagerProfile();
+    void GoLoadGame();
     void GoControllerSelect();
     void GoLeague();
     void GoSettings();

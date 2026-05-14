@@ -65,6 +65,20 @@ class ManagerSelectClubPage : public Gui2Page {
   Gui2Button *backButton;
 };
 
+class ManagerLoadGamePage : public Gui2Page {
+ public:
+  ManagerLoadGamePage(Gui2WindowManager *windowManager, const Gui2PageData &pageData);
+  virtual ~ManagerLoadGamePage();
+
+  void LoadManager(int managerId);
+  void Back();
+
+ protected:
+  Gui2Grid *grid;
+  std::vector<Gui2Button *> managerButtons;
+  Gui2Button *backButton;
+};
+
 class ManagerMainScreenPage : public Gui2Page {
  public:
   ManagerMainScreenPage(Gui2WindowManager *windowManager, const Gui2PageData &pageData);

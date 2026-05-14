@@ -408,3 +408,88 @@ void ManagerMainScreenPage::BackToMainMenu() {
   windowManager->GetPageFactory()->CreatePage((int)e_PageID_MainMenu, props, 0);
   delete this;
 }
+
+/* ---- Load Game ---- */
+
+ManagerLoadGamePage::ManagerLoadGamePage(
+  Gui2WindowManager *windowManager,
+  const Gui2PageData &pageData
+) : Gui2Page(windowManager, pageData) {
+  EnsureManagerTable();
+
+  Gui2Caption *title = new Gui2Caption(windowManager, "manager_load_title", 20, 8, 60, 6, "Load Game");
+  this->AddView(title);
+  title->Show();
+
+  grid = new Gui2Grid(windowManager, "manager_load_grid", 22, 18, 56, 66);
+
+  DatabaseResult *result = GetDB()->Query(
+    "SELECT managers.id, managers.name, managers.age, managers.nationality, managers.gender, "
+    "teams.name "
+    "FROM managers "
+    "LEFT JOIN teams ON managers.club_id = teams.id "
+    "ORDER BY managers.id DESC "
+    "LIMIT 20;"
+  );
+
+  if (result->data.size() == 0) {
+    Gui2Caption *emptyText = new Gui2Caption(windowManager, "manager_load_empty", 0, 0, 54, 3, "No saved managers found.");
+    grid->AddView(emptyText, 0, 0);
+  }
+
+  for (unsigned int i = 0; i < result->data.size(); i++) {
+    int managerId = atoi(Cell(result, i, 0).c_str());
+    std::string managerName = Cell(result, i, 1);
+    std::string age = Cell(result, i, 2);
+    std::string nationality = Cell(result, i, 3);
+    std::string gender = Cell(result, i, 4);
+    std::string clubName = Cell(result, i, 5);
+
+    if (managerName.empty()) managerName = "Unnamed Manager";
+    if (clubName.empty()) clubName = "No Club";
+
+    std::stringstream label;
+    label << managerName << " | " << clubName << " | Age " << age << " | " << nationality << " | " << gender;
+
+    Gui2Button *button = new Gui2Button(windowManager, "manager_load_button_" + Cell(result, i, 0), 0, 0, 54, 3, label.str());
+    button->sig_OnClick.connect(boost::bind(&ManagerLoadGamePage::LoadManager, this, managerId));
+    managerButtons.push_back(button);
+    grid->AddView(button, i, 0);
+  }
+
+  delete result;
+
+  backButton = new Gui2Button(windowManager, "manager_load_back", 0, 0, 54, 3, "Back");
+  backButton->sig_OnClick.connect(boost::bind(&ManagerLoadGamePage::Back, this));
+  grid->AddView(backButton, managerButtons.size() + 2, 0);
+
+  grid->UpdateLayout(0.25, 0.25, 0.25, 0.25);
+  this->AddView(grid);
+  grid->Show();
+
+  if (managerButtons.size() > 0) {
+    managerButtons.at(0)->SetFocus();
+  } else {
+    backButton->SetFocus();
+  }
+
+  this->Show();
+}
+
+ManagerLoadGamePage::~ManagerLoadGamePage() {}
+
+void ManagerLoadGamePage::LoadManager(int managerId) {
+  Properties properties;
+  properties.Set("managerId", managerId);
+  this->Exit();
+  windowManager->GetPageFactory()->CreatePage((int)e_PageID_Manager_MainScreen, properties, 0);
+  delete this;
+}
+
+void ManagerLoadGamePage::Back() {
+  Properties properties;
+  properties.Set("selectedButtonID", 1);
+  this->Exit();
+  windowManager->GetPageFactory()->CreatePage((int)e_PageID_MainMenu, properties, 0);
+  delete this;
+}

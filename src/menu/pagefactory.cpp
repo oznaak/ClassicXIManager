@@ -172,6 +172,10 @@ Gui2Page *PageFactory::CreatePage(const Gui2PageData &pageData) {
       page = new ManagerMainScreenPage(windowManager, pageData);
       break;
 
+    case e_PageID_Manager_LoadGame:
+      page = new ManagerLoadGamePage(windowManager, pageData);
+      break;
+
 
     // league mode
 

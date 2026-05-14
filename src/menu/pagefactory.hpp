@@ -43,6 +43,7 @@ enum e_PageID {
   e_PageID_Manager_SelectLeague,
   e_PageID_Manager_SelectClub,
   e_PageID_Manager_MainScreen,
+  e_PageID_Manager_LoadGame,
 
   e_PageID_League_Start,
   e_PageID_League_Start_Load,
