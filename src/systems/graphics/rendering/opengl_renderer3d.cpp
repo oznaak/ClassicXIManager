@@ -16,6 +16,7 @@
 // i do not offer support, so don't ask. to be used for inspiration :)
 
 #include "opengl_renderer3d.hpp"
+#include "menu/imgui_career.hpp"
 
 #ifdef __APPLE__
 #define GL_SILENCE_DEPRECATION
@@ -76,18 +77,7 @@ struct GLfunctions {
       ImGui_ImplSDL2_NewFrame();
       ImGui::NewFrame();
 
-      ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_Always);
-      ImGui::SetNextWindowSize(ImVec2(340, 50), ImGuiCond_Always);
-      ImGui::Begin("##cm_overlay",
-                   nullptr,
-                   ImGuiWindowFlags_NoResize |
-                   ImGuiWindowFlags_NoMove |
-                   ImGuiWindowFlags_NoCollapse |
-                   ImGuiWindowFlags_NoTitleBar |
-                   ImGuiWindowFlags_NoDecoration);
-      ImGui::TextColored(ImVec4(0.27f, 0.75f, 0.40f, 1.0f),
-                         "Classic Manager  ImGui layer active");
-      ImGui::End();
+      RenderImGuiCareerHub();
 
       ImGui::Render();
       ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
@@ -2346,6 +2336,22 @@ struct GLfunctions {
       if (isMessage) {
         if (!message->Handle(this)) quit = true;
         message.reset();
+      }
+
+      // Process deferred ImGui actions here, after Handle() / SwapBuffers() returns.
+      // Calling page transitions from inside Handle() deadlocks because LoadingMatchPage
+      // sends a synchronous message back to this thread while it is still in Handle().
+      // This location mirrors where Gui2 button callbacks fire (SDL event loop).
+      if (g_CareerHub.pendingAction != 0) {
+        int action = g_CareerHub.pendingAction;
+        g_CareerHub.pendingAction = 0;
+        if (action == 1 && g_CareerHub.onPlayMatch) {
+          printf("[IMGUI MANAGER] Processing Play Match action\n");
+          g_CareerHub.onPlayMatch();
+        } else if (action == 2 && g_CareerHub.onMainMenu) {
+          printf("[IMGUI MANAGER] Processing Main Menu action\n");
+          g_CareerHub.onMainMenu();
+        }
       }
 
     }

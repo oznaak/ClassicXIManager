@@ -485,6 +485,7 @@ set(MENU_HEADERS
    src/menu/controllerselect.hpp
    src/menu/mainmenu.hpp
    src/menu/managercareer.hpp
+   src/menu/imgui_career.hpp
    src/menu/menuscene.hpp
    src/menu/visualoptions.hpp
    src/menu/credits.hpp
@@ -523,6 +524,7 @@ set(MENU_SOURCES
    src/menu/controllerselect.cpp
    src/menu/mainmenu.cpp
    src/menu/managercareer.cpp
+   src/menu/imgui_career.cpp
    src/menu/ingame/radar.cpp
    src/menu/ingame/tacticsdebug.cpp
    src/menu/ingame/gamepage.cpp

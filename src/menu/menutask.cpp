@@ -89,6 +89,7 @@ MenuTask::MenuTask(float aspectRatio, float margin, TTF_Font *defaultFont, TTF_F
   queuedFixture->team1KitNum = 1;
   queuedFixture->team2KitNum = 2;
 
+  managerMatchPending = false;
   menuAction = e_MenuAction_Menu;
 
 }
@@ -104,6 +105,17 @@ MenuTask::~MenuTask() {
 void MenuTask::ProcessPhase() {
 
   Gui2Task::ProcessPhase();
+
+  // Manager match start: ManagerMainScreenPage already Exit()'d itself from the GL thread.
+  // We create LoadingMatchPage here (main thread) so image loading via ObjectFactory is safe.
+  if (managerMatchPending) {
+    managerMatchPending = false;
+    printf("[MENUTASK] Creating LoadingMatchPage from MenuTask\n");
+    Properties properties;
+    windowManager->GetPageFactory()->CreatePage((int)e_PageID_LoadingMatch, properties, 0);
+    printf("[MENUTASK] LoadingMatchPage created\n");
+    return;
+  }
 
   if (menuAction == e_MenuAction_Menu) {
 

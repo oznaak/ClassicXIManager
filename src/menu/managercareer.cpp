@@ -1,4 +1,5 @@
 #include "managercareer.hpp"
+#include "imgui_career.hpp"
 #include "pagefactory.hpp"
 #include "menutask.hpp"
 
@@ -440,7 +441,13 @@ void ManagerSelectClubPage::Back() {
 
 ManagerMainScreenPage::ManagerMainScreenPage(
   Gui2WindowManager *wm, const Gui2PageData &pd
-) : Gui2Page(wm, pd) {
+) : Gui2Page(wm, pd),
+    navGrid(nullptr), managerGrid(nullptr), clubGrid(nullptr),
+    matchesGrid(nullptr), standingsGrid(nullptr),
+    managerButton(nullptr), clubButton(nullptr),
+    matchesButton(nullptr), standingsButton(nullptr),
+    playMatchButton(nullptr), mainMenuButton(nullptr)
+{
   managerId = pd.properties->GetInt("managerId");
   clubId    = 0;
   activeTab = 0;
@@ -451,16 +458,29 @@ ManagerMainScreenPage::ManagerMainScreenPage(
   clubId = atoi(Cell(mr, 0, 0).c_str());
   delete mr;
 
-  BuildNavigation();
-  BuildManagerView();
-  BuildClubView();
-  BuildMatchesView();
-  BuildStandingsView();
-  ShowActiveView();
-  this->Show();
+  static const bool useImGuiCareerHub = true;
+
+  if (useImGuiCareerHub) {
+    // Wire ImGui action callbacks before loading so they are ready when active=true.
+    g_CareerHub.onPlayMatch = boost::bind(&ManagerMainScreenPage::PlayMatch, this);
+    g_CareerHub.onMainMenu  = boost::bind(&ManagerMainScreenPage::BackToMainMenu, this);
+    g_CareerHub.LoadFromDB(managerId, clubId);
+    this->Show();
+  } else {
+    BuildNavigation();
+    BuildManagerView();
+    BuildClubView();
+    BuildMatchesView();
+    BuildStandingsView();
+    ShowActiveView();
+    this->Show();
+    g_CareerHub.LoadFromDB(managerId, clubId);
+  }
 }
 
-ManagerMainScreenPage::~ManagerMainScreenPage() {}
+ManagerMainScreenPage::~ManagerMainScreenPage() {
+  g_CareerHub.Clear();
+}
 
 void ManagerMainScreenPage::BuildNavigation() {
   navGrid = new Gui2Grid(windowManager, "mgr_nav_grid", 2, 2, 96, 6);
@@ -702,20 +722,26 @@ void ManagerMainScreenPage::ShowActiveView() {
 void ManagerMainScreenPage::PlayMatch() {
   if (clubId == 0) return;
 
+  printf("[IMGUI MANAGER] Setting up controller sides\n");
   std::vector<SideSelection> sides;
   GetMenuTask()->SetControllerSetup(sides);
 
   std::string team1 = int_to_str(clubId);
   std::string team2 = (clubId == 8) ? "3" : "8";
+  printf("[IMGUI MANAGER] Setting teams: %s vs %s\n", team1.c_str(), team2.c_str());
   GetMenuTask()->SetTeamIDs(team1, team2);
 
   GetConfiguration()->Set("manager_mode",        1.0f);
   GetConfiguration()->Set("manager_ai_difficulty", 1.0f);
   GetConfiguration()->Set("match_difficulty",    1.0f);
 
-  Properties props;
+  // Do NOT call CreatePage(LoadingMatch) here — this runs from the GL thread.
+  // LoadingMatchPage constructor calls LoadImage which needs the main-thread ObjectFactory.
+  // Calling it from the GL thread crashes. Queue it for MenuTask::ProcessPhase (main thread).
+  printf("[IMGUI MANAGER] Queued match start in MenuTask\n");
+  GetMenuTask()->RequestManagerMatchStart();
+
   this->Exit();
-  windowManager->GetPageFactory()->CreatePage((int)e_PageID_LoadingMatch, props, 0);
   delete this;
 }
 
