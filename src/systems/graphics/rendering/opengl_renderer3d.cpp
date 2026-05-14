@@ -56,7 +56,7 @@ struct GLfunctions {
 
   GLfunctions mapping;
 
-  OpenGLRenderer3D::OpenGLRenderer3D() : context(0), contextIsActive(true) {
+  OpenGLRenderer3D::OpenGLRenderer3D() : context(0), contextIsActive(true), imguiInitialized(false) {
     FOV = 45;
     overallBrightness = 128;
 
@@ -71,6 +71,27 @@ struct GLfunctions {
   };
 
   void OpenGLRenderer3D::SwapBuffers() {
+    if (imguiInitialized) {
+      ImGui_ImplOpenGL3_NewFrame();
+      ImGui_ImplSDL2_NewFrame();
+      ImGui::NewFrame();
+
+      ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_Always);
+      ImGui::SetNextWindowSize(ImVec2(340, 50), ImGuiCond_Always);
+      ImGui::Begin("##cm_overlay",
+                   nullptr,
+                   ImGuiWindowFlags_NoResize |
+                   ImGuiWindowFlags_NoMove |
+                   ImGuiWindowFlags_NoCollapse |
+                   ImGuiWindowFlags_NoTitleBar |
+                   ImGuiWindowFlags_NoDecoration);
+      ImGui::TextColored(ImVec4(0.27f, 0.75f, 0.40f, 1.0f),
+                         "Classic Manager  ImGui layer active");
+      ImGui::End();
+
+      ImGui::Render();
+      ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+    }
     SDL_GL_SwapWindow(window);
   }
 
@@ -523,10 +544,26 @@ struct GLfunctions {
 
     mapping.glDisable(GL_MULTISAMPLE);
 
+    // Dear ImGui init
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGui::GetIO().IniFilename = nullptr; // no imgui.ini written to disk
+    ImGui_ImplSDL2_InitForOpenGL(window, context);
+    ImGui_ImplOpenGL3_Init("#version 130");
+    imguiInitialized = true;
+    printf("[ImGui] initialized\n");
+
     return true;
   }
 
   void OpenGLRenderer3D::Exit() {
+    if (imguiInitialized) {
+      ImGui_ImplOpenGL3_Shutdown();
+      ImGui_ImplSDL2_Shutdown();
+      ImGui::DestroyContext();
+      imguiInitialized = false;
+    }
+
     DeleteTexture(noiseTexID);
 
     std::map<std::string, Shader>::iterator shaderIter = shaders.begin();
@@ -2291,6 +2328,9 @@ struct GLfunctions {
           default:
             break;
         }
+
+        if (imguiInitialized)
+          ImGui_ImplSDL2_ProcessEvent(&event);
 
         if (contextIsActive) { // context must be active
           UserEventManager::GetInstance().InputSDLEvent(event);

@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.1)
+cmake_minimum_required(VERSION 3.11)
 
 set(PACKAGE GameplayFootball)
 
@@ -26,6 +26,24 @@ endif(UNIX)
 # SET(CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} ${GCC_COVERAGE_COMPILE_FLAGS} -fPIC -g -O3")
 # SET(CMAKE_C_FLAGS  "${CMAKE_C_FLAGS} -fPIC -O3 -g")
 
+# Dear ImGui — vendored via FetchContent
+include(FetchContent)
+FetchContent_Declare(
+  imgui
+  GIT_REPOSITORY https://github.com/ocornut/imgui.git
+  GIT_TAG        v1.91.8
+)
+FetchContent_MakeAvailable(imgui)
+
+set(IMGUI_SOURCES
+  ${imgui_SOURCE_DIR}/imgui.cpp
+  ${imgui_SOURCE_DIR}/imgui_draw.cpp
+  ${imgui_SOURCE_DIR}/imgui_tables.cpp
+  ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+  ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl2.cpp
+  ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
+)
+
 # Find required libraries
 FIND_PACKAGE(OpenGL REQUIRED)
 include_directories(${OPENGL_INCLUDE_DIR})
@@ -52,6 +70,8 @@ FIND_PACKAGE(SQLite3 REQUIRED)
 include_directories(${SQLite3_INCLUDE_DIRS})
 
 include_directories(${PROJECT_SOURCE_DIR}/src)
+include_directories(${imgui_SOURCE_DIR})
+include_directories(${imgui_SOURCE_DIR}/backends)
 
 # Include the sources
 include(sources.cmake)
@@ -91,13 +111,21 @@ set(OWN_LIBRARIES $<TARGET_OBJECTS:baselib> $<TARGET_OBJECTS:systemscommonlib>
 # Join all created static libraries into the single static one.
 add_library(blunted2 ${BLUNTED_CORE_SOURCES} ${BLUNTED_CORE_HEADERS} ${OWN_LIBRARIES})
 
+add_library(imguilib ${IMGUI_SOURCES})
+target_include_directories(imguilib PUBLIC
+  ${imgui_SOURCE_DIR}
+  ${imgui_SOURCE_DIR}/backends
+  ${SDL2_INCLUDE_DIR}
+  ${OPENGL_INCLUDE_DIR}
+)
+
 add_library(leaguelib ${LEAGUE_SOURCES} ${LEAGUE_HEADERS})
 add_library(gamelib ${GAME_SOURCES} ${GAME_HEADERS})
 add_library(hidlib ${HID_SOURCES} ${HID_HEADERS})
 add_library(menulib ${MENU_SOURCES} ${MENU_HEADERS})
 add_library(datalib ${DATA_SOURCES} ${DATA_HEADERS})
 
-set(LIBRARIES gamelib hidlib menulib datalib leaguelib blunted2
+set(LIBRARIES gamelib hidlib menulib datalib leaguelib blunted2 imguilib
    Boost::filesystem Boost::thread SQLite::SQLite3
    ${SDL2_IMAGE_LIBRARIES} ${SDL2_TTF_LIBRARIES} ${SDL2_GFX_LIBRARIES}
    ${SDL2_LIBRARIES} ${OPENAL_LIBRARY} dl m ${OPENGL_LIBRARIES})

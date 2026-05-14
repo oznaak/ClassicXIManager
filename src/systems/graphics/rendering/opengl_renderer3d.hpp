@@ -20,6 +20,10 @@
 
 #include "interface_renderer3d.hpp"
 
+#include "imgui.h"
+#include "imgui_impl_sdl2.h"
+#include "imgui_impl_opengl3.h"
+
 #ifdef WIN32
 #include <SDL2/SDL_syswm.h>
 #endif
@@ -135,6 +139,7 @@ namespace blunted {
       SDL_Window* window;
       int context_width, context_height, context_bpp;
       bool contextIsActive;
+      bool imguiInitialized;
 
       float cameraNear;
       float cameraFar;
