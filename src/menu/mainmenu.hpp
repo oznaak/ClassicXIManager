@@ -100,6 +100,7 @@ class MainMenuPage : public Gui2Page {
     MainMenuPage(Gui2WindowManager *windowManager, const Gui2PageData &pageData);
     virtual ~MainMenuPage();
 
+    void GoNewManagerGame();
     void GoControllerSelect();
     void GoLeague();
     void GoSettings();

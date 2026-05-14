@@ -86,53 +86,10 @@ MenuTask::MenuTask(float aspectRatio, float margin, TTF_Font *defaultFont, TTF_F
   PageFactory *pageFactory = new PageFactory();
   windowManager->SetPageFactory(pageFactory);
 
-  if (!QuickStart()) {
+  queuedFixture->team1KitNum = 1;
+  queuedFixture->team2KitNum = 2;
 
-    queuedFixture->team1KitNum = 1;
-    queuedFixture->team2KitNum = 2;
-
-    menuAction = e_MenuAction_Menu;
-
-  } else {
-
-    const bool managerMode =
-      GetConfiguration()->GetReal("manager_mode", 0.0f) > 0.5f;
-
-    if (managerMode) {
-      // Manager mode: no controllers assigned; both teams driven by AI.
-      queuedFixture->sides.clear();
-      printf("[MANAGER MODE] AI vs AI enabled. Controller sides cleared. sides=%lu\n",
-             queuedFixture->sides.size());
-    } else {
-      int size = GetControllers().size();
-      for (int i = 0; i < size; i++) {
-        SideSelection side;
-        side.controllerID = i;
-        if ((size > 1 && i == 1) || (size == 1 && i == 0)) {
-          side.side = -1;
-        } else {
-          side.side = 0;
-        }
-        queuedFixture->sides.push_back(side);
-      }
-    }
-
-    // 1 == ajax
-    // 2 == arsenal
-    // 3 == barcelona
-    // 4 == bayern
-    // 5 == borussia
-    // 6 == man utd
-    // 7 == psv
-    // 8 == real madrid
-    queuedFixture->teamID1 = "3";
-    queuedFixture->teamID2 = "8";
-    queuedFixture->team1KitNum = 2;
-    queuedFixture->team2KitNum = 2;
-
-    menuAction = e_MenuAction_Menu;
-
-  }
+  menuAction = e_MenuAction_Menu;
 
 }
 
@@ -177,11 +134,7 @@ void MenuTask::ProcessPhase() {
 }
 
 bool MenuTask::QuickStart() {
-  if (GetConfiguration()->GetReal("manager_mode", 0.0f) > 0.5f) {
-    return true;
-  }
-
-  return !IsReleaseVersion() && EnvironmentManager::GetInstance().GetTime_ms() < 10000; // after 5 seconds, quickstart disabled (== after > 0 matches have been played)
+  return false;
 }
 
 void MenuTask::QuitGame() {

@@ -92,56 +92,53 @@ MainMenuPage::MainMenuPage(Gui2WindowManager *windowManager, const Gui2PageData 
   this->AddView(title);
   title->Show();
 
-  buttons.push_back(new Gui2Button(windowManager, "button_main_start", 0, 0, 20, 3, "Match"));
-  buttons.push_back(new Gui2Button(windowManager, "button_main_cup", 0, 0, 20, 3, "Cup"));
-  buttons.push_back(new Gui2Button(windowManager, "button_main_league", 0, 0, 20, 3, "League"));
-  buttons.push_back(new Gui2Button(windowManager, "button_main_edit", 0, 0, 20, 3, "Editor"));
-  buttons.push_back(new Gui2Button(windowManager, "button_main_settings", 0, 0, 20, 3, "Settings"));
-  buttons.push_back(new Gui2Button(windowManager, "button_main_credits", 0, 0, 20, 3, "Credits"));
-  buttons.push_back(new Gui2Button(windowManager, "button_main_quit", 0, 0, 20, 3, "Exit"));
-  if (!IsReleaseVersion()) {
-    buttons.push_back(new Gui2Button(windowManager, "button_main_import", 0, 0, 20, 3, "Import FM"));
-  }
+  buttons.push_back(new Gui2Button(windowManager, "button_main_newgame",  0, 0, 24, 3, "New Game"));
+  buttons.push_back(new Gui2Button(windowManager, "button_main_loadgame", 0, 0, 24, 3, "Load Game"));
+  buttons.push_back(new Gui2Button(windowManager, "button_main_settings", 0, 0, 24, 3, "Settings"));
+  buttons.push_back(new Gui2Button(windowManager, "button_main_quit",     0, 0, 24, 3, "Quit"));
 
-  buttons.at(0)->sig_OnClick.connect(boost::bind(&MainMenuPage::GoControllerSelect, this));
-  buttons.at(2)->sig_OnClick.connect(boost::bind(&MainMenuPage::GoLeague, this));
-  buttons.at(4)->sig_OnClick.connect(boost::bind(&MainMenuPage::GoSettings, this));
-  buttons.at(5)->sig_OnClick.connect(boost::bind(&MainMenuPage::GoCredits, this));
-  if (!IsReleaseVersion()) {
-    buttons.at(6)->sig_OnClick.connect(boost::bind(&MenuTask::QuitGame, GetMenuTask()));
-  } else {
-    buttons.at(6)->sig_OnClick.connect(boost::bind(&MainMenuPage::GoOutro, this));
-  }
-  if (!IsReleaseVersion()) {
-    buttons.at(7)->sig_OnClick.connect(boost::bind(&MainMenuPage::GoImportDB, this));
-  }
+  buttons.at(0)->sig_OnClick.connect(boost::bind(&MainMenuPage::GoNewManagerGame, this));
+  buttons.at(2)->sig_OnClick.connect(boost::bind(&MainMenuPage::GoSettings, this));
+  buttons.at(3)->sig_OnClick.connect(boost::bind(&MenuTask::QuitGame, GetMenuTask()));
 
   buttons.at(1)->SetActive(false);
-  buttons.at(2)->SetActive(false);
-  buttons.at(3)->SetActive(false);
 
-  grid = new Gui2Grid(windowManager, "grid_main", 29.25, 52, 41.5, 40);
+  grid = new Gui2Grid(windowManager, "grid_main", 38, 50, 24, 28);
 
   grid->AddView(buttons.at(0), 0, 0);
   grid->AddView(buttons.at(1), 1, 0);
   grid->AddView(buttons.at(2), 2, 0);
   grid->AddView(buttons.at(3), 3, 0);
-  grid->AddView(buttons.at(4), 0, 1);
-  grid->AddView(buttons.at(5), 1, 1);
-  grid->AddView(buttons.at(6), 2, 1);
-  if (!IsReleaseVersion()) grid->AddView(buttons.at(7), 3, 1);
 
   grid->UpdateLayout(0.25, 0.25, 0.25, 0.25);
 
   this->AddView(grid);
   grid->Show();
 
-  buttons.at(pageData.properties->GetInt("selectedButtonID"))->SetFocus();
+  buttons.at(0)->SetFocus();
 
   this->Show();
 }
 
 MainMenuPage::~MainMenuPage() {
+}
+
+void MainMenuPage::GoNewManagerGame() {
+  this->Exit();
+
+  std::vector<SideSelection> sides;
+  GetMenuTask()->SetControllerSetup(sides);
+
+  GetMenuTask()->SetTeamIDs("3", "8");
+
+  GetConfiguration()->Set("manager_mode", 1.0f);
+  GetConfiguration()->Set("manager_ai_difficulty", 1.0f);
+  GetConfiguration()->Set("match_difficulty", 1.0f);
+
+  Properties properties;
+  windowManager->GetPageFactory()->CreatePage((int)e_PageID_LoadingMatch, properties, 0);
+
+  delete this;
 }
 
 void MainMenuPage::GoControllerSelect() {
