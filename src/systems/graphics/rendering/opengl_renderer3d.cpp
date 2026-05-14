@@ -378,7 +378,7 @@ struct GLfunctions {
 
 //#endif
 
-    window = SDL_CreateWindow("Gameplay Football", SDL_WINDOWPOS_UNDEFINED,
+    window = SDL_CreateWindow("Classic Manager", SDL_WINDOWPOS_UNDEFINED,
                                 SDL_WINDOWPOS_UNDEFINED, width, height,
                                 SDL_WINDOW_OPENGL /* | SDL_RESIZABLE*/ |
                                 (fullscreen ? SDL_WINDOW_FULLSCREEN : 0));
