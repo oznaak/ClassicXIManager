@@ -18,6 +18,136 @@ static std::string SqlEscape(const std::string &in) {
   return out;
 }
 
+static void EnsureCareerTables() {
+  DatabaseResult *r1 = GetDB()->Query(
+    "CREATE TABLE IF NOT EXISTS fixtures ("
+    "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "manager_id INTEGER NOT NULL,"
+    "league_id INTEGER NOT NULL,"
+    "season_year INTEGER NOT NULL,"
+    "round INTEGER NOT NULL,"
+    "matchday INTEGER NOT NULL,"
+    "home_team_id INTEGER NOT NULL,"
+    "away_team_id INTEGER NOT NULL,"
+    "status VARCHAR(32) DEFAULT 'scheduled',"
+    "home_score INTEGER,"
+    "away_score INTEGER,"
+    "stats_json TEXT DEFAULT '{}',"
+    "scorers_json TEXT DEFAULT '[]',"
+    "cards_json TEXT DEFAULT '[]',"
+    "played_at DATETIME,"
+    "created_at DATETIME DEFAULT CURRENT_TIMESTAMP"
+    ");"
+  );
+  delete r1;
+
+  DatabaseResult *r2 = GetDB()->Query(
+    "CREATE TABLE IF NOT EXISTS standings ("
+    "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "manager_id INTEGER NOT NULL,"
+    "league_id INTEGER NOT NULL,"
+    "team_id INTEGER NOT NULL,"
+    "played INTEGER DEFAULT 0,"
+    "won INTEGER DEFAULT 0,"
+    "drawn INTEGER DEFAULT 0,"
+    "lost INTEGER DEFAULT 0,"
+    "goals_for INTEGER DEFAULT 0,"
+    "goals_against INTEGER DEFAULT 0,"
+    "goal_difference INTEGER DEFAULT 0,"
+    "points INTEGER DEFAULT 0,"
+    "created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+    "UNIQUE(manager_id, league_id, team_id)"
+    ");"
+  );
+  delete r2;
+}
+
+static void DeleteCareerSeason(int managerId) {
+  std::stringstream q1;
+  q1 << "DELETE FROM fixtures WHERE manager_id = " << managerId << ";";
+  DatabaseResult *r1 = GetDB()->Query(q1.str());
+  delete r1;
+
+  std::stringstream q2;
+  q2 << "DELETE FROM standings WHERE manager_id = " << managerId << ";";
+  DatabaseResult *r2 = GetDB()->Query(q2.str());
+  delete r2;
+}
+
+static std::vector<int> GetLeagueTeamIds(int leagueId) {
+  std::vector<int> teamIds;
+  std::stringstream q;
+  q << "SELECT id FROM teams WHERE league_id = " << leagueId << " ORDER BY id;";
+  DatabaseResult *r = GetDB()->Query(q.str());
+  for (unsigned int i = 0; i < r->data.size(); i++) {
+    teamIds.push_back(atoi(r->data.at(i).at(0).c_str()));
+  }
+  delete r;
+  return teamIds;
+}
+
+static void InsertFixture(int managerId, int leagueId, int seasonYear,
+                          int round, int matchday,
+                          int homeTeamId, int awayTeamId) {
+  std::stringstream q;
+  q << "INSERT INTO fixtures"
+    << "(manager_id,league_id,season_year,round,matchday,home_team_id,away_team_id)"
+    << " VALUES("
+    << managerId << "," << leagueId << "," << seasonYear << ","
+    << round << "," << matchday << "," << homeTeamId << "," << awayTeamId
+    << ");";
+  DatabaseResult *r = GetDB()->Query(q.str());
+  delete r;
+}
+
+static void GenerateFixturesForLeague(int managerId, int leagueId,
+                                      int seasonYear,
+                                      const std::vector<int> &teamIds) {
+  printf("[CAREER] League %i teams: %lu\n", leagueId, (unsigned long)teamIds.size());
+  int pairIndex = 0;
+  for (unsigned int i = 0; i < teamIds.size(); i++) {
+    for (unsigned int j = i + 1; j < teamIds.size(); j++) {
+      InsertFixture(managerId, leagueId, seasonYear,
+                    1, pairIndex + 1,
+                    teamIds.at(i), teamIds.at(j));
+      InsertFixture(managerId, leagueId, seasonYear,
+                    2, pairIndex + 1,
+                    teamIds.at(j), teamIds.at(i));
+      pairIndex++;
+    }
+  }
+}
+
+static void GenerateStandingsForLeague(int managerId, int leagueId,
+                                       const std::vector<int> &teamIds) {
+  for (unsigned int i = 0; i < teamIds.size(); i++) {
+    std::stringstream q;
+    q << "INSERT OR IGNORE INTO standings(manager_id,league_id,team_id)"
+      << " VALUES(" << managerId << "," << leagueId << "," << teamIds.at(i) << ");";
+    DatabaseResult *r = GetDB()->Query(q.str());
+    delete r;
+  }
+}
+
+static void GenerateCareerSeason(int managerId) {
+  printf("[CAREER] Generating season for manager %i\n", managerId);
+  EnsureCareerTables();
+  DeleteCareerSeason(managerId);
+
+  const int seasonYear = 2025;
+
+  DatabaseResult *lr = GetDB()->Query("SELECT id FROM leagues ORDER BY id;");
+  for (unsigned int i = 0; i < lr->data.size(); i++) {
+    int leagueId = atoi(lr->data.at(i).at(0).c_str());
+    std::vector<int> teamIds = GetLeagueTeamIds(leagueId);
+    GenerateFixturesForLeague(managerId, leagueId, seasonYear, teamIds);
+    GenerateStandingsForLeague(managerId, leagueId, teamIds);
+  }
+  delete lr;
+
+  printf("[CAREER] Season generated for manager %i\n", managerId);
+}
+
 static void EnsureManagerTable() {
   DatabaseResult *r = GetDB()->Query(
     "CREATE TABLE IF NOT EXISTS managers ("
@@ -288,6 +418,8 @@ void ManagerSelectClubPage::StartCareer() {
     << " WHERE id = " << managerId << ";";
   DatabaseResult *r = GetDB()->Query(q.str());
   delete r;
+
+  GenerateCareerSeason(managerId);
 
   Properties props;
   props.Set("managerId", managerId);
