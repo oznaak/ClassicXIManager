@@ -32,10 +32,10 @@ namespace blunted {
 
     // start thread for renderer
     if (config.Get("graphics3d_renderer", "opengl") == "opengl") renderer3DTask = new OpenGLRenderer3D();
-    width = config.GetInt("context_x", 1280);
-    height = config.GetInt("context_y", 720);
+    width = config.GetInt("context_x", 1920);
+    height = config.GetInt("context_y", 1080);
     bpp = config.GetInt("context_bpp", 32);
-    bool fullscreen = config.GetBool("context_fullscreen", false);
+    bool fullscreen = config.GetBool("context_fullscreen", true);
     renderer3DTask->Run();
 
     boost::intrusive_ptr<Renderer3DMessage_CreateContext> createContext(new Renderer3DMessage_CreateContext(width, height, bpp, fullscreen));

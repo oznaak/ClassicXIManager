@@ -18,8 +18,8 @@ namespace blunted {
 
     supportedObjectTypes.push_back(e_ObjectType_Image2D);
 
-    width = config.GetInt("context_x", 1280);
-    height = config.GetInt("context_y", 720);
+    width = config.GetInt("context_x", 1920);
+    height = config.GetInt("context_y", 1080);
     bpp = config.GetInt("context_bpp", 32);
   }
 
