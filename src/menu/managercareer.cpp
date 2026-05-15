@@ -746,9 +746,9 @@ void ManagerMainScreenPage::PlayMatch() {
 }
 
 void ManagerMainScreenPage::BackToMainMenu() {
+  printf("[IMGUI MANAGER] Returning to main menu\n");
+  GetMenuTask()->RequestManagerMainMenuPage();
   this->Exit();
-  Properties props;
-  windowManager->GetPageFactory()->CreatePage((int)e_PageID_MainMenu, props, 0);
   delete this;
 }
 

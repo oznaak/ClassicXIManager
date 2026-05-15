@@ -76,9 +76,15 @@ class MenuTask : public Gui2Task {
       managerMatchPending = true;
     }
 
+    void RequestManagerMainMenuPage() {
+      printf("[MENUTASK] Manager main menu page requested\n");
+      managerMainMenuPending = true;
+    }
+
   protected:
     e_MenuAction menuAction;
     bool managerMatchPending;
+    bool managerMainMenuPending;
 
     Lockable<QueuedFixture> queuedFixture; // todo: we can probably unlock this stuff
 

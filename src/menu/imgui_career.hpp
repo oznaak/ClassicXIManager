@@ -10,7 +10,7 @@
 
 struct CareerHubState {
   bool active       = false;
-  int  activeTab    = 0; // 0=Manager 1=Club 2=Matches 3=Standings
+  int  activeTab    = 0; // 0=Overview 1=Manager 2=Club 3=Matches 4=Standings
   int  pendingAction = 0; // 0=none 1=playMatch 2=mainMenu
 
   std::function<void()> onPlayMatch;

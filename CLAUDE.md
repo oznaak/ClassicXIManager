@@ -59,6 +59,11 @@ or make from within Claude Code.** It will always fail.
 
 After every code patch, remind the user to build manually from their Arch terminal.
 
+Also
+
+ImGui buttons never execute scene/page transitions directly.
+They only set pending actions.
+Pending actions are consumed from safe update/menu code.
 ---
 
 ## Full clean build (run from your Arch terminal)

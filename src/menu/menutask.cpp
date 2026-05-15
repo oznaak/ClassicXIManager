@@ -89,7 +89,8 @@ MenuTask::MenuTask(float aspectRatio, float margin, TTF_Font *defaultFont, TTF_F
   queuedFixture->team1KitNum = 1;
   queuedFixture->team2KitNum = 2;
 
-  managerMatchPending = false;
+  managerMatchPending    = false;
+  managerMainMenuPending = false;
   menuAction = e_MenuAction_Menu;
 
 }
@@ -114,6 +115,16 @@ void MenuTask::ProcessPhase() {
     Properties properties;
     windowManager->GetPageFactory()->CreatePage((int)e_PageID_LoadingMatch, properties, 0);
     printf("[MENUTASK] LoadingMatchPage created\n");
+    return;
+  }
+
+  if (managerMainMenuPending) {
+    managerMainMenuPending = false;
+    printf("[MENUTASK] Creating MainMenu page inside existing MenuScene\n");
+    windowManager->GetPagePath()->Clear();
+    Properties properties;
+    windowManager->GetPageFactory()->CreatePage((int)e_PageID_MainMenu, properties, 0);
+    printf("[MENUTASK] MainMenu page created\n");
     return;
   }
 
