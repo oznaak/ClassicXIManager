@@ -317,7 +317,8 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
   if (!currentDate.empty() && clubId > 0) {
     std::stringstream fq;
     fq << "SELECT fixtures.id, fixtures.home_team_id, fixtures.away_team_id,"
-       << " fixtures.matchday, home.shortname, away.shortname, fixtures.fixture_date"
+       << " fixtures.matchday, home.shortname, away.shortname, fixtures.fixture_date,"
+       << " fixtures.league_id"
        << " FROM fixtures"
        << " JOIN teams home ON fixtures.home_team_id = home.id"
        << " JOIN teams away ON fixtures.away_team_id = away.id"
@@ -337,6 +338,7 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
       todayFixture.homeShort   = DBCell(fr, 0, 4);
       todayFixture.awayShort   = DBCell(fr, 0, 5);
       todayFixture.fixtureDate = DBCell(fr, 0, 6);
+      todayFixture.leagueId    = atoi(DBCell(fr, 0, 7).c_str());
       printf("[CAREER] Matchday found fixture=%d date=%s home=%s away=%s\n",
              todayFixture.id, currentDate.c_str(),
              todayFixture.homeShort.c_str(), todayFixture.awayShort.c_str());

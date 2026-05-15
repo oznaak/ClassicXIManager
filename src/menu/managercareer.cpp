@@ -1,6 +1,7 @@
 #include "managercareer.hpp"
 #include "imgui_career.hpp"
 #include "imgui_menu.hpp"
+#include "careermatchcontext.hpp"
 #include "pagefactory.hpp"
 #include "menutask.hpp"
 
@@ -780,6 +781,10 @@ void ManagerMainScreenPage::ShowActiveView() {
 void ManagerMainScreenPage::PlayMatch() {
   if (clubId == 0) return;
 
+  // Test Engine: hardcoded teams, no fixture context.
+  g_CareerMatchContext.Clear();
+  printf("[CAREER MATCH] Test engine match; no fixture context\n");
+
   printf("[IMGUI MANAGER] Setting up controller sides\n");
   std::vector<SideSelection> sides;
   GetMenuTask()->SetControllerSetup(sides);
@@ -883,11 +888,23 @@ void ManagerMainScreenPage::AdvanceDay() {
 }
 
 void ManagerMainScreenPage::PlayFixture() {
-  int homeId = g_CareerHub.todayFixture.homeTeamId;
-  int awayId = g_CareerHub.todayFixture.awayTeamId;
+  int homeId    = g_CareerHub.todayFixture.homeTeamId;
+  int awayId    = g_CareerHub.todayFixture.awayTeamId;
+  int fixtureId = g_CareerHub.todayFixture.id;
+  int leagueId  = g_CareerHub.todayFixture.leagueId;
 
-  printf("[CAREER] Playing scheduled fixture id=%d date=%s home=%d away=%d\n",
-         g_CareerHub.todayFixture.id,
+  // Set context so GameOverPage can capture score and update DB.
+  g_CareerMatchContext.active     = true;
+  g_CareerMatchContext.managerId  = managerId;
+  g_CareerMatchContext.fixtureId  = fixtureId;
+  g_CareerMatchContext.leagueId   = leagueId;
+  g_CareerMatchContext.homeTeamId = homeId;
+  g_CareerMatchContext.awayTeamId = awayId;
+  printf("[CAREER MATCH] Context set fixture=%d manager=%d league=%d home=%d away=%d\n",
+         fixtureId, managerId, leagueId, homeId, awayId);
+
+  printf("[CAREER MATCH] Playing scheduled fixture id=%d date=%s home=%d away=%d\n",
+         fixtureId,
          g_CareerHub.todayFixture.fixtureDate.c_str(),
          homeId, awayId);
 

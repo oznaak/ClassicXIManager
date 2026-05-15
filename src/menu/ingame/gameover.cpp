@@ -7,6 +7,7 @@
 #include "main.hpp"
 
 #include "../pagefactory.hpp"
+#include "../careermatchcontext.hpp"
 
 using namespace blunted;
 
@@ -15,12 +16,27 @@ GameOverPage::GameOverPage(Gui2WindowManager *windowManager, const Gui2PageData 
   match = GetGameTask()->GetMatch();
   match->Pause(true);
 
+  int homeScore = match->GetMatchData()->GetGoalCount(0);
+  int awayScore = match->GetMatchData()->GetGoalCount(1);
+
+  // Capture result for scheduled career fixture.
+  if (g_CareerMatchContext.active) {
+    printf("[CAREER MATCH] Finished fixture=%d score=%d-%d\n",
+           g_CareerMatchContext.fixtureId, homeScore, awayScore);
+    CompleteScheduledFixture(g_CareerMatchContext.managerId,
+                             g_CareerMatchContext.fixtureId,
+                             homeScore, awayScore);
+    // Context cleared in GoMainMenu after navigation is queued.
+  } else {
+    printf("[CAREER MATCH] No active fixture context; skipping result processing\n");
+  }
+
   Gui2Image *bg1 = new Gui2Image(windowManager, "image_gameover_bg", 10, 10, 80, 80);
   this->AddView(bg1);
   bg1->LoadImage("media/menu/backgrounds/black.png");
   bg1->Show();
 
-  std::string scoreStr = match->GetTeam(0)->GetTeamData()->GetName() + " " + int_to_str(match->GetMatchData()->GetGoalCount(0)) + " - " + int_to_str(match->GetMatchData()->GetGoalCount(1)) + " " + match->GetTeam(1)->GetTeamData()->GetName();
+  std::string scoreStr = match->GetTeam(0)->GetTeamData()->GetName() + " " + int_to_str(homeScore) + " - " + int_to_str(awayScore) + " " + match->GetTeam(1)->GetTeamData()->GetName();
   Gui2Caption *header = new Gui2Caption(windowManager, "caption_gameover_header", 0, 15, 80, 4, scoreStr);
   header->SetPosition(50 - header->GetTextWidthPercent() / 2, 15);
   this->AddView(header);
@@ -74,6 +90,12 @@ void GameOverPage::GoRematch() {
 
 void GameOverPage::GoMainMenu() {
   this->Exit();
+  if (g_CareerMatchContext.active) {
+    int managerId = g_CareerMatchContext.managerId;
+    g_CareerMatchContext.Clear();
+    // Queue career hub creation inside the menuAction stop-match block.
+    GetMenuTask()->RequestReturnToCareerAfterMatch(managerId);
+  }
   GetMenuTask()->SetMenuAction(e_MenuAction_Menu);
   delete this;
 }

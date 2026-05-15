@@ -93,6 +93,8 @@ MenuTask::MenuTask(float aspectRatio, float margin, TTF_Font *defaultFont, TTF_F
   managerMainMenuPending = false;
   managerCareerPagePending = false;
   managerCareerPageId = 0;
+  returnToCareerAfterMatchPending = false;
+  returnToCareerAfterMatchId      = 0;
   menuAction = e_MenuAction_Menu;
 
 }
@@ -148,15 +150,26 @@ void MenuTask::ProcessPhase() {
     GetGameTask()->Action(e_GameTaskMessage_StopMatch);
     GetGameTask()->Action(e_GameTaskMessage_StartMenuScene);
 
-    Properties properties;
-    if (!QuickStart()) {
-      if (!IsReleaseVersion()) {
-        windowManager->GetPageFactory()->CreatePage((int)e_PageID_MainMenu, properties, 0);
-      } else {
-        windowManager->GetPageFactory()->CreatePage((int)e_PageID_Intro, properties, 0);
-      }
+    // If a career match just ended, go straight to the career hub.
+    if (returnToCareerAfterMatchPending) {
+      returnToCareerAfterMatchPending = false;
+      printf("[MENUTASK] Returning to career hub for manager %d after match\n",
+             returnToCareerAfterMatchId);
+      Properties properties;
+      properties.Set("managerId", returnToCareerAfterMatchId);
+      returnToCareerAfterMatchId = 0;
+      windowManager->GetPageFactory()->CreatePage((int)e_PageID_Manager_MainScreen, properties, 0);
     } else {
-      windowManager->GetPageFactory()->CreatePage((int)e_PageID_LoadingMatch, properties, 0);
+      Properties properties;
+      if (!QuickStart()) {
+        if (!IsReleaseVersion()) {
+          windowManager->GetPageFactory()->CreatePage((int)e_PageID_MainMenu, properties, 0);
+        } else {
+          windowManager->GetPageFactory()->CreatePage((int)e_PageID_Intro, properties, 0);
+        }
+      } else {
+        windowManager->GetPageFactory()->CreatePage((int)e_PageID_LoadingMatch, properties, 0);
+      }
     }
 
   } else if (menuAction == e_MenuAction_Game) {

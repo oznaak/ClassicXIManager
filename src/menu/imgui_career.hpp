@@ -30,6 +30,7 @@ struct CareerHubState {
     int id         = 0;
     int homeTeamId = 0;
     int awayTeamId = 0;
+    int leagueId   = 0;
     int matchday   = 0;
     std::string homeShort;
     std::string awayShort;

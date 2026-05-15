@@ -87,12 +87,24 @@ class MenuTask : public Gui2Task {
       managerCareerPageId = managerId;
     }
 
+    // Called from GameOverPage after a career match ends.
+    // The career hub is created INSIDE the menuAction==e_MenuAction_Menu
+    // block so it only fires once the match has been stopped and the
+    // menu scene has started.
+    void RequestReturnToCareerAfterMatch(int managerId) {
+      printf("[MENUTASK] Return to career after match requested for manager %d\n", managerId);
+      returnToCareerAfterMatchPending = true;
+      returnToCareerAfterMatchId      = managerId;
+    }
+
   protected:
     e_MenuAction menuAction;
     bool managerMatchPending;
     bool managerMainMenuPending;
     bool managerCareerPagePending;
-    int managerCareerPageId;
+    int  managerCareerPageId;
+    bool returnToCareerAfterMatchPending;
+    int  returnToCareerAfterMatchId;
 
     Lockable<QueuedFixture> queuedFixture; // todo: we can probably unlock this stuff
 
