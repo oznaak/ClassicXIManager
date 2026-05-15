@@ -17,6 +17,7 @@
 
 #include "opengl_renderer3d.hpp"
 #include "menu/imgui_career.hpp"
+#include "menu/imgui_manager_fonts.hpp"
 
 #ifdef __APPLE__
 #define GL_SILENCE_DEPRECATION
@@ -538,6 +539,7 @@ struct GLfunctions {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr; // no imgui.ini written to disk
+    LoadManagerFonts();
     ImGui_ImplSDL2_InitForOpenGL(window, context);
     ImGui_ImplOpenGL3_Init("#version 130");
     imguiInitialized = true;
