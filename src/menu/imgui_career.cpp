@@ -621,7 +621,7 @@ static void DrawSidebar(float sideW, float winH) {
   ImGui::SetCursorPos(ImVec2(16.0f, 16.0f));
   PushMgrFont(g_ManagerFontBold);
   ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
-  ImGui::TextUnformatted(g_CareerHub.manager.name);
+  ImGui::TextUnformatted(g_CareerHub.manager.name.empty() ? "Classic Manager" : g_CareerHub.manager.name.c_str());
   ImGui::PopStyleColor();
   PopMgrFont(g_ManagerFontBold);
 

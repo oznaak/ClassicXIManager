@@ -20,6 +20,19 @@ static std::string SqlEscape(const std::string &in) {
 }
 
 static void EnsureCareerTables() {
+  DatabaseResult *r0 = GetDB()->Query(
+    "CREATE TABLE IF NOT EXISTS managers ("
+    "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "name VARCHAR(128),"
+    "age INTEGER,"
+    "nationality VARCHAR(64),"
+    "gender VARCHAR(16),"
+    "club_id INTEGER,"
+    "created_at DATETIME DEFAULT CURRENT_TIMESTAMP"
+    ");"
+  );
+  delete r0;
+
   DatabaseResult *r1 = GetDB()->Query(
     "CREATE TABLE IF NOT EXISTS fixtures ("
     "id INTEGER PRIMARY KEY AUTOINCREMENT,"
