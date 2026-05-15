@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <cctype>
 #include <cmath>
 
@@ -138,6 +139,15 @@ void CareerHubState::Clear() {
   pendingAction = 0;
   onPlayMatch   = nullptr;
   onMainMenu    = nullptr;
+  onAdvance     = nullptr;
+  onPlayFixture = nullptr;
+  managerId     = 0;
+  clubId        = 0;
+  currentDate.clear();
+  currentDateDisplay.clear();
+  seasonYear      = 0;
+  hasTodayFixture = false;
+  todayFixture    = {};
   manager = {};
   club    = {};
   players.clear();
@@ -147,22 +157,61 @@ void CareerHubState::Clear() {
   ResetNavState();
 }
 
-void CareerHubState::LoadFromDB(int managerId, int clubId) {
+// Format ISO date YYYY-MM-DD -> "1 Jul 2026"
+static std::string FormatDateDisplay(const std::string &iso) {
+  if (iso.size() < 10) return iso;
+  int year  = atoi(iso.substr(0, 4).c_str());
+  int month = atoi(iso.substr(5, 2).c_str());
+  int day   = atoi(iso.substr(8, 2).c_str());
+  static const char *kMon[] = {"","Jan","Feb","Mar","Apr","May","Jun",
+                                "Jul","Aug","Sep","Oct","Nov","Dec"};
+  if (month < 1 || month > 12) return iso;
+  char buf[24];
+  snprintf(buf, sizeof(buf), "%d %s %d", day, kMon[month], year);
+  return std::string(buf);
+}
+
+void CareerHubState::LoadFromDB(int mgrId, int cId) {
   active = false;
+  managerId = mgrId;
+  clubId    = cId;
 
   {
     std::stringstream q;
-    q << "SELECT managers.name, managers.age, managers.nationality, managers.gender, teams.name"
+    q << "SELECT managers.name, managers.age, managers.nationality, managers.gender, teams.name,"
+      << " managers.current_date, managers.season_year"
       << " FROM managers LEFT JOIN teams ON managers.club_id = teams.id"
-      << " WHERE managers.id = " << managerId << " LIMIT 1;";
+      << " WHERE managers.id = " << mgrId << " LIMIT 1;";
     DatabaseResult *r = GetDB()->Query(q.str());
     manager.name        = DBCell(r, 0, 0);
     manager.age         = DBCell(r, 0, 1);
     manager.nationality = DBCell(r, 0, 2);
     manager.gender      = DBCell(r, 0, 3);
     manager.clubName    = DBCell(r, 0, 4);
+    currentDate         = DBCell(r, 0, 5);
+    std::string syStr   = DBCell(r, 0, 6);
+    seasonYear          = syStr.empty() ? 0 : atoi(syStr.c_str());
     delete r;
   }
+
+  // Initialize current_date if missing (e.g. loaded from old save).
+  if (currentDate.empty()) {
+    time_t now = time(nullptr);
+    struct tm *t = localtime(&now);
+    int yr = 1900 + t->tm_year;
+    if (seasonYear > 0) yr = seasonYear;
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%04d-07-01", yr);
+    currentDate = buf;
+    std::stringstream uq;
+    uq << "UPDATE managers SET current_date='" << currentDate << "'"
+       << " WHERE id=" << mgrId << ";";
+    DatabaseResult *ur = GetDB()->Query(uq.str());
+    delete ur;
+  }
+  currentDateDisplay = FormatDateDisplay(currentDate);
+  printf("[CAREER] Loaded manager id=%d current_date=%s season_year=%d\n",
+         mgrId, currentDate.c_str(), seasonYear);
 
   {
     std::stringstream q;
@@ -202,7 +251,8 @@ void CareerHubState::LoadFromDB(int managerId, int clubId) {
     q << "SELECT leagues.name, fixtures.matchday, fixtures.round,"
       << " home.shortname, away.shortname,"
       << " home.logo_url, away.logo_url,"
-      << " fixtures.status, fixtures.home_score, fixtures.away_score"
+      << " fixtures.status, fixtures.home_score, fixtures.away_score,"
+      << " fixtures.fixture_date"
       << " FROM fixtures"
       << " JOIN leagues ON fixtures.league_id = leagues.id"
       << " JOIN teams home ON fixtures.home_team_id = home.id"
@@ -212,16 +262,17 @@ void CareerHubState::LoadFromDB(int managerId, int clubId) {
     DatabaseResult *r = GetDB()->Query(q.str());
     for (unsigned int i = 0; i < r->data.size(); i++) {
       Fixture f;
-      f.league   = DBCell(r, i, 0);
-      f.matchday = DBCell(r, i, 1);
-      f.round    = DBCell(r, i, 2);
-      f.home     = DBCell(r, i, 3);
-      f.away     = DBCell(r, i, 4);
-      f.homeLogo = DBCell(r, i, 5);
-      f.awayLogo = DBCell(r, i, 6);
-      f.status   = DBCell(r, i, 7);
-      std::string hs = DBCell(r, i, 8);
+      f.league      = DBCell(r, i, 0);
+      f.matchday    = DBCell(r, i, 1);
+      f.round       = DBCell(r, i, 2);
+      f.home        = DBCell(r, i, 3);
+      f.away        = DBCell(r, i, 4);
+      f.homeLogo    = DBCell(r, i, 5);
+      f.awayLogo    = DBCell(r, i, 6);
+      f.status      = DBCell(r, i, 7);
+      std::string hs  = DBCell(r, i, 8);
       std::string as2 = DBCell(r, i, 9);
+      f.fixtureDate = DBCell(r, i, 10);
       f.score = (f.status != "scheduled" && !hs.empty()) ? hs + " - " + as2 : "";
       fixtures.push_back(f);
     }
@@ -258,6 +309,39 @@ void CareerHubState::LoadFromDB(int managerId, int clubId) {
       standings.push_back(s);
     }
     delete r;
+  }
+
+  // Detect today's fixture for manager's club.
+  hasTodayFixture = false;
+  todayFixture    = {};
+  if (!currentDate.empty() && clubId > 0) {
+    std::stringstream fq;
+    fq << "SELECT fixtures.id, fixtures.home_team_id, fixtures.away_team_id,"
+       << " fixtures.matchday, home.shortname, away.shortname, fixtures.fixture_date"
+       << " FROM fixtures"
+       << " JOIN teams home ON fixtures.home_team_id = home.id"
+       << " JOIN teams away ON fixtures.away_team_id = away.id"
+       << " WHERE fixtures.manager_id = " << managerId
+       << " AND fixtures.fixture_date = '" << currentDate << "'"
+       << " AND fixtures.status = 'scheduled'"
+       << " AND (fixtures.home_team_id = " << clubId
+       << " OR fixtures.away_team_id = " << clubId << ")"
+       << " ORDER BY fixtures.matchday ASC, fixtures.id ASC LIMIT 1;";
+    DatabaseResult *fr = GetDB()->Query(fq.str());
+    if (fr->data.size() > 0) {
+      hasTodayFixture          = true;
+      todayFixture.id          = atoi(DBCell(fr, 0, 0).c_str());
+      todayFixture.homeTeamId  = atoi(DBCell(fr, 0, 1).c_str());
+      todayFixture.awayTeamId  = atoi(DBCell(fr, 0, 2).c_str());
+      todayFixture.matchday    = atoi(DBCell(fr, 0, 3).c_str());
+      todayFixture.homeShort   = DBCell(fr, 0, 4);
+      todayFixture.awayShort   = DBCell(fr, 0, 5);
+      todayFixture.fixtureDate = DBCell(fr, 0, 6);
+      printf("[CAREER] Matchday found fixture=%d date=%s home=%s away=%s\n",
+             todayFixture.id, currentDate.c_str(),
+             todayFixture.homeShort.c_str(), todayFixture.awayShort.c_str());
+    }
+    delete fr;
   }
 
   active = true;
@@ -602,8 +686,9 @@ static void DrawNavItem(const char *label, e_ManagerPage page, int badge = 0) {
 
 // ---- Action flags (deferred, consumed after Handle()) -------------------
 
-static bool s_playClicked = false;
-static bool s_menuClicked = false;
+static bool s_playClicked    = false; // test engine (hardcoded match)
+static bool s_advanceClicked = false; // advance day or play fixture
+static bool s_menuClicked    = false;
 
 // ---- DrawSidebar --------------------------------------------------------
 
@@ -767,32 +852,46 @@ static void DrawTopHeader(float contentX, float contentW) {
   ImGui::PopStyleColor();
   PopMgrFont(g_ManagerFontTitle);
 
-  // ---- Right: search + date + Play Match CTA --------------------------
-  const float kBtnW    = 118.0f;
-  const float kDateW   = 68.0f;
-  const float kSearchW = 148.0f;
+  // ---- Right: search + date + Advance/PlayMatch + Test Engine CTAs -------
+  const float kBtnW    = 112.0f;  // each button width
+  const float kDateW   = 88.0f;   // wider for "31 Aug 2026"
+  const float kSearchW = 140.0f;
   const float kElemH   = 30.0f;
   const float kGap     = 8.0f;
-  float elemY    = (kTopHdrH - kElemH) * 0.5f;
+  float elemY     = (kTopHdrH - kElemH) * 0.5f;
   float rightEdge = contentW - 16.0f;
 
-  // Play Match CTA
-  ImGui::SetCursorPos(ImVec2(rightEdge - kBtnW, elemY));
   ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f, 5.0f));
   PushMgrFont(g_ManagerFontBold);
-  if (CTAButton("Play Match", ImVec2(kBtnW, kElemH))) s_playClicked = true;
+
+  // Test Engine button (rightmost) — hardcoded match launcher.
+  ImGui::SetCursorPos(ImVec2(rightEdge - kBtnW, elemY));
+  if (SecBtn("Test Engine", ImVec2(kBtnW, kElemH))) s_playClicked = true;
+
+  // Advance / Play Match button — changes label based on matchday.
+  float advBtnX = rightEdge - kBtnW - kGap - kBtnW;
+  ImGui::SetCursorPos(ImVec2(advBtnX, elemY));
+  if (g_CareerHub.hasTodayFixture) {
+    if (CTAButton("Play Match", ImVec2(kBtnW, kElemH))) s_advanceClicked = true;
+  } else {
+    if (CTAButton("Advance", ImVec2(kBtnW, kElemH))) s_advanceClicked = true;
+  }
+
   PopMgrFont(g_ManagerFontBold);
   ImGui::PopStyleVar();
 
-  // Date placeholder
+  // Current date display
   PushMgrFont(g_ManagerFontSmall);
   float dateH = ImGui::GetTextLineHeight();
   PopMgrFont(g_ManagerFontSmall);
-  float dateX = rightEdge - kBtnW - kGap - kDateW;
+  float dateX = advBtnX - kGap - kDateW;
   ImGui::SetCursorPos(ImVec2(dateX, elemY + (kElemH - dateH) * 0.5f));
   PushMgrFont(g_ManagerFontSmall);
   ImGui::PushStyleColor(ImGuiCol_Text, kTextDim);
-  ImGui::TextUnformatted("1 Jul 2026");
+  const std::string &dateStr = g_CareerHub.currentDateDisplay.empty()
+                                 ? g_CareerHub.currentDate
+                                 : g_CareerHub.currentDateDisplay;
+  ImGui::TextUnformatted(dateStr.empty() ? "--" : dateStr.c_str());
   ImGui::PopStyleColor();
   PopMgrFont(g_ManagerFontSmall);
 
@@ -1670,21 +1769,32 @@ void RenderImGuiCareerHub() {
                ImGuiWindowFlags_NoScrollWithMouse);
   ImGui::PopStyleVar();
 
-  s_playClicked = false;
-  s_menuClicked = false;
+  s_playClicked    = false;
+  s_advanceClicked = false;
+  s_menuClicked    = false;
 
   DrawAppBackground(winW, winH);
   DrawManagerShell(winW, winH);
 
   ImGui::End();
 
-  // Deferred action flags — consumed by operator()() after Handle() returns.
-  if (s_playClicked && g_CareerHub.pendingAction == 0) {
-    g_CareerHub.pendingAction = 1;
-    printf("[IMGUI MANAGER] Play Match requested\n");
-  }
-  if (s_menuClicked && g_CareerHub.pendingAction == 0) {
-    g_CareerHub.pendingAction = 2;
-    printf("[IMGUI MANAGER] Main Menu requested\n");
+  // Deferred action flags — consumed by opengl_renderer3d after Handle() returns.
+  if (g_CareerHub.pendingAction == 0) {
+    if (s_playClicked) {
+      g_CareerHub.pendingAction = 1; // Test Engine
+      printf("[IMGUI MANAGER] Test Engine requested\n");
+    } else if (s_menuClicked) {
+      g_CareerHub.pendingAction = 2; // Main Menu
+      printf("[IMGUI MANAGER] Main Menu requested\n");
+    } else if (s_advanceClicked) {
+      if (g_CareerHub.hasTodayFixture) {
+        g_CareerHub.pendingAction = 4; // Play Fixture
+        printf("[IMGUI MANAGER] Play Fixture requested fixture=%d\n",
+               g_CareerHub.todayFixture.id);
+      } else {
+        g_CareerHub.pendingAction = 3; // Advance day
+        printf("[IMGUI MANAGER] Advance day requested\n");
+      }
+    }
   }
 }

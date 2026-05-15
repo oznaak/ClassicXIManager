@@ -89,6 +89,8 @@ class ManagerMainScreenPage : public Gui2Page {
   void OpenTab(int tab);
   void PlayMatch();
   void BackToMainMenu();
+  void AdvanceDay();
+  void PlayFixture();
 
  protected:
   int managerId;

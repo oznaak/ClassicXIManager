@@ -2356,11 +2356,17 @@ struct GLfunctions {
         int action = g_CareerHub.pendingAction;
         g_CareerHub.pendingAction = 0;
         if (action == 1 && g_CareerHub.onPlayMatch) {
-          printf("[IMGUI MANAGER] Processing Play Match action\n");
+          printf("[IMGUI MANAGER] Processing Test Engine action\n");
           g_CareerHub.onPlayMatch();
         } else if (action == 2 && g_CareerHub.onMainMenu) {
           printf("[IMGUI MANAGER] Processing Main Menu action\n");
           g_CareerHub.onMainMenu();
+        } else if (action == 3 && g_CareerHub.onAdvance) {
+          printf("[IMGUI MANAGER] Processing Advance Day action\n");
+          g_CareerHub.onAdvance();
+        } else if (action == 4 && g_CareerHub.onPlayFixture) {
+          printf("[IMGUI MANAGER] Processing Play Fixture action\n");
+          g_CareerHub.onPlayFixture();
         }
       }
 

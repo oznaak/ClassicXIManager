@@ -9,6 +9,7 @@
 #include <sstream>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 
 using namespace boost::placeholders;
 
@@ -30,6 +31,8 @@ static void EnsureCareerTables() {
     "nationality VARCHAR(64),"
     "gender VARCHAR(16),"
     "club_id INTEGER,"
+    "current_date TEXT,"
+    "season_year INTEGER,"
     "created_at DATETIME DEFAULT CURRENT_TIMESTAMP"
     ");"
   );
@@ -45,6 +48,7 @@ static void EnsureCareerTables() {
     "matchday INTEGER NOT NULL,"
     "home_team_id INTEGER NOT NULL,"
     "away_team_id INTEGER NOT NULL,"
+    "fixture_date TEXT,"
     "status VARCHAR(32) DEFAULT 'scheduled',"
     "home_score INTEGER,"
     "away_score INTEGER,"
@@ -76,6 +80,40 @@ static void EnsureCareerTables() {
     ");"
   );
   delete r2;
+
+  // Safe migration: add columns if they don't already exist.
+  {
+    DatabaseResult *info = GetDB()->Query("PRAGMA table_info(managers);");
+    bool hasCurrentDate = false, hasSeasonYear = false;
+    for (unsigned int i = 0; i < info->data.size(); i++) {
+      if (info->data.at(i).size() > 1) {
+        if (info->data.at(i).at(1) == "current_date") hasCurrentDate = true;
+        if (info->data.at(i).at(1) == "season_year")  hasSeasonYear  = true;
+      }
+    }
+    delete info;
+    if (!hasCurrentDate) {
+      DatabaseResult *a = GetDB()->Query("ALTER TABLE managers ADD COLUMN current_date TEXT;");
+      delete a;
+    }
+    if (!hasSeasonYear) {
+      DatabaseResult *a = GetDB()->Query("ALTER TABLE managers ADD COLUMN season_year INTEGER;");
+      delete a;
+    }
+  }
+  {
+    DatabaseResult *info = GetDB()->Query("PRAGMA table_info(fixtures);");
+    bool hasFixtureDate = false;
+    for (unsigned int i = 0; i < info->data.size(); i++) {
+      if (info->data.at(i).size() > 1 && info->data.at(i).at(1) == "fixture_date")
+        hasFixtureDate = true;
+    }
+    delete info;
+    if (!hasFixtureDate) {
+      DatabaseResult *a = GetDB()->Query("ALTER TABLE fixtures ADD COLUMN fixture_date TEXT;");
+      delete a;
+    }
+  }
 }
 
 static void DeleteCareerSeason(int managerId) {
@@ -88,6 +126,30 @@ static void DeleteCareerSeason(int managerId) {
   q2 << "DELETE FROM standings WHERE manager_id = " << managerId << ";";
   DatabaseResult *r2 = GetDB()->Query(q2.str());
   delete r2;
+}
+
+// Compute YYYY-MM-DD for season start (Aug 15) + (round-1)*7 days.
+static std::string MakeFixtureDate(int seasonYear, int round) {
+  const int kDIM[] = {0,31,28,31,30,31,30,31,31,30,31,30,31};
+  int year  = seasonYear;
+  int month = 8;
+  int day   = 15;
+  int addDays = (round - 1) * 7;
+  day += addDays;
+  while (day > kDIM[month]) {
+    day -= kDIM[month];
+    month++;
+    if (month > 12) { month = 1; year++; }
+  }
+  char buf[16];
+  snprintf(buf, sizeof(buf), "%04d-%02d-%02d", year, month, day);
+  return std::string(buf);
+}
+
+static int GetCurrentYear() {
+  time_t now = time(nullptr);
+  struct tm *t = localtime(&now);
+  return 1900 + t->tm_year;
 }
 
 static std::vector<int> GetLeagueTeamIds(int leagueId) {
@@ -104,31 +166,42 @@ static std::vector<int> GetLeagueTeamIds(int leagueId) {
 
 static void InsertFixture(int managerId, int leagueId, int seasonYear,
                           int round, int matchday,
-                          int homeTeamId, int awayTeamId) {
+                          int homeTeamId, int awayTeamId,
+                          const std::string &fixtureDate) {
   std::stringstream q;
   q << "INSERT INTO fixtures"
-    << "(manager_id,league_id,season_year,round,matchday,home_team_id,away_team_id)"
+    << "(manager_id,league_id,season_year,round,matchday,home_team_id,away_team_id,fixture_date)"
     << " VALUES("
     << managerId << "," << leagueId << "," << seasonYear << ","
-    << round << "," << matchday << "," << homeTeamId << "," << awayTeamId
+    << round << "," << matchday << "," << homeTeamId << "," << awayTeamId << ","
+    << "'" << fixtureDate << "'"
     << ");";
   DatabaseResult *r = GetDB()->Query(q.str());
   delete r;
+  printf("[FIXTURES] manager=%d league=%d matchday=%d date=%s home=%d away=%d\n",
+         managerId, leagueId, matchday, fixtureDate.c_str(), homeTeamId, awayTeamId);
 }
 
 static void GenerateFixturesForLeague(int managerId, int leagueId,
                                       int seasonYear,
                                       const std::vector<int> &teamIds) {
-  printf("[CAREER] League %i teams: %lu\n", leagueId, (unsigned long)teamIds.size());
+  printf("[CAREER] League %d teams: %lu\n", leagueId, (unsigned long)teamIds.size());
+  // Each pair plays home and away. Round 1 = first leg, Round 2 = second leg.
+  // Matchday numbers the pair within each round; round drives the fixture_date.
   int pairIndex = 0;
   for (unsigned int i = 0; i < teamIds.size(); i++) {
     for (unsigned int j = i + 1; j < teamIds.size(); j++) {
+      int matchday = pairIndex + 1;
+      // Round 1: season start Aug 15 + (pairIndex * 7) days (first leg of this pair)
+      // Round 2: first-leg date + 7 days (return leg)
+      std::string date1 = MakeFixtureDate(seasonYear, matchday);
+      std::string date2 = MakeFixtureDate(seasonYear, matchday + 1);
       InsertFixture(managerId, leagueId, seasonYear,
-                    1, pairIndex + 1,
-                    teamIds.at(i), teamIds.at(j));
+                    1, matchday,
+                    teamIds.at(i), teamIds.at(j), date1);
       InsertFixture(managerId, leagueId, seasonYear,
-                    2, pairIndex + 1,
-                    teamIds.at(j), teamIds.at(i));
+                    2, matchday + 1,
+                    teamIds.at(j), teamIds.at(i), date2);
       pairIndex++;
     }
   }
@@ -146,11 +219,11 @@ static void GenerateStandingsForLeague(int managerId, int leagueId,
 }
 
 void GenerateCareerSeason(int managerId) {
-  printf("[CAREER] Generating season for manager %i\n", managerId);
+  printf("[CAREER] Generating season for manager %d\n", managerId);
   EnsureCareerTables();
   DeleteCareerSeason(managerId);
 
-  const int seasonYear = 2025;
+  const int seasonYear = GetCurrentYear();
 
   DatabaseResult *lr = GetDB()->Query("SELECT id FROM leagues ORDER BY id;");
   for (unsigned int i = 0; i < lr->data.size(); i++) {
@@ -161,7 +234,19 @@ void GenerateCareerSeason(int managerId) {
   }
   delete lr;
 
-  printf("[CAREER] Season generated for manager %i\n", managerId);
+  // Set career start date to July 1 of season year.
+  char careerDate[16];
+  snprintf(careerDate, sizeof(careerDate), "%04d-07-01", seasonYear);
+  std::stringstream uq;
+  uq << "UPDATE managers SET current_date='" << careerDate
+     << "', season_year=" << seasonYear
+     << " WHERE id=" << managerId << ";";
+  DatabaseResult *ur = GetDB()->Query(uq.str());
+  delete ur;
+
+  printf("[CAREER] Created manager save id=%d season_year=%d current_date=%s\n",
+         managerId, seasonYear, careerDate);
+  printf("[CAREER] Season generated for manager %d\n", managerId);
 }
 
 static void EnsureManagerTable() {
@@ -433,8 +518,10 @@ ManagerMainScreenPage::ManagerMainScreenPage(
 
   if (useImGuiCareerHub) {
     // Wire ImGui action callbacks before loading so they are ready when active=true.
-    g_CareerHub.onPlayMatch = boost::bind(&ManagerMainScreenPage::PlayMatch, this);
-    g_CareerHub.onMainMenu  = boost::bind(&ManagerMainScreenPage::BackToMainMenu, this);
+    g_CareerHub.onPlayMatch   = boost::bind(&ManagerMainScreenPage::PlayMatch,   this);
+    g_CareerHub.onMainMenu    = boost::bind(&ManagerMainScreenPage::BackToMainMenu, this);
+    g_CareerHub.onAdvance     = boost::bind(&ManagerMainScreenPage::AdvanceDay,  this);
+    g_CareerHub.onPlayFixture = boost::bind(&ManagerMainScreenPage::PlayFixture, this);
     g_CareerHub.LoadFromDB(managerId, clubId);
     this->Show();
   } else {
@@ -719,6 +806,98 @@ void ManagerMainScreenPage::PlayMatch() {
 void ManagerMainScreenPage::BackToMainMenu() {
   printf("[IMGUI MANAGER] Returning to main menu\n");
   GetMenuTask()->RequestManagerMainMenuPage();
+  this->Exit();
+  delete this;
+}
+
+// Add exactly one calendar day to an ISO date string YYYY-MM-DD.
+static std::string AddOneDay(const std::string &iso) {
+  if (iso.size() < 10) return iso;
+  int year  = atoi(iso.substr(0, 4).c_str());
+  int month = atoi(iso.substr(5, 2).c_str());
+  int day   = atoi(iso.substr(8, 2).c_str());
+  bool leap = (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0));
+  const int kDIM[] = {0,31,leap?29:28,31,30,31,30,31,31,30,31,30,31};
+  day++;
+  if (day > kDIM[month]) { day = 1; month++; }
+  if (month > 12)        { month = 1; year++; }
+  char buf[16];
+  snprintf(buf, sizeof(buf), "%04d-%02d-%02d", year, month, day);
+  return std::string(buf);
+}
+
+void ManagerMainScreenPage::AdvanceDay() {
+  // Read the stored date from in-memory state — do NOT use SQLite date('now')
+  // or any real-world clock; that was the original bug (current_date is also
+  // a SQLite keyword for the real date, so date(current_date,'+1 day') read
+  // today's real date instead of the column).
+  std::string fromDate = g_CareerHub.currentDate;
+  if (fromDate.empty()) {
+    printf("[CAREER] AdvanceDay: no current_date in state, aborting\n");
+    return;
+  }
+
+  // Verify what the DB actually holds before touching it.
+  {
+    std::stringstream rq;
+    rq << "SELECT current_date FROM managers WHERE id=" << managerId << ";";
+    DatabaseResult *rr = GetDB()->Query(rq.str());
+    std::string dbDate = (rr->data.size() > 0 && rr->data.at(0).size() > 0)
+                           ? rr->data.at(0).at(0) : "";
+    delete rr;
+    printf("[CAREER] AdvanceDay before DB current_date=%s\n", dbDate.c_str());
+  }
+
+  // Compute next day entirely in C++ — no SQLite date() call to avoid the
+  // CURRENT_DATE keyword collision.
+  std::string newDate = AddOneDay(fromDate);
+
+  // Write the literal new date string into the DB.
+  std::stringstream uq;
+  uq << "UPDATE managers SET current_date='" << newDate << "' WHERE id=" << managerId << ";";
+  DatabaseResult *ur = GetDB()->Query(uq.str());
+  delete ur;
+
+  // Verify the write landed.
+  {
+    std::stringstream rq;
+    rq << "SELECT current_date FROM managers WHERE id=" << managerId << ";";
+    DatabaseResult *rr = GetDB()->Query(rq.str());
+    std::string dbDate = (rr->data.size() > 0 && rr->data.at(0).size() > 0)
+                           ? rr->data.at(0).at(0) : "";
+    delete rr;
+    printf("[CAREER] AdvanceDay after DB current_date=%s\n", dbDate.c_str());
+    if (dbDate.empty()) {
+      printf("[CAREER] AdvanceDay ERROR: DB write failed, aborting state reload\n");
+      return;
+    }
+  }
+
+  // Reload career state so the UI reflects the new date and fixture status.
+  g_CareerHub.LoadFromDB(managerId, clubId);
+
+  printf("[CAREER] Advance day manager=%d from=%s to=%s\n",
+         managerId, fromDate.c_str(), g_CareerHub.currentDate.c_str());
+}
+
+void ManagerMainScreenPage::PlayFixture() {
+  int homeId = g_CareerHub.todayFixture.homeTeamId;
+  int awayId = g_CareerHub.todayFixture.awayTeamId;
+
+  printf("[CAREER] Playing scheduled fixture id=%d date=%s home=%d away=%d\n",
+         g_CareerHub.todayFixture.id,
+         g_CareerHub.todayFixture.fixtureDate.c_str(),
+         homeId, awayId);
+
+  std::vector<SideSelection> sides;
+  GetMenuTask()->SetControllerSetup(sides);
+  GetMenuTask()->SetTeamIDs(int_to_str(homeId), int_to_str(awayId));
+
+  GetConfiguration()->Set("manager_mode",         1.0f);
+  GetConfiguration()->Set("manager_ai_difficulty", 1.0f);
+  GetConfiguration()->Set("match_difficulty",      1.0f);
+
+  GetMenuTask()->RequestManagerMatchStart();
   this->Exit();
   delete this;
 }
