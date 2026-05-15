@@ -9,8 +9,9 @@
 // pendingAction is set by ImGui buttons and consumed by callbacks.
 
 struct CareerHubState {
-  bool active       = false;
-  int  activeTab    = 0; // 0=Overview 1=Manager 2=Club 3=Matches 4=Standings
+  bool active        = false;
+  int  primaryTab    = 0; // 0=Portal 1=Squad 2=Recruitment 3=MatchDay 4=Club 5=Career
+  int  activeTab     = 0; // portal sub-tab: 0=Overview 1=Manager 2=Club 3=Matches 4=Standings
   int  pendingAction = 0; // 0=none 1=playMatch 2=mainMenu
 
   std::function<void()> onPlayMatch;
@@ -21,7 +22,7 @@ struct CareerHubState {
   } manager;
 
   struct ClubInfo {
-    std::string name, shortName;
+    std::string name, shortName, logoPath, leagueName;
   } club;
 
   struct Player {
@@ -30,12 +31,15 @@ struct CareerHubState {
   std::vector<Player> players;
 
   struct Fixture {
-    std::string league, matchday, round, home, away, status, score;
+    std::string league, matchday, round;
+    std::string home, away;
+    std::string homeLogo, awayLogo;
+    std::string status, score;
   };
   std::vector<Fixture> fixtures;
 
   struct Standing {
-    std::string league, team;
+    std::string league, team, teamLogo;
     std::string p, w, d, l, gf, ga, gd, pts;
   };
   std::vector<Standing> standings;
