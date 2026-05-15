@@ -49,7 +49,7 @@ struct PreCareerState {
   int  genderIdx;
 
   // Data lists for selection screens
-  struct LeagueItem { int id; std::string name; };
+  struct LeagueItem { int id; std::string name; std::string logoUrl; };
   std::vector<LeagueItem> leagues;
 
   struct ClubItem { int id; std::string name; std::string shortName; std::string logoPath; };
@@ -59,7 +59,7 @@ struct PreCareerState {
   int currentLeagueId = 0;
 
   // Save list for Load Game
-  struct SaveEntry { int id; std::string name, clubName, nationality; int age; };
+  struct SaveEntry { int id; std::string name, clubName, nationality, shortName, logoUrl; int age; };
   std::vector<SaveEntry> saves;
 
   void Clear();

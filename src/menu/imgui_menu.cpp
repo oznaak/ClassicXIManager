@@ -4,8 +4,15 @@
 
 #include "../main.hpp"
 #include "imgui.h"
+#include <SDL2/SDL_image.h>
+#ifdef __APPLE__
+#include <OpenGL/gl3.h>
+#else
+#include <GL/gl.h>
+#endif
 #include <sstream>
 #include <string>
+#include <map>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -69,7 +76,7 @@ static void LoadPreCareerSaves() {
   g_PreCareer.saves.clear();
   DatabaseResult *result = GetDB()->Query(
     "SELECT managers.id, managers.name, managers.age, managers.nationality, "
-    "teams.name "
+    "teams.name, teams.shortname, teams.logo_url "
     "FROM managers "
     "LEFT JOIN teams ON managers.club_id = teams.id "
     "ORDER BY managers.id DESC LIMIT 20;"
@@ -81,8 +88,11 @@ static void LoadPreCareerSaves() {
     e.age         = atoi(result->data.at(i).at(2).c_str());
     e.nationality = result->data.at(i).at(3);
     e.clubName    = result->data.at(i).at(4);
+    e.shortName   = result->data.at(i).at(5);
+    e.logoUrl     = result->data.at(i).at(6);
     if (e.name.empty())     e.name     = "Unnamed Manager";
     if (e.clubName.empty()) e.clubName = "No Club";
+    if (e.shortName.empty()) e.shortName = e.clubName.empty() ? "NC" : e.clubName.substr(0, 2);
     g_PreCareer.saves.push_back(e);
   }
   delete result;
@@ -90,11 +100,12 @@ static void LoadPreCareerSaves() {
 
 static void LoadPreCareerLeagues() {
   g_PreCareer.leagues.clear();
-  DatabaseResult *res = GetDB()->Query("SELECT id, name FROM leagues ORDER BY name LIMIT 20;");
+  DatabaseResult *res = GetDB()->Query("SELECT id, name, logo_url FROM leagues ORDER BY name LIMIT 20;");
   for (unsigned int i = 0; i < res->data.size(); i++) {
     PreCareerState::LeagueItem item;
     item.id   = atoi(res->data.at(i).at(0).c_str());
     item.name = res->data.at(i).at(1);
+    item.logoUrl = res->data.at(i).at(2);
     if (item.name.empty()) item.name = "League";
     g_PreCareer.leagues.push_back(item);
   }
@@ -273,6 +284,178 @@ static void ProcessPreCareerPendingAction() {
   }
 }
 
+// ---- Image texture cache ------------------------------------------------
+
+static std::map<std::string, GLuint> s_ImageCache;
+
+static GLuint TryLoadImage(const std::string &path) {
+  printf("[IMG LOAD] trying: %s\n", path.c_str());
+  SDL_Surface *surf = IMG_Load(path.c_str());
+  if (!surf) {
+    printf("[IMG LOAD] failed: %s (SDL_image: %s)\n", path.c_str(), IMG_GetError());
+    return 0;
+  }
+  SDL_Surface *rgba = SDL_ConvertSurfaceFormat(surf, SDL_PIXELFORMAT_RGBA32, 0);
+  SDL_FreeSurface(surf);
+  if (!rgba) {
+    printf("[IMG LOAD] failed: %s (RGBA convert)\n", path.c_str());
+    return 0;
+  }
+
+  GLuint texID = 0;
+  glGenTextures(1, &texID);
+  glBindTexture(GL_TEXTURE_2D, texID);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, rgba->w, rgba->h, 0,
+               GL_RGBA, GL_UNSIGNED_BYTE, rgba->pixels);
+  glBindTexture(GL_TEXTURE_2D, 0);
+  SDL_FreeSurface(rgba);
+
+  printf("[IMG LOAD] success: %s texture=%u size=%dx%d\n",
+         path.c_str(), texID, (int)rgba->w, (int)rgba->h);
+  return texID;
+}
+
+static GLuint LoadImageTexture(const std::string &relPath) {
+  if (relPath.empty()) return 0;
+
+  // For DB-stored paths like images_competitions/xxx.png,
+  // resolve against databases/default/
+  std::string dbRelPath = "databases/default/" + relPath;
+
+  // Check cache first using the db-relative key
+  auto it = s_ImageCache.find(dbRelPath);
+  if (it != s_ImageCache.end()) return it->second;
+
+  // Try paths in order
+  const char *basePaths[] = {
+    "",                        // relPath as-is (for main logo)
+    "databases/default/",      // from build/ dir
+    "data/databases/default/", // from project root
+    "../data/databases/default/", // from build/../data
+    nullptr
+  };
+
+  GLuint texID = 0;
+
+  // First try: for paths that already include the full relative (like main logo)
+  if (relPath.find("media/") == 0 || relPath.find("data/") == 0) {
+    // This is a direct asset path, try it as-is and with data/ prefix
+    const char *assetPaths[] = {
+      relPath.c_str(),
+      ("data/" + relPath).c_str(),
+      ("../data/" + relPath).c_str(),
+      nullptr
+    };
+    // Need to copy strings since c_str() on temporary
+    std::string p1 = relPath;
+    std::string p2 = "data/" + relPath;
+    std::string p3 = "../data/" + relPath;
+    const char *aPaths[] = { p1.c_str(), p2.c_str(), p3.c_str(), nullptr };
+    for (int i = 0; aPaths[i]; i++) {
+      texID = TryLoadImage(aPaths[i]);
+      if (texID) break;
+    }
+  } else {
+    // DB path like images_competitions/xxx.png
+    for (int i = 0; basePaths[i]; i++) {
+      std::string fullPath = std::string(basePaths[i]) + relPath;
+      texID = TryLoadImage(fullPath);
+      if (texID) break;
+    }
+  }
+
+  if (!texID) {
+    printf("[IMG LOAD] failed: %s (all paths exhausted)\n", relPath.c_str());
+  }
+
+  s_ImageCache[dbRelPath] = texID;
+  return texID;
+}
+
+static GLuint GetMainLogoTexture() {
+  static GLuint s_logoTex = 0;
+  static bool s_tried = false;
+  if (s_tried) return s_logoTex;
+  s_tried = true;
+
+  const char *logoPaths[] = {
+    "media/logos/logo.png",
+    "data/media/logos/logo.png",
+    "../data/media/logos/logo.png",
+    nullptr
+  };
+
+  for (int i = 0; logoPaths[i]; i++) {
+    s_logoTex = TryLoadImage(logoPaths[i]);
+    if (s_logoTex) break;
+  }
+
+  s_ImageCache["__main_logo__"] = s_logoTex;
+  return s_logoTex;
+}
+
+static void ClearImageCache() {
+  for (auto &kv : s_ImageCache)
+    if (kv.second) glDeleteTextures(1, &kv.second);
+  s_ImageCache.clear();
+}
+
+// ---- Draw image badge (texture or fallback) -----------------------------
+
+static void DrawImageBadge(GLuint tex, const std::string &sn, float sz) {
+  if (tex) {
+    ImGui::Image((ImTextureID)(intptr_t)tex, ImVec2(sz, sz));
+  } else {
+    // Fallback to colored initials
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    unsigned int hash = 5381;
+    for (char c : sn) hash = ((hash << 5) + hash) ^ (unsigned char)c;
+    float hue = (float)(hash % 360) / 360.0f;
+    float r, g, b;
+    ImGui::ColorConvertHSVtoRGB(hue, 0.55f, 0.48f, r, g, b);
+    dl->AddRectFilled(p, ImVec2(p.x+sz, p.y+sz),
+      IM_COL32((int)(r*255),(int)(g*255),(int)(b*255),215), sz*0.22f);
+    std::string ini;
+    for (unsigned int i = 0; i < sn.size() && (int)ini.size() < 2; i++)
+      if (isalpha((unsigned char)sn[i])) ini += (char)toupper((unsigned char)sn[i]);
+    if (!ini.empty()) {
+      ImVec2 tsz = ImGui::CalcTextSize(ini.c_str());
+      dl->AddText(ImVec2(p.x+(sz-tsz.x)*0.5f, p.y+(sz-tsz.y)*0.5f),
+                  IM_COL32(255,255,255,215), ini.c_str());
+    }
+    ImGui::Dummy(ImVec2(sz, sz));
+  }
+}
+
+// Draw badge at specific screen position (for row cards)
+static void DrawImageBadgeAt(ImDrawList *dl, ImVec2 pos, GLuint tex,
+                              const std::string &sn, float sz) {
+  if (tex) {
+    dl->AddImage((ImTextureID)(intptr_t)tex, pos, ImVec2(pos.x+sz, pos.y+sz));
+  } else {
+    unsigned int hash = 5381;
+    for (char c : sn) hash = ((hash << 5) + hash) ^ (unsigned char)c;
+    float hue = (float)(hash % 360) / 360.0f;
+    float r, g, b;
+    ImGui::ColorConvertHSVtoRGB(hue, 0.55f, 0.48f, r, g, b);
+    dl->AddRectFilled(pos, ImVec2(pos.x+sz, pos.y+sz),
+      IM_COL32((int)(r*255),(int)(g*255),(int)(b*255),215), sz*0.22f);
+    std::string ini;
+    for (unsigned int i = 0; i < sn.size() && (int)ini.size() < 2; i++)
+      if (isalpha((unsigned char)sn[i])) ini += (char)toupper((unsigned char)sn[i]);
+    if (!ini.empty()) {
+      ImVec2 tsz = ImGui::CalcTextSize(ini.c_str());
+      dl->AddText(ImVec2(pos.x+(sz-tsz.x)*0.5f, pos.y+(sz-tsz.y)*0.5f),
+                  IM_COL32(255,255,255,215), ini.c_str());
+    }
+  }
+}
+
 // ---- Color palette (matches imgui_career.cpp) ---------------------------
 
 static const ImVec4 kBgApp     = ImVec4(0.027f, 0.043f, 0.086f, 1.0f);
@@ -370,36 +553,12 @@ static bool DangerBtn(const char *lbl, ImVec2 sz = ImVec2(0,0)) {
   return r;
 }
 
-// ---- Fallback badge (colored initials square) ---------------------------
-
-static void DrawFallbackBadge(const std::string &sn, float sz) {
-  ImVec2 p = ImGui::GetCursorScreenPos();
-  ImDrawList *dl = ImGui::GetWindowDrawList();
-  unsigned int hash = 5381;
-  for (char c : sn) hash = ((hash << 5) + hash) ^ (unsigned char)c;
-  float hue = (float)(hash % 360) / 360.0f;
-  float r, g, b;
-  ImGui::ColorConvertHSVtoRGB(hue, 0.55f, 0.48f, r, g, b);
-  dl->AddRectFilled(p, ImVec2(p.x+sz, p.y+sz),
-    IM_COL32((int)(r*255),(int)(g*255),(int)(b*255),215), sz*0.22f);
-  std::string ini;
-  for (unsigned int i = 0; i < sn.size() && (int)ini.size() < 2; i++)
-    if (isalpha((unsigned char)sn[i])) ini += (char)toupper((unsigned char)sn[i]);
-  if (!ini.empty()) {
-    ImVec2 tsz = ImGui::CalcTextSize(ini.c_str());
-    dl->AddText(ImVec2(p.x+(sz-tsz.x)*0.5f, p.y+(sz-tsz.y)*0.5f),
-                IM_COL32(255,255,255,215), ini.c_str());
-  }
-  ImGui::Dummy(ImVec2(sz, sz));
-}
-
 // ---- Decorative background ----------------------------------------------
 
 static void DrawPreCareerBackground(float w, float h) {
   ImDrawList *dl = ImGui::GetWindowDrawList();
   ImVec2 wp = ImGui::GetWindowPos();
   dl->AddRectFilled(wp, ImVec2(wp.x+w, wp.y+h), C32(kBgApp));
-  // subtle corner glow
   dl->AddCircleFilled(ImVec2(wp.x + w * 0.15f, wp.y + h * 0.5f),
                       h * 0.60f, IM_COL32(55,12,110,12), 48);
   dl->AddCircleFilled(ImVec2(wp.x + w * 0.15f, wp.y + h * 0.5f),
@@ -411,8 +570,6 @@ static void DrawPreCareerBackground(float w, float h) {
 
 // ---- Centered card helper -----------------------------------------------
 
-// Renders a card-shaped child window centered on screen.
-// Returns true if BeginChild succeeded (always does).
 static bool BeginCenteredCard(const char *id, float cardW, float cardH,
                                float winW, float winH) {
   float x = (winW - cardW) * 0.5f;
@@ -439,81 +596,83 @@ static bool BeginCenteredCard(const char *id, float cardW, float cardH,
 
 static void EndCenteredCard() { ImGui::EndChild(); }
 
+// ---- Shared footer helper -----------------------------------------------
+
+static void DrawPreCareerFooter(float winW, float winH) {
+  ImVec2 wp = ImGui::GetWindowPos();
+  ImVec2 fp = ImVec2(wp.x + winW * 0.5f, wp.y + winH - 28.0f);
+  ImVec2 fsz = ImGui::CalcTextSize("Classic Manager - Alpha v0.0.01");
+  ImDrawList *dl = ImGui::GetWindowDrawList();
+  PushMF(g_ManagerFontSmall);
+  dl->AddText(ImVec2(fp.x - fsz.x * 0.5f, fp.y), C32(kTextDim), "Classic Manager - Alpha v0.0.01");
+  PopMF(g_ManagerFontSmall);
+}
+
 // =========================================================================
 // Screen: Main Menu
 // =========================================================================
 
 static void DrawMainMenuScreen(float winW, float winH) {
-  const float kLeftW = winW * 0.44f;
+  ImDrawList *dl = ImGui::GetWindowDrawList();
+  ImVec2 wp = ImGui::GetWindowPos();
+
+  const float kLeftW = winW * 0.42f;
   const float kRightW = winW - kLeftW;
 
-  // ---- Left hero panel ------------------------------------------------
+  // ---- Left hero panel with logo --------------------------------------
   ImGui::SetCursorPos(ImVec2(0, 0));
   ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0,0,0,0));
   ImGui::BeginChild("##mm_left", ImVec2(kLeftW, winH), false,
                     ImGuiWindowFlags_NoScrollbar);
   ImGui::PopStyleColor();
 
-  // Vertical centering: place content at ~35% from top
-  float topPad = winH * 0.28f;
-  ImGui::Dummy(ImVec2(0, topPad));
-  ImGui::SetCursorPosX(52.0f);
+  GLuint logoTex = GetMainLogoTexture();
+  const float kLogoMax = 300.0f;
 
-  PushMF(g_ManagerFontHero);
-  ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
-  ImGui::TextUnformatted("Classic");
-  ImGui::PopStyleColor();
-  PopMF(g_ManagerFontHero);
+  // Center logo in left hero area
+  float logoX = (kLeftW - kLogoMax) * 0.5f;
+  float logoY = (winH - kLogoMax) * 0.5f - 30.0f;
+  if (logoY < 20.0f) logoY = 20.0f;
 
-  ImGui::SetCursorPosX(52.0f);
-  PushMF(g_ManagerFontHero);
-  ImGui::PushStyleColor(ImGuiCol_Text, kTextPri);
-  ImGui::TextUnformatted("Manager");
-  ImGui::PopStyleColor();
-  PopMF(g_ManagerFontHero);
+  if (logoTex) {
+    dl->AddImage((ImTextureID)(intptr_t)logoTex,
+                 ImVec2(wp.x + logoX, wp.y + logoY),
+                 ImVec2(wp.x + logoX + kLogoMax, wp.y + logoY + kLogoMax));
+  }
 
-  ImGui::Dummy(ImVec2(0, 14.0f));
-  ImGui::SetCursorPosX(54.0f);
+  // Supporting text centered below logo
+  const char *sub1 = "Build your career. Shape your club.";
+  const char *sub2 = "Watch football unfold.";
+  ImVec2 sz1 = ImGui::CalcTextSize(sub1);
+  ImVec2 sz2 = ImGui::CalcTextSize(sub2);
+  float textY = logoY + kLogoMax + 16.0f;
+
   PushMF(g_ManagerFontRegular);
-  ImGui::PushStyleColor(ImGuiCol_Text, kTextSec);
-  ImGui::TextUnformatted("Build your career. Shape your club.");
-  ImGui::PopStyleColor();
-  ImGui::SetCursorPosX(54.0f);
-  ImGui::PushStyleColor(ImGuiCol_Text, kTextSec);
-  ImGui::TextUnformatted("Watch football unfold.");
-  ImGui::PopStyleColor();
+  dl->AddText(ImVec2(wp.x + (kLeftW - sz1.x) * 0.5f, wp.y + textY),
+              C32(kTextSec), sub1);
+  dl->AddText(ImVec2(wp.x + (kLeftW - sz2.x) * 0.5f, wp.y + textY + 22.0f),
+              C32(kTextSec), sub2);
   PopMF(g_ManagerFontRegular);
-
-  // Bottom version text
-  float versionY = winH - 32.0f;
-  ImGui::SetCursorPos(ImVec2(54.0f, versionY));
-  PushMF(g_ManagerFontSmall);
-  ImGui::PushStyleColor(ImGuiCol_Text, kTextDim);
-  ImGui::TextUnformatted("Pre-alpha \xe2\x80\x94 Career Mode");
-  ImGui::PopStyleColor();
-  PopMF(g_ManagerFontSmall);
 
   ImGui::EndChild();
 
   // ---- Vertical accent line -------------------------------------------
-  {
-    ImVec2 wp = ImGui::GetWindowPos();
-    ImGui::GetWindowDrawList()->AddLine(
-      ImVec2(wp.x + kLeftW, wp.y + winH * 0.15f),
-      ImVec2(wp.x + kLeftW, wp.y + winH * 0.85f),
-      C32(kBorder), 1.0f);
-  }
+  dl->AddLine(
+    ImVec2(wp.x + kLeftW, wp.y + winH * 0.15f),
+    ImVec2(wp.x + kLeftW, wp.y + winH * 0.85f),
+    C32(kBorder), 1.0f);
 
-  // ---- Right action card ----------------------------------------------
-  const float kCardW = 340.0f;
+  // ---- Right action card (centered) -----------------------------------
+  const float kCardW = 430.0f;
   const float kCardH = 320.0f;
-  float cardX = kLeftW + (kRightW - kCardW) * 0.5f;
-  float cardY = (winH - kCardH) * 0.5f;
+  float cardCenterX = winW * 0.70f;
+  float cardCenterY = winH * 0.50f;
+  float cardX = cardCenterX - kCardW * 0.5f;
+  float cardY = cardCenterY - kCardH * 0.5f;
   if (cardY < 10.0f) cardY = 10.0f;
 
-  ImVec2 p0 = ImVec2(ImGui::GetWindowPos().x + cardX, ImGui::GetWindowPos().y + cardY);
+  ImVec2 p0 = ImVec2(wp.x + cardX, wp.y + cardY);
   ImVec2 p1 = ImVec2(p0.x + kCardW, p0.y + kCardH);
-  ImDrawList *dl = ImGui::GetWindowDrawList();
   dl->AddRectFilled(p0, p1, C32(kBgCard), 14.0f);
   dl->AddRect(p0, p1, C32(kBorder), 14.0f, 0, 1.0f);
   dl->AddLine(ImVec2(p0.x+16,p0.y+1), ImVec2(p1.x-16,p0.y+1),
@@ -522,20 +681,19 @@ static void DrawMainMenuScreen(float winW, float winH) {
   ImGui::SetCursorPos(ImVec2(cardX, cardY));
   ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0,0,0,0));
   ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 14.0f);
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(28.0f, 24.0f));
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(28.0f, 32.0f));
   ImGui::BeginChild("##mm_card", ImVec2(kCardW, kCardH), false);
   ImGui::PopStyleVar(2);
   ImGui::PopStyleColor();
 
-  PushMF(g_ManagerFontSmall);
-  ImGui::PushStyleColor(ImGuiCol_Text, kTextDim);
-  ImGui::TextUnformatted("CHOOSE YOUR PATH");
-  ImGui::PopStyleColor();
-  PopMF(g_ManagerFontSmall);
-  ImGui::Dummy(ImVec2(0, 14.0f));
-
-  float btnW = kCardW - 56.0f;
+  // Vertically center buttons inside card
   const float kBtnH = 44.0f;
+  const float kGap  = 18.0f;
+  float btnW = kCardW - 90.0f;
+  float totalBtnH = 4.0f * kBtnH + 3.0f * kGap;
+  float topSpacing = (kCardH - 64.0f - totalBtnH) * 0.5f;
+  if (topSpacing < 8.0f) topSpacing = 8.0f;
+  ImGui::Dummy(ImVec2(0, topSpacing));
 
   PushMF(g_ManagerFontBold);
   ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12.0f, 8.0f));
@@ -544,22 +702,19 @@ static void DrawMainMenuScreen(float winW, float winH) {
     printf("[IMGUI MAIN MENU] New Game requested\n");
     g_PreCareer.pendingAction = 1;
   }
-
-  ImGui::Dummy(ImVec2(0, 6.0f));
+  ImGui::Dummy(ImVec2(0, kGap));
 
   if (SecBtn("Load Career", ImVec2(btnW, kBtnH))) {
     printf("[IMGUI MAIN MENU] Load Game requested\n");
     g_PreCareer.pendingAction = 2;
   }
-
-  ImGui::Dummy(ImVec2(0, 6.0f));
+  ImGui::Dummy(ImVec2(0, kGap));
 
   if (SecBtn("Settings", ImVec2(btnW, kBtnH))) {
     printf("[IMGUI MAIN MENU] Settings requested\n");
     g_PreCareer.pendingAction = 3;
   }
-
-  ImGui::Dummy(ImVec2(0, 6.0f));
+  ImGui::Dummy(ImVec2(0, kGap));
 
   if (DangerBtn("Quit", ImVec2(btnW, kBtnH))) {
     printf("[IMGUI MAIN MENU] Quit requested\n");
@@ -570,6 +725,9 @@ static void DrawMainMenuScreen(float winW, float winH) {
   PopMF(g_ManagerFontBold);
 
   ImGui::EndChild();
+
+  // ---- Footer ---------------------------------------------------------
+  DrawPreCareerFooter(winW, winH);
 }
 
 // =========================================================================
@@ -586,12 +744,30 @@ static const char *kGenders[] = { "Male", "Female" };
 static const int kGenderCount  = 2;
 
 static void DrawCreateProfileScreen(float winW, float winH) {
-  const float kCardW = 480.0f;
+  ImDrawList *dl = ImGui::GetWindowDrawList();
+  ImVec2 wp = ImGui::GetWindowPos();
+
+  const float kCardW = 560.0f;
   const float kCardH = 520.0f;
+
+  // Logo above card
+  GLuint logoTex = GetMainLogoTexture();
+  const float kLogoSz = 80.0f;
+  float cardCenterX = (winW - kCardW) * 0.5f;
+  float cardCenterY = (winH - kCardH) * 0.5f;
+  if (cardCenterY < 10.0f) cardCenterY = 10.0f;
+
+  if (logoTex) {
+    float logoX = cardCenterX + (kCardW - kLogoSz) * 0.5f;
+    float logoY = cardCenterY - kLogoSz - 28.0f;
+    if (logoY < 10.0f) logoY = 10.0f;
+    dl->AddImage((ImTextureID)(intptr_t)logoTex,
+                 ImVec2(wp.x + logoX, wp.y + logoY),
+                 ImVec2(wp.x + logoX + kLogoSz, wp.y + logoY + kLogoSz));
+  }
 
   BeginCenteredCard("##cp_card", kCardW, kCardH, winW, winH);
 
-  // Title
   PushMF(g_ManagerFontTitle);
   ImGui::PushStyleColor(ImGuiCol_Text, kTextPri);
   ImGui::TextUnformatted("Create Manager");
@@ -607,9 +783,8 @@ static void DrawCreateProfileScreen(float winW, float winH) {
 
   ImGui::Dummy(ImVec2(0, 20.0f));
 
-  float fW = kCardW - 64.0f; // field width
+  float fW = kCardW - 64.0f;
 
-  // ---- Manager Name ---------------------------------------------------
   PushMF(g_ManagerFontSmall);
   ImGui::PushStyleColor(ImGuiCol_Text, kTextSec);
   ImGui::TextUnformatted("MANAGER NAME");
@@ -623,7 +798,6 @@ static void DrawCreateProfileScreen(float winW, float winH) {
 
   ImGui::Dummy(ImVec2(0, 12.0f));
 
-  // ---- Manager Age ----------------------------------------------------
   PushMF(g_ManagerFontSmall);
   ImGui::PushStyleColor(ImGuiCol_Text, kTextSec);
   ImGui::TextUnformatted("AGE  (18 \xe2\x80\x93 99)");
@@ -638,7 +812,6 @@ static void DrawCreateProfileScreen(float winW, float winH) {
 
   ImGui::Dummy(ImVec2(0, 12.0f));
 
-  // ---- Nationality ----------------------------------------------------
   PushMF(g_ManagerFontSmall);
   ImGui::PushStyleColor(ImGuiCol_Text, kTextSec);
   ImGui::TextUnformatted("NATIONALITY");
@@ -652,7 +825,6 @@ static void DrawCreateProfileScreen(float winW, float winH) {
 
   ImGui::Dummy(ImVec2(0, 12.0f));
 
-  // ---- Gender ---------------------------------------------------------
   PushMF(g_ManagerFontSmall);
   ImGui::PushStyleColor(ImGuiCol_Text, kTextSec);
   ImGui::TextUnformatted("GENDER");
@@ -666,7 +838,6 @@ static void DrawCreateProfileScreen(float winW, float winH) {
 
   ImGui::Dummy(ImVec2(0, 24.0f));
 
-  // ---- Buttons --------------------------------------------------------
   ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12.0f, 8.0f));
   PushMF(g_ManagerFontBold);
 
@@ -684,11 +855,36 @@ static void DrawCreateProfileScreen(float winW, float winH) {
   ImGui::PopStyleVar();
 
   EndCenteredCard();
+
+  DrawPreCareerFooter(winW, winH);
 }
 
+// =========================================================================
+// Screen: Settings
+// =========================================================================
+
 static void DrawSettingsPlaceholderScreen(float winW, float winH) {
+  ImDrawList *dl = ImGui::GetWindowDrawList();
+  ImVec2 wp = ImGui::GetWindowPos();
+
   const float kCardW = 520.0f;
   const float kCardH = 320.0f;
+
+  // Logo above card
+  GLuint logoTex = GetMainLogoTexture();
+  const float kLogoSz = 80.0f;
+  float cardCenterX = (winW - kCardW) * 0.5f;
+  float cardCenterY = (winH - kCardH) * 0.5f;
+  if (cardCenterY < 10.0f) cardCenterY = 10.0f;
+
+  if (logoTex) {
+    float logoX = cardCenterX + (kCardW - kLogoSz) * 0.5f;
+    float logoY = cardCenterY - kLogoSz - 28.0f;
+    if (logoY < 10.0f) logoY = 10.0f;
+    dl->AddImage((ImTextureID)(intptr_t)logoTex,
+                 ImVec2(wp.x + logoX, wp.y + logoY),
+                 ImVec2(wp.x + logoX + kLogoSz, wp.y + logoY + kLogoSz));
+  }
 
   BeginCenteredCard("##settings_card", kCardW, kCardH, winW, winH);
 
@@ -717,6 +913,8 @@ static void DrawSettingsPlaceholderScreen(float winW, float winH) {
   ImGui::PopStyleVar();
 
   EndCenteredCard();
+
+  DrawPreCareerFooter(winW, winH);
 }
 
 // =========================================================================
@@ -724,12 +922,30 @@ static void DrawSettingsPlaceholderScreen(float winW, float winH) {
 // =========================================================================
 
 static void DrawLoadGameScreen(float winW, float winH) {
-  const float kCardW = 640.0f;
-  const float kCardH = winH * 0.72f < 460.0f ? 460.0f : winH * 0.72f;
+  ImDrawList *dl = ImGui::GetWindowDrawList();
+  ImVec2 wp = ImGui::GetWindowPos();
+
+  const float kCardW = 720.0f;
+  const float kCardH = winH * 0.72f < 620.0f ? 620.0f : winH * 0.72f;
+
+  // Logo above card
+  GLuint logoTex = GetMainLogoTexture();
+  const float kLogoSz = 80.0f;
+  float cardCenterX = (winW - kCardW) * 0.5f;
+  float cardCenterY = (winH - kCardH) * 0.5f;
+  if (cardCenterY < 10.0f) cardCenterY = 10.0f;
+
+  if (logoTex) {
+    float logoX = cardCenterX + (kCardW - kLogoSz) * 0.5f;
+    float logoY = cardCenterY - kLogoSz - 28.0f;
+    if (logoY < 10.0f) logoY = 10.0f;
+    dl->AddImage((ImTextureID)(intptr_t)logoTex,
+                 ImVec2(wp.x + logoX, wp.y + logoY),
+                 ImVec2(wp.x + logoX + kLogoSz, wp.y + logoY + kLogoSz));
+  }
 
   BeginCenteredCard("##lg_card", kCardW, kCardH, winW, winH);
 
-  // Header
   PushMF(g_ManagerFontTitle);
   ImGui::PushStyleColor(ImGuiCol_Text, kTextPri);
   ImGui::TextUnformatted("Load Career");
@@ -749,8 +965,7 @@ static void DrawLoadGameScreen(float winW, float winH) {
   ImGui::PopStyleColor();
   ImGui::Dummy(ImVec2(0, 6.0f));
 
-  // Save list
-  float listH = kCardH - 160.0f;
+  float listH = kCardH - 180.0f;
   if (listH < 80.0f) listH = 80.0f;
 
   ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0,0,0,0));
@@ -773,14 +988,14 @@ static void DrawLoadGameScreen(float winW, float winH) {
   }
 
   float rowW = kCardW - 64.0f;
+  const float kRowH = 78.0f;
+  const float kBadgeSz = 44.0f;
+
   for (unsigned int i = 0; i < g_PreCareer.saves.size(); i++) {
     const auto &s = g_PreCareer.saves.at(i);
 
-    // Row card
     ImVec2 rp0 = ImGui::GetCursorScreenPos();
-    const float kRowH = 64.0f;
     ImVec2 rp1 = ImVec2(rp0.x + rowW, rp0.y + kRowH);
-    ImDrawList *dl = ImGui::GetWindowDrawList();
 
     char rowId[32]; snprintf(rowId, sizeof(rowId), "##lg_row_%d", s.id);
     bool clicked = ImGui::InvisibleButton(rowId, ImVec2(rowW, kRowH));
@@ -792,27 +1007,43 @@ static void DrawLoadGameScreen(float winW, float winH) {
       dl->AddRectFilled(rp0, rp1, IM_COL32(18,28,52,120), 8.0f);
     dl->AddRect(rp0, rp1, C32(kBorder), 8.0f, 0, 0.8f);
 
-    // Name
-    ImFont *bf = g_ManagerFontBold ? g_ManagerFontBold : nullptr;
+    // Team badge
+    GLuint badgeTex = LoadImageTexture(s.logoUrl);
+    ImVec2 badgePos = ImVec2(rp0.x + 12.0f, rp0.y + (kRowH - kBadgeSz) * 0.5f);
+    DrawImageBadgeAt(dl, badgePos, badgeTex, s.shortName, kBadgeSz);
+
+    // Shortname pill
+    PushMF(g_ManagerFontSmall);
+    ImVec2 pillTsz = ImGui::CalcTextSize(s.shortName.c_str());
+    float pillPadX = 6.0f, pillPadY = 2.0f;
+    ImVec2 pillPos = ImVec2(rp0.x + 12.0f + kBadgeSz + 8.0f, rp0.y + 8.0f);
+    ImVec2 pillEnd = ImVec2(pillPos.x + pillTsz.x + pillPadX*2, pillPos.y + pillTsz.y + pillPadY*2);
+    dl->AddRectFilled(pillPos, pillEnd, C32(kBgCardAlt), 4.0f);
+    dl->AddText(ImVec2(pillPos.x + pillPadX, pillPos.y + pillPadY),
+                C32(kTextSec), s.shortName.c_str());
+    PopMF(g_ManagerFontSmall);
+
+    // Manager name
+    ImFont *bf = g_ManagerFontBold;
     if (bf) ImGui::PushFont(bf);
     float lh = ImGui::GetTextLineHeight();
     dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
-                ImVec2(rp0.x + 14.0f, rp0.y + (kRowH - lh * 2.2f) * 0.5f),
+                ImVec2(rp0.x + 12.0f + kBadgeSz + 8.0f, rp0.y + 8.0f + pillTsz.y + pillPadY*2 + 4.0f),
                 C32(hov ? kAccent : kTextPri), s.name.c_str());
     if (bf) ImGui::PopFont();
 
-    // Sub info
-    ImFont *sf = g_ManagerFontSmall ? g_ManagerFontSmall : nullptr;
-    char sub[128];
-    snprintf(sub, sizeof(sub), "%s  \xe2\x80\xa2  %s  \xe2\x80\xa2  Age %d",
-             s.clubName.empty() ? "No Club" : s.clubName.c_str(),
+    // Club, nationality, age
+    ImFont *sf = g_ManagerFontSmall;
+    char sub[160];
+    snprintf(sub, sizeof(sub), "%s%s%s%s Age %d",
+             s.clubName.empty() ? "" : s.clubName.c_str(),
+             s.clubName.empty() ? "" : " \xe2\x80\xa2 ",
              s.nationality.empty() ? "" : s.nationality.c_str(),
+             s.nationality.empty() ? "" : " \xe2\x80\xa2 ",
              s.age);
     if (sf) ImGui::PushFont(sf);
-    float slh = ImGui::GetTextLineHeight();
-    float subY = rp0.y + (kRowH + lh * 0.2f) * 0.5f;
     dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
-                ImVec2(rp0.x + 14.0f, subY),
+                ImVec2(rp0.x + 12.0f + kBadgeSz + 8.0f, rp0.y + kRowH - 22.0f),
                 C32(kTextSec), sub);
     if (sf) ImGui::PopFont();
 
@@ -826,7 +1057,6 @@ static void DrawLoadGameScreen(float winW, float winH) {
 
   ImGui::EndChild();
 
-  // Back button
   ImGui::Dummy(ImVec2(0, 10.0f));
   ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12.0f, 8.0f));
   PushMF(g_ManagerFontBold);
@@ -836,6 +1066,8 @@ static void DrawLoadGameScreen(float winW, float winH) {
   ImGui::PopStyleVar();
 
   EndCenteredCard();
+
+  DrawPreCareerFooter(winW, winH);
 }
 
 // =========================================================================
@@ -843,11 +1075,30 @@ static void DrawLoadGameScreen(float winW, float winH) {
 // =========================================================================
 
 static void DrawSelectLeagueScreen(float winW, float winH) {
+  ImDrawList *dl = ImGui::GetWindowDrawList();
+  ImVec2 wp = ImGui::GetWindowPos();
+
   const int kLeagueCount = (int)g_PreCareer.leagues.size();
-  const float kRowH  = 52.0f;
-  const float kCardW = 420.0f;
+  const float kRowH  = 64.0f;
+  const float kCardW = 560.0f;
   float innerH = 80.0f + (float)kLeagueCount * (kRowH + 6.0f) + 60.0f;
   float kCardH = innerH < 280.0f ? 280.0f : (innerH > winH - 40.0f ? winH - 40.0f : innerH);
+
+  // Logo above card
+  GLuint logoTex = GetMainLogoTexture();
+  const float kLogoSz = 80.0f;
+  float cardCenterX = (winW - kCardW) * 0.5f;
+  float cardCenterY = (winH - kCardH) * 0.5f;
+  if (cardCenterY < 10.0f) cardCenterY = 10.0f;
+
+  if (logoTex) {
+    float logoX = cardCenterX + (kCardW - kLogoSz) * 0.5f;
+    float logoY = cardCenterY - kLogoSz - 28.0f;
+    if (logoY < 10.0f) logoY = 10.0f;
+    dl->AddImage((ImTextureID)(intptr_t)logoTex,
+                 ImVec2(wp.x + logoX, wp.y + logoY),
+                 ImVec2(wp.x + logoX + kLogoSz, wp.y + logoY + kLogoSz));
+  }
 
   BeginCenteredCard("##sl_card", kCardW, kCardH, winW, winH);
 
@@ -869,13 +1120,7 @@ static void DrawSelectLeagueScreen(float winW, float winH) {
   ImGui::Dummy(ImVec2(0, 8.0f));
 
   float itemW = kCardW - 64.0f;
-
-  // Scrollable league list
-  float listH = kCardH - 160.0f;
-  if (listH < 60.0f) listH = 60.0f;
-  ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0,0,0,0));
-  ImGui::BeginChild("##sl_scroll", ImVec2(0, listH), false);
-  ImGui::PopStyleColor();
+  const float kLogoBadgeSz = 40.0f;
 
   if (g_PreCareer.leagues.empty()) {
     ImGui::PushStyleColor(ImGuiCol_Text, kTextSec);
@@ -887,7 +1132,6 @@ static void DrawSelectLeagueScreen(float winW, float winH) {
     const auto &lg = g_PreCareer.leagues.at(i);
     ImVec2 rp0 = ImGui::GetCursorScreenPos();
     ImVec2 rp1 = ImVec2(rp0.x + itemW, rp0.y + kRowH);
-    ImDrawList *dl = ImGui::GetWindowDrawList();
 
     char bid[32]; snprintf(bid, sizeof(bid), "##sl_lg_%d", lg.id);
     bool clicked = ImGui::InvisibleButton(bid, ImVec2(itemW, kRowH));
@@ -898,32 +1142,17 @@ static void DrawSelectLeagueScreen(float winW, float winH) {
     dl->AddRect(rp0, rp1, C32(kBorder), 8.0f, 0, 0.8f);
     if (hov) dl->AddRectFilled(rp0, ImVec2(rp0.x+3.0f, rp1.y), C32(kAccent), 2.0f);
 
-    // League initial badge
-    {
-      std::string ini;
-      for (unsigned int c = 0; c < lg.name.size() && (int)ini.size() < 2; c++)
-        if (isupper((unsigned char)lg.name[c])) ini += lg.name[c];
-      if (ini.empty() && !lg.name.empty()) ini = lg.name.substr(0, 2);
-      unsigned int hash = 5381;
-      for (char c : lg.name) hash = ((hash << 5) + hash) ^ (unsigned char)c;
-      float hue = (float)(hash % 360) / 360.0f;
-      float r, g, b2;
-      ImGui::ColorConvertHSVtoRGB(hue, 0.50f, 0.45f, r, g, b2);
-      float bsz = 28.0f;
-      float bx = rp0.x + 10.0f;
-      float by = rp0.y + (kRowH - bsz) * 0.5f;
-      dl->AddRectFilled(ImVec2(bx,by), ImVec2(bx+bsz,by+bsz),
-        IM_COL32((int)(r*255),(int)(g*255),(int)(b2*255),200), 5.0f);
-      ImVec2 tsz = ImGui::CalcTextSize(ini.c_str());
-      dl->AddText(ImVec2(bx+(bsz-tsz.x)*0.5f, by+(bsz-tsz.y)*0.5f),
-                  IM_COL32(255,255,255,210), ini.c_str());
-    }
+    // League logo
+    GLuint leagueTex = LoadImageTexture(lg.logoUrl);
+    ImVec2 badgePos = ImVec2(rp0.x + 10.0f, rp0.y + (kRowH - kLogoBadgeSz) * 0.5f);
+    DrawImageBadgeAt(dl, badgePos, leagueTex, lg.name, kLogoBadgeSz);
 
+    // League name
     ImFont *bf = hov ? g_ManagerFontBold : g_ManagerFontRegular;
     if (bf) ImGui::PushFont(bf);
     float lh = ImGui::GetTextLineHeight();
     dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
-                ImVec2(rp0.x + 46.0f, rp0.y + (kRowH - lh) * 0.5f),
+                ImVec2(rp0.x + 10.0f + kLogoBadgeSz + 14.0f, rp0.y + (kRowH - lh) * 0.5f),
                 C32(hov ? kTextPri : kTextSec), lg.name.c_str());
     if (bf) ImGui::PopFont();
 
@@ -935,8 +1164,6 @@ static void DrawSelectLeagueScreen(float winW, float winH) {
     ImGui::Dummy(ImVec2(0, 6.0f));
   }
 
-  ImGui::EndChild();
-
   ImGui::Dummy(ImVec2(0, 10.0f));
   ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12.0f, 8.0f));
   PushMF(g_ManagerFontBold);
@@ -946,6 +1173,8 @@ static void DrawSelectLeagueScreen(float winW, float winH) {
   ImGui::PopStyleVar();
 
   EndCenteredCard();
+
+  DrawPreCareerFooter(winW, winH);
 }
 
 // =========================================================================
@@ -953,11 +1182,30 @@ static void DrawSelectLeagueScreen(float winW, float winH) {
 // =========================================================================
 
 static void DrawSelectClubScreen(float winW, float winH) {
+  ImDrawList *dl = ImGui::GetWindowDrawList();
+  ImVec2 wp = ImGui::GetWindowPos();
+
   const int kClubCount = (int)g_PreCareer.clubs.size();
   const float kRowH    = 56.0f;
   const float kCardW   = 520.0f;
   float innerH = 100.0f + (float)kClubCount * (kRowH + 6.0f) + 110.0f;
   float kCardH = innerH < 320.0f ? 320.0f : (innerH > winH - 40.0f ? winH - 40.0f : innerH);
+
+  // Logo above card
+  GLuint logoTex = GetMainLogoTexture();
+  const float kLogoSz = 80.0f;
+  float cardCenterX = (winW - kCardW) * 0.5f;
+  float cardCenterY = (winH - kCardH) * 0.5f;
+  if (cardCenterY < 10.0f) cardCenterY = 10.0f;
+
+  if (logoTex) {
+    float logoX = cardCenterX + (kCardW - kLogoSz) * 0.5f;
+    float logoY = cardCenterY - kLogoSz - 28.0f;
+    if (logoY < 10.0f) logoY = 10.0f;
+    dl->AddImage((ImTextureID)(intptr_t)logoTex,
+                 ImVec2(wp.x + logoX, wp.y + logoY),
+                 ImVec2(wp.x + logoX + kLogoSz, wp.y + logoY + kLogoSz));
+  }
 
   BeginCenteredCard("##sc_card", kCardW, kCardH, winW, winH);
 
@@ -979,13 +1227,9 @@ static void DrawSelectClubScreen(float winW, float winH) {
   ImGui::Dummy(ImVec2(0, 8.0f));
 
   float itemW = kCardW - 64.0f;
+  const float kBadgeSz = 32.0f;
 
-  float listH = kCardH - 210.0f;
-  if (listH < 60.0f) listH = 60.0f;
-  ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0,0,0,0));
-  ImGui::BeginChild("##sc_scroll", ImVec2(0, listH), false);
-  ImGui::PopStyleColor();
-
+  // No scroll - show clubs directly
   if (g_PreCareer.clubs.empty()) {
     ImGui::PushStyleColor(ImGuiCol_Text, kTextSec);
     ImGui::TextUnformatted("No clubs found in this league.");
@@ -998,7 +1242,6 @@ static void DrawSelectClubScreen(float winW, float winH) {
 
     ImVec2 rp0 = ImGui::GetCursorScreenPos();
     ImVec2 rp1 = ImVec2(rp0.x + itemW, rp0.y + kRowH);
-    ImDrawList *dl = ImGui::GetWindowDrawList();
 
     char bid[32]; snprintf(bid, sizeof(bid), "##sc_cl_%d", cl.id);
     bool clicked = ImGui::InvisibleButton(bid, ImVec2(itemW, kRowH));
@@ -1014,26 +1257,9 @@ static void DrawSelectClubScreen(float winW, float winH) {
 
     // Club badge
     const std::string &sn = cl.shortName.empty() ? cl.name : cl.shortName;
-    {
-      float bsz = 32.0f;
-      float bx = rp0.x + 10.0f;
-      float by = rp0.y + (kRowH - bsz) * 0.5f;
-      unsigned int hash = 5381;
-      for (char c : sn) hash = ((hash << 5) + hash) ^ (unsigned char)c;
-      float hue = (float)(hash % 360) / 360.0f;
-      float r, g, b;
-      ImGui::ColorConvertHSVtoRGB(hue, 0.55f, 0.48f, r, g, b);
-      dl->AddRectFilled(ImVec2(bx,by), ImVec2(bx+bsz,by+bsz),
-        IM_COL32((int)(r*255),(int)(g*255),(int)(b*255),215), bsz*0.22f);
-      std::string ini;
-      for (unsigned int c2 = 0; c2 < sn.size() && (int)ini.size() < 2; c2++)
-        if (isalpha((unsigned char)sn[c2])) ini += (char)toupper((unsigned char)sn[c2]);
-      if (!ini.empty()) {
-        ImVec2 tsz = ImGui::CalcTextSize(ini.c_str());
-        dl->AddText(ImVec2(bx+(bsz-tsz.x)*0.5f, by+(bsz-tsz.y)*0.5f),
-                    IM_COL32(255,255,255,215), ini.c_str());
-      }
-    }
+    GLuint badgeTex = LoadImageTexture(cl.logoPath);
+    ImVec2 badgePos = ImVec2(rp0.x + 10.0f, rp0.y + (kRowH - kBadgeSz) * 0.5f);
+    DrawImageBadgeAt(dl, badgePos, badgeTex, sn, kBadgeSz);
 
     // Full name
     ImFont *bf = sel ? g_ManagerFontBold : (hov ? g_ManagerFontBold : g_ManagerFontRegular);
@@ -1041,7 +1267,7 @@ static void DrawSelectClubScreen(float winW, float winH) {
     float lh = ImGui::GetTextLineHeight();
     ImVec4 nc = sel ? kAccent : (hov ? kTextPri : kTextSec);
     dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
-                ImVec2(rp0.x + 50.0f, rp0.y + (kRowH - lh) * 0.5f),
+                ImVec2(rp0.x + 10.0f + kBadgeSz + 14.0f, rp0.y + (kRowH - lh) * 0.5f),
                 C32(nc), cl.name.c_str());
     if (bf) ImGui::PopFont();
 
@@ -1054,16 +1280,13 @@ static void DrawSelectClubScreen(float winW, float winH) {
       PopMF(g_ManagerFontSmall);
     }
 
-    // Direct update — no deferred action needed (not a page transition)
     if (clicked) g_PreCareer.selectedClubId = cl.id;
 
     ImGui::Dummy(ImVec2(0, 6.0f));
   }
 
-  ImGui::EndChild();
   ImGui::Dummy(ImVec2(0, 12.0f));
 
-  // Buttons
   ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12.0f, 8.0f));
   PushMF(g_ManagerFontBold);
 
@@ -1085,6 +1308,8 @@ static void DrawSelectClubScreen(float winW, float winH) {
   ImGui::PopStyleVar();
 
   EndCenteredCard();
+
+  DrawPreCareerFooter(winW, winH);
 }
 
 // =========================================================================
@@ -1137,6 +1362,8 @@ void RenderImGuiPreCareer() {
     default:
       break;
   }
+
+  DrawPreCareerFooter(winW, winH);
 
   ImGui::End();
   ProcessPreCareerPendingAction();
