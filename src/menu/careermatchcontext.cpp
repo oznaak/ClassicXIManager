@@ -15,7 +15,8 @@ static std::string DBCell(DatabaseResult *r, unsigned int row, unsigned int col)
 }
 
 void CompleteScheduledFixture(int managerId, int fixtureId,
-                              int homeScore, int awayScore) {
+                              int homeScore, int awayScore,
+                              const std::string &statsJson) {
   // Guard: verify fixture exists and is not already played.
   std::stringstream chk;
   chk << "SELECT id, league_id, home_team_id, away_team_id, status"
@@ -39,11 +40,19 @@ void CompleteScheduledFixture(int managerId, int fixtureId,
     return;
   }
 
+  // Escape single quotes in statsJson for safe embedding.
+  std::string safeStats;
+  for (unsigned int si = 0; si < statsJson.size(); si++) {
+    if (statsJson[si] == '\'') safeStats += "''";
+    else safeStats += statsJson[si];
+  }
+
   // Mark fixture played.
   std::stringstream uq;
   uq << "UPDATE fixtures SET status='played',"
      << " home_score=" << homeScore << ","
      << " away_score=" << awayScore << ","
+     << " stats_json='" << safeStats << "',"
      << " played_at=datetime('now')"
      << " WHERE id=" << fixtureId << " AND manager_id=" << managerId << ";";
   DatabaseResult *ur = GetDB()->Query(uq.str());

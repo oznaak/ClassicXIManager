@@ -38,6 +38,7 @@ struct CareerHubState {
   };
   bool         hasTodayFixture = false;
   TodayFixture todayFixture;
+  bool         isAdvancing     = false; // true while AdvanceDay() is running
 
   struct ManagerInfo {
     std::string name, age, nationality, gender, clubName;

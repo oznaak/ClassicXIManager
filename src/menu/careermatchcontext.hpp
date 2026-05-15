@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+
 // Session-scoped context for a scheduled career fixture.
 // Set by PlayFixture(), cleared by Test Engine and after result is stored.
 // Read by GameOverPage to capture the final score and update the DB.
@@ -19,5 +21,7 @@ extern CareerMatchContext g_CareerMatchContext;
 
 // Store match result and update standings.
 // No-op if fixture is already 'played'.
+// statsJson is stored verbatim in fixtures.stats_json (defaults to "{}").
 void CompleteScheduledFixture(int managerId, int fixtureId,
-                              int homeScore, int awayScore);
+                              int homeScore, int awayScore,
+                              const std::string &statsJson = "{}");

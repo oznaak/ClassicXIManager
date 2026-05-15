@@ -148,6 +148,7 @@ void CareerHubState::Clear() {
   seasonYear      = 0;
   hasTodayFixture = false;
   todayFixture    = {};
+  isAdvancing     = false;
   manager = {};
   club    = {};
   players.clear();
@@ -346,6 +347,7 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
     delete fr;
   }
 
+  isAdvancing = false;
   active = true;
 }
 
@@ -870,10 +872,14 @@ static void DrawTopHeader(float contentX, float contentW) {
   ImGui::SetCursorPos(ImVec2(rightEdge - kBtnW, elemY));
   if (SecBtn("Test Engine", ImVec2(kBtnW, kElemH))) s_playClicked = true;
 
-  // Advance / Play Match button — changes label based on matchday.
+  // Advance / Play Match button — changes label based on matchday / advancing state.
   float advBtnX = rightEdge - kBtnW - kGap - kBtnW;
   ImGui::SetCursorPos(ImVec2(advBtnX, elemY));
-  if (g_CareerHub.hasTodayFixture) {
+  if (g_CareerHub.isAdvancing) {
+    ImGui::BeginDisabled();
+    CTAButton("Advancing...", ImVec2(kBtnW, kElemH));
+    ImGui::EndDisabled();
+  } else if (g_CareerHub.hasTodayFixture) {
     if (CTAButton("Play Match", ImVec2(kBtnW, kElemH))) s_advanceClicked = true;
   } else {
     if (CTAButton("Advance", ImVec2(kBtnW, kElemH))) s_advanceClicked = true;
