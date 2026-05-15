@@ -18,6 +18,7 @@
 #include "opengl_renderer3d.hpp"
 #include "menu/imgui_career.hpp"
 #include "menu/imgui_manager_fonts.hpp"
+#include "menu/imgui_menu.hpp"
 
 #ifdef __APPLE__
 #define GL_SILENCE_DEPRECATION
@@ -79,6 +80,7 @@ struct GLfunctions {
       ImGui::NewFrame();
 
       RenderImGuiCareerHub();
+      RenderImGuiPreCareer();
 
       ImGui::Render();
       ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
@@ -2325,7 +2327,13 @@ struct GLfunctions {
           ImGui_ImplSDL2_ProcessEvent(&event);
 
         if (contextIsActive) { // context must be active
-          UserEventManager::GetInstance().InputSDLEvent(event);
+          bool wantCapture = false;
+          if (imguiInitialized) {
+            ImGuiIO &io = ImGui::GetIO();
+            wantCapture = io.WantCaptureKeyboard || io.WantCaptureMouse;
+          }
+          if (!wantCapture)
+            UserEventManager::GetInstance().InputSDLEvent(event);
         }
 
       }
@@ -2355,6 +2363,7 @@ struct GLfunctions {
           g_CareerHub.onMainMenu();
         }
       }
+
 
     }
 

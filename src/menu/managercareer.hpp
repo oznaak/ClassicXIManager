@@ -12,6 +12,8 @@
 
 using namespace blunted;
 
+void GenerateCareerSeason(int managerId);
+
 class ManagerCreateProfilePage : public Gui2Page {
  public:
   ManagerCreateProfilePage(Gui2WindowManager *windowManager, const Gui2PageData &pageData);

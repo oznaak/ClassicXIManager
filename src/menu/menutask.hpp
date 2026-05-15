@@ -81,10 +81,18 @@ class MenuTask : public Gui2Task {
       managerMainMenuPending = true;
     }
 
+    void RequestManagerCareerPage(int managerId) {
+      printf("[MENUTASK] Manager career page requested for manager %d\n", managerId);
+      managerCareerPagePending = true;
+      managerCareerPageId = managerId;
+    }
+
   protected:
     e_MenuAction menuAction;
     bool managerMatchPending;
     bool managerMainMenuPending;
+    bool managerCareerPagePending;
+    int managerCareerPageId;
 
     Lockable<QueuedFixture> queuedFixture; // todo: we can probably unlock this stuff
 

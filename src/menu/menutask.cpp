@@ -91,6 +91,8 @@ MenuTask::MenuTask(float aspectRatio, float margin, TTF_Font *defaultFont, TTF_F
 
   managerMatchPending    = false;
   managerMainMenuPending = false;
+  managerCareerPagePending = false;
+  managerCareerPageId = 0;
   menuAction = e_MenuAction_Menu;
 
 }
@@ -125,6 +127,17 @@ void MenuTask::ProcessPhase() {
     Properties properties;
     windowManager->GetPageFactory()->CreatePage((int)e_PageID_MainMenu, properties, 0);
     printf("[MENUTASK] MainMenu page created\n");
+    return;
+  }
+
+  if (managerCareerPagePending) {
+    managerCareerPagePending = false;
+    printf("[MENUTASK] Creating ManagerMainScreen page inside existing MenuScene for manager %d\n", managerCareerPageId);
+    windowManager->GetPagePath()->Clear();
+    Properties properties;
+    properties.Set("managerId", managerCareerPageId);
+    windowManager->GetPageFactory()->CreatePage((int)e_PageID_Manager_MainScreen, properties, 0);
+    printf("[MENUTASK] ManagerMainScreen page created\n");
     return;
   }
 

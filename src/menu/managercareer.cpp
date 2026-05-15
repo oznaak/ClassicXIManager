@@ -1,5 +1,6 @@
 #include "managercareer.hpp"
 #include "imgui_career.hpp"
+#include "imgui_menu.hpp"
 #include "pagefactory.hpp"
 #include "menutask.hpp"
 
@@ -7,6 +8,7 @@
 #include <boost/bind/bind.hpp>
 #include <sstream>
 #include <cstdlib>
+#include <cstring>
 
 using namespace boost::placeholders;
 
@@ -143,7 +145,7 @@ static void GenerateStandingsForLeague(int managerId, int leagueId,
   }
 }
 
-static void GenerateCareerSeason(int managerId) {
+void GenerateCareerSeason(int managerId) {
   printf("[CAREER] Generating season for manager %i\n", managerId);
   EnsureCareerTables();
   DeleteCareerSeason(managerId);
@@ -198,71 +200,47 @@ ManagerCreateProfilePage::ManagerCreateProfilePage(
 ) : Gui2Page(wm, pd) {
   EnsureManagerTable();
 
-  Gui2Caption *title = new Gui2Caption(wm, "mgr_create_title", 24, 10, 52, 6, "Create Manager Profile");
-  this->AddView(title);
-  title->Show();
-
-  grid = new Gui2Grid(wm, "mgr_create_grid", 28, 24, 44, 50);
-
-  Gui2Caption *nameLabel = new Gui2Caption(wm, "mgr_name_lbl", 0, 0, 20, 3, "Name");
-  Gui2Caption *ageLabel  = new Gui2Caption(wm, "mgr_age_lbl",  0, 0, 20, 3, "Age");
-  Gui2Caption *natLabel  = new Gui2Caption(wm, "mgr_nat_lbl",  0, 0, 20, 3, "Nationality");
-  Gui2Caption *genLabel  = new Gui2Caption(wm, "mgr_gen_lbl",  0, 0, 20, 3, "Gender");
-
-  nameInput = new Gui2EditLine(wm, "mgr_name_input", 0, 0, 24, 3, "Manager");
-  ageInput  = new Gui2EditLine(wm, "mgr_age_input",  0, 0, 24, 3, "35");
-  ageInput->SetAllowedChars("0123456789");
-  ageInput->SetMaxLength(2);
-
-  nationalityDropdown = new Gui2Pulldown(wm, "mgr_nat_pd", 0, 0, 24, 3);
-  nationalityDropdown->AddEntry("Portugal",      "Portugal");
-  nationalityDropdown->AddEntry("England",       "England");
-  nationalityDropdown->AddEntry("Spain",         "Spain");
-  nationalityDropdown->AddEntry("France",        "France");
-  nationalityDropdown->AddEntry("Germany",       "Germany");
-  nationalityDropdown->AddEntry("Italy",         "Italy");
-  nationalityDropdown->AddEntry("Netherlands",   "Netherlands");
-  nationalityDropdown->AddEntry("Brazil",        "Brazil");
-  nationalityDropdown->AddEntry("Argentina",     "Argentina");
-  nationalityDropdown->AddEntry("United States", "United States");
-  nationalityDropdown->SetSelected(0);
-
-  genderDropdown = new Gui2Pulldown(wm, "mgr_gen_pd", 0, 0, 24, 3);
-  genderDropdown->AddEntry("Male",   "Male");
-  genderDropdown->AddEntry("Female", "Female");
-  genderDropdown->SetSelected(0);
-
-  createButton = new Gui2Button(wm, "mgr_create_btn", 0, 0, 24, 3, "Create Profile");
-  backButton   = new Gui2Button(wm, "mgr_back_btn",   0, 0, 24, 3, "Back");
-
-  createButton->sig_OnClick.connect(boost::bind(&ManagerCreateProfilePage::CreateProfile, this));
-  backButton->sig_OnClick.connect(boost::bind(&ManagerCreateProfilePage::Back, this));
-
-  grid->AddView(nameLabel,            0, 0);
-  grid->AddView(nameInput,            0, 1);
-  grid->AddView(ageLabel,             1, 0);
-  grid->AddView(ageInput,             1, 1);
-  grid->AddView(natLabel,             2, 0);
-  grid->AddView(nationalityDropdown,  2, 1);
-  grid->AddView(genLabel,             3, 0);
-  grid->AddView(genderDropdown,       3, 1);
-  grid->AddView(createButton,         5, 1);
-  grid->AddView(backButton,           6, 1);
-  grid->UpdateLayout(0.25, 0.25, 0.25, 0.25);
-
-  this->AddView(grid);
-  grid->Show();
-  nameInput->SetFocus();
+  // ImGui renders all UI — no Gui2 widgets needed.
+  grid = nullptr; nameInput = nullptr; ageInput = nullptr;
+  nationalityDropdown = nullptr; genderDropdown = nullptr;
+  createButton = nullptr; backButton = nullptr;
   this->Show();
+
+  printf("[IMGUI MAIN MENU] Creating Manager Create Profile page\n");
+
+  g_PreCareer.Clear();
+  strncpy(g_PreCareer.nameBuffer, "Manager", sizeof(g_PreCareer.nameBuffer) - 1);
+  strncpy(g_PreCareer.ageBuf, "35", sizeof(g_PreCareer.ageBuf) - 1);
+  g_PreCareer.nationalityIdx = 0;
+  g_PreCareer.genderIdx      = 0;
+  g_PreCareer.screen         = PRECAREER_CREATE_PROFILE;
+  g_PreCareer.onCreateProfile = boost::bind(&ManagerCreateProfilePage::CreateProfile, this);
+  g_PreCareer.onBack          = boost::bind(&ManagerCreateProfilePage::Back, this);
+  g_PreCareer.active          = true;
+
+  printf("[IMGUI MAIN MENU] Create Profile page ready\n");
 }
 
-ManagerCreateProfilePage::~ManagerCreateProfilePage() {}
+ManagerCreateProfilePage::~ManagerCreateProfilePage() {
+  if (g_PreCareer.screen == PRECAREER_CREATE_PROFILE)
+    g_PreCareer.active = false;
+}
 
 void ManagerCreateProfilePage::CreateProfile() {
-  std::string name = nameInput->GetText();
-  int age = atoi(ageInput->GetText().c_str());
-  std::string nat = nationalityDropdown->GetSelected();
-  std::string gen = genderDropdown->GetSelected();
+  static const char *kNats[] = {
+    "Portugal","England","Spain","France","Germany",
+    "Italy","Netherlands","Brazil","Argentina","United States"
+  };
+  static const char *kGens[] = { "Male", "Female" };
+
+  std::string name = g_PreCareer.nameBuffer;
+  int age = atoi(g_PreCareer.ageBuf);
+  int natIdx = g_PreCareer.nationalityIdx;
+  int genIdx = g_PreCareer.genderIdx;
+  if (natIdx < 0 || natIdx > 9)  natIdx = 0;
+  if (genIdx < 0 || genIdx > 1)  genIdx = 0;
+  std::string nat = kNats[natIdx];
+  std::string gen = kGens[genIdx];
 
   if (name.empty()) name = "Manager";
   if (age < 18) age = 18;
@@ -290,9 +268,12 @@ void ManagerCreateProfilePage::CreateProfile() {
 }
 
 void ManagerCreateProfilePage::Back() {
+  printf("[IMGUI CREATE MANAGER] Processing Back action\n");
+  printf("[IMGUI CREATE MANAGER] Returning to Main Menu page\n");
   this->Exit();
   Properties props;
   windowManager->GetPageFactory()->CreatePage((int)e_PageID_MainMenu, props, 0);
+  printf("[IMGUI CREATE MANAGER] Main Menu page created\n");
   delete this;
 }
 
@@ -303,44 +284,32 @@ ManagerSelectLeaguePage::ManagerSelectLeaguePage(
 ) : Gui2Page(wm, pd) {
   managerId = pd.properties->GetInt("managerId");
 
-  Gui2Caption *title = new Gui2Caption(wm, "mgr_league_title", 20, 8, 60, 6, "Select League");
-  this->AddView(title);
-  title->Show();
+  // ImGui renders all UI — no Gui2 widgets needed.
+  grid = nullptr; backButton = nullptr;
+  this->Show();
 
-  grid = new Gui2Grid(wm, "mgr_league_grid", 24, 18, 52, 70);
-
-  DatabaseResult *res = GetDB()->Query(
-    "SELECT id, name FROM leagues ORDER BY name LIMIT 12;"
-  );
-
+  // Populate league list and activate ImGui.
+  g_PreCareer.Clear();
+  DatabaseResult *res = GetDB()->Query("SELECT id, name FROM leagues ORDER BY name LIMIT 20;");
   for (unsigned int i = 0; i < res->data.size(); i++) {
-    int lid = atoi(Cell(res, i, 0).c_str());
-    std::string lname = Cell(res, i, 1);
-    if (lname.empty()) lname = "League";
-
-    Gui2Button *btn = new Gui2Button(wm,
-      "mgr_league_btn_" + Cell(res, i, 0), 0, 0, 36, 3, lname);
-    btn->sig_OnClick.connect(
-      boost::bind(&ManagerSelectLeaguePage::SelectLeague, this, lid));
-    leagueButtons.push_back(btn);
-    grid->AddView(btn, (int)i, 0);
+    PreCareerState::LeagueItem item;
+    item.id   = atoi(Cell(res, i, 0).c_str());
+    item.name = Cell(res, i, 1);
+    if (item.name.empty()) item.name = "League";
+    g_PreCareer.leagues.push_back(item);
   }
-
   delete res;
 
-  backButton = new Gui2Button(wm, "mgr_league_back", 0, 0, 36, 3, "Back");
-  backButton->sig_OnClick.connect(
-    boost::bind(&ManagerSelectLeaguePage::Back, this));
-  grid->AddView(backButton, (int)leagueButtons.size() + 1, 0);
-
-  grid->UpdateLayout(0.25, 0.25, 0.25, 0.25);
-  this->AddView(grid);
-  grid->Show();
-  if (!leagueButtons.empty()) leagueButtons.at(0)->SetFocus();
-  this->Show();
+  g_PreCareer.screen         = PRECAREER_SELECT_LEAGUE;
+  g_PreCareer.onSelectLeague = boost::bind(&ManagerSelectLeaguePage::SelectLeague, this, _1);
+  g_PreCareer.onBack         = boost::bind(&ManagerSelectLeaguePage::Back, this);
+  g_PreCareer.active         = true;
 }
 
-ManagerSelectLeaguePage::~ManagerSelectLeaguePage() {}
+ManagerSelectLeaguePage::~ManagerSelectLeaguePage() {
+  if (g_PreCareer.screen == PRECAREER_SELECT_LEAGUE)
+    g_PreCareer.active = false;
+}
 
 void ManagerSelectLeaguePage::SelectLeague(int leagueId) {
   Properties props;
@@ -365,70 +334,59 @@ void ManagerSelectLeaguePage::Back() {
 ManagerSelectClubPage::ManagerSelectClubPage(
   Gui2WindowManager *wm, const Gui2PageData &pd
 ) : Gui2Page(wm, pd) {
-  managerId     = pd.properties->GetInt("managerId");
-  leagueId      = pd.properties->GetInt("leagueId");
+  managerId      = pd.properties->GetInt("managerId");
+  leagueId       = pd.properties->GetInt("leagueId");
   selectedClubId = 0;
 
-  Gui2Caption *title = new Gui2Caption(wm, "mgr_club_title", 20, 8, 60, 6, "Select Club");
-  this->AddView(title);
-  title->Show();
+  // ImGui renders all UI — no Gui2 widgets needed.
+  grid = nullptr; startButton = nullptr; backButton = nullptr;
+  this->Show();
 
-  grid = new Gui2Grid(wm, "mgr_club_grid", 24, 18, 52, 70);
-
+  // Populate club list and activate ImGui.
+  g_PreCareer.Clear();
   std::stringstream q;
-  q << "SELECT id, name, shortname FROM teams WHERE league_id = "
-    << leagueId << " ORDER BY name LIMIT 14;";
-
+  q << "SELECT id, name, shortname, logo_url FROM teams WHERE league_id = "
+    << leagueId << " ORDER BY name LIMIT 20;";
   DatabaseResult *res = GetDB()->Query(q.str());
-
   for (unsigned int i = 0; i < res->data.size(); i++) {
-    int cid = atoi(Cell(res, i, 0).c_str());
-    std::string cname = Cell(res, i, 1);
-    std::string sname = Cell(res, i, 2);
-    if (!sname.empty()) cname = sname + " - " + cname;
-
-    Gui2Button *btn = new Gui2Button(wm,
-      "mgr_club_btn_" + Cell(res, i, 0), 0, 0, 42, 3, cname);
-    btn->sig_OnClick.connect(
-      boost::bind(&ManagerSelectClubPage::SelectClub, this, cid));
-    clubButtons.push_back(btn);
-    grid->AddView(btn, (int)i, 0);
+    PreCareerState::ClubItem item;
+    item.id        = atoi(Cell(res, i, 0).c_str());
+    item.name      = Cell(res, i, 1);
+    item.shortName = Cell(res, i, 2);
+    item.logoPath  = Cell(res, i, 3);
+    if (item.name.empty()) item.name = "Club";
+    g_PreCareer.clubs.push_back(item);
   }
-
   delete res;
 
-  startButton = new Gui2Button(wm, "mgr_start_career", 0, 0, 42, 3, "Start Career");
-  startButton->SetActive(false);
-  startButton->sig_OnClick.connect(
-    boost::bind(&ManagerSelectClubPage::StartCareer, this));
-
-  backButton = new Gui2Button(wm, "mgr_club_back", 0, 0, 42, 3, "Back");
-  backButton->sig_OnClick.connect(
-    boost::bind(&ManagerSelectClubPage::Back, this));
-
-  grid->AddView(startButton, (int)clubButtons.size() + 1, 0);
-  grid->AddView(backButton,  (int)clubButtons.size() + 2, 0);
-
-  grid->UpdateLayout(0.25, 0.25, 0.25, 0.25);
-  this->AddView(grid);
-  grid->Show();
-  if (!clubButtons.empty()) clubButtons.at(0)->SetFocus();
-  this->Show();
+  g_PreCareer.selectedClubId = 0;
+  g_PreCareer.screen         = PRECAREER_SELECT_CLUB;
+  g_PreCareer.onStartCareer  = boost::bind(&ManagerSelectClubPage::StartCareer, this);
+  g_PreCareer.onBack         = boost::bind(&ManagerSelectClubPage::Back, this);
+  g_PreCareer.active         = true;
 }
 
-ManagerSelectClubPage::~ManagerSelectClubPage() {}
+ManagerSelectClubPage::~ManagerSelectClubPage() {
+  if (g_PreCareer.screen == PRECAREER_SELECT_CLUB)
+    g_PreCareer.active = false;
+}
 
 void ManagerSelectClubPage::SelectClub(int clubId) {
   selectedClubId = clubId;
-  startButton->SetActive(true);
-  startButton->SetFocus();
+  // ImGui reads g_PreCareer.selectedClubId directly for highlight; sync it.
+  g_PreCareer.selectedClubId = clubId;
 }
 
 void ManagerSelectClubPage::StartCareer() {
-  if (selectedClubId == 0) return;
+  // Read the selection from g_PreCareer (set by ImGui) or the legacy field.
+  int clubId = g_PreCareer.selectedClubId > 0
+                 ? g_PreCareer.selectedClubId
+                 : selectedClubId;
+  if (clubId == 0) return;
+  selectedClubId = clubId;
 
   std::stringstream q;
-  q << "UPDATE managers SET club_id = " << selectedClubId
+  q << "UPDATE managers SET club_id = " << clubId
     << " WHERE id = " << managerId << ";";
   DatabaseResult *r = GetDB()->Query(q.str());
   delete r;
@@ -773,66 +731,42 @@ ManagerLoadGamePage::ManagerLoadGamePage(
 ) : Gui2Page(windowManager, pageData) {
   EnsureManagerTable();
 
-  Gui2Caption *title = new Gui2Caption(windowManager, "manager_load_title", 20, 8, 60, 6, "Load Game");
-  this->AddView(title);
-  title->Show();
+  // ImGui renders all UI — no Gui2 widgets needed.
+  grid = nullptr; backButton = nullptr;
+  this->Show();
 
-  grid = new Gui2Grid(windowManager, "manager_load_grid", 22, 18, 56, 66);
-
+  // Populate save list and activate ImGui.
+  g_PreCareer.Clear();
   DatabaseResult *result = GetDB()->Query(
-    "SELECT managers.id, managers.name, managers.age, managers.nationality, managers.gender, "
+    "SELECT managers.id, managers.name, managers.age, managers.nationality, "
     "teams.name "
     "FROM managers "
     "LEFT JOIN teams ON managers.club_id = teams.id "
-    "ORDER BY managers.id DESC "
-    "LIMIT 20;"
+    "ORDER BY managers.id DESC LIMIT 20;"
   );
-
-  if (result->data.size() == 0) {
-    Gui2Caption *emptyText = new Gui2Caption(windowManager, "manager_load_empty", 0, 0, 54, 3, "No saved managers found.");
-    grid->AddView(emptyText, 0, 0);
-  }
-
   for (unsigned int i = 0; i < result->data.size(); i++) {
-    int managerId = atoi(Cell(result, i, 0).c_str());
-    std::string managerName = Cell(result, i, 1);
-    std::string age = Cell(result, i, 2);
-    std::string nationality = Cell(result, i, 3);
-    std::string gender = Cell(result, i, 4);
-    std::string clubName = Cell(result, i, 5);
-
-    if (managerName.empty()) managerName = "Unnamed Manager";
-    if (clubName.empty()) clubName = "No Club";
-
-    std::stringstream label;
-    label << managerName << " | " << clubName << " | Age " << age << " | " << nationality << " | " << gender;
-
-    Gui2Button *button = new Gui2Button(windowManager, "manager_load_button_" + Cell(result, i, 0), 0, 0, 54, 3, label.str());
-    button->sig_OnClick.connect(boost::bind(&ManagerLoadGamePage::LoadManager, this, managerId));
-    managerButtons.push_back(button);
-    grid->AddView(button, i, 0);
+    PreCareerState::SaveEntry e;
+    e.id          = atoi(Cell(result, i, 0).c_str());
+    e.name        = Cell(result, i, 1);
+    e.age         = atoi(Cell(result, i, 2).c_str());
+    e.nationality = Cell(result, i, 3);
+    e.clubName    = Cell(result, i, 4);
+    if (e.name.empty())     e.name     = "Unnamed Manager";
+    if (e.clubName.empty()) e.clubName = "No Club";
+    g_PreCareer.saves.push_back(e);
   }
-
   delete result;
 
-  backButton = new Gui2Button(windowManager, "manager_load_back", 0, 0, 54, 3, "Back");
-  backButton->sig_OnClick.connect(boost::bind(&ManagerLoadGamePage::Back, this));
-  grid->AddView(backButton, managerButtons.size() + 2, 0);
-
-  grid->UpdateLayout(0.25, 0.25, 0.25, 0.25);
-  this->AddView(grid);
-  grid->Show();
-
-  if (managerButtons.size() > 0) {
-    managerButtons.at(0)->SetFocus();
-  } else {
-    backButton->SetFocus();
-  }
-
-  this->Show();
+  g_PreCareer.screen        = PRECAREER_LOAD_GAME;
+  g_PreCareer.onLoadManager = boost::bind(&ManagerLoadGamePage::LoadManager, this, _1);
+  g_PreCareer.onBack        = boost::bind(&ManagerLoadGamePage::Back, this);
+  g_PreCareer.active        = true;
 }
 
-ManagerLoadGamePage::~ManagerLoadGamePage() {}
+ManagerLoadGamePage::~ManagerLoadGamePage() {
+  if (g_PreCareer.screen == PRECAREER_LOAD_GAME)
+    g_PreCareer.active = false;
+}
 
 void ManagerLoadGamePage::LoadManager(int managerId) {
   Properties properties;

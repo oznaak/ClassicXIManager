@@ -525,6 +525,7 @@ set(MENU_SOURCES
    src/menu/mainmenu.cpp
    src/menu/managercareer.cpp
    src/menu/imgui_career.cpp
+   src/menu/imgui_menu.cpp
    src/menu/ingame/radar.cpp
    src/menu/ingame/tacticsdebug.cpp
    src/menu/ingame/gamepage.cpp

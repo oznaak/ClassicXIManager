@@ -3,6 +3,7 @@
 // i do not offer support, so don't ask. to be used for inspiration :)
 
 #include "mainmenu.hpp"
+#include "imgui_menu.hpp"
 
 #include "../main.hpp"
 #include "controllerselect.hpp"
@@ -15,6 +16,8 @@
 
 #include <set>
 #include <boost/algorithm/string.hpp>
+#include <boost/bind/bind.hpp>
+using namespace boost::placeholders;
 
 using namespace blunted;
 
@@ -86,41 +89,50 @@ void OutroPage::ProcessKeyboardEvent(KeyboardEvent *event) {
 
 
 MainMenuPage::MainMenuPage(Gui2WindowManager *windowManager, const Gui2PageData &pageData) : Gui2Page(windowManager, pageData) {
-  Gui2Image *title = new Gui2Image(windowManager, "image_main_title", 28, 32, 44, 20);
-  title->LoadImage("media/menu/main/title01.png");
-
-  this->AddView(title);
-  title->Show();
-
+  // Build the minimal Gui2 skeleton so the page stack is valid.
+  // Widgets are hidden — ImGui renders the actual UI.
   buttons.push_back(new Gui2Button(windowManager, "button_main_newgame",  0, 0, 24, 3, "New Game"));
   buttons.push_back(new Gui2Button(windowManager, "button_main_loadgame", 0, 0, 24, 3, "Load Game"));
   buttons.push_back(new Gui2Button(windowManager, "button_main_settings", 0, 0, 24, 3, "Settings"));
   buttons.push_back(new Gui2Button(windowManager, "button_main_quit",     0, 0, 24, 3, "Quit"));
 
   buttons.at(0)->sig_OnClick.connect(boost::bind(&MainMenuPage::GoCreateManagerProfile, this));
+  buttons.at(1)->sig_OnClick.connect(boost::bind(&MainMenuPage::GoLoadGame, this));
   buttons.at(2)->sig_OnClick.connect(boost::bind(&MainMenuPage::GoSettings, this));
   buttons.at(3)->sig_OnClick.connect(boost::bind(&MenuTask::QuitGame, GetMenuTask()));
 
-  buttons.at(1)->sig_OnClick.connect(boost::bind(&MainMenuPage::GoLoadGame, this));
-
   grid = new Gui2Grid(windowManager, "grid_main", 38, 50, 24, 28);
-
   grid->AddView(buttons.at(0), 0, 0);
   grid->AddView(buttons.at(1), 1, 0);
   grid->AddView(buttons.at(2), 2, 0);
   grid->AddView(buttons.at(3), 3, 0);
-
   grid->UpdateLayout(0.25, 0.25, 0.25, 0.25);
-
   this->AddView(grid);
-  grid->Show();
-
-  buttons.at(0)->SetFocus();
+  // Keep Gui2 hidden — ImGui overlay handles all rendering and input.
+  // grid->Hide() alone is enough; keyboard nav stays available as fallback.
+  grid->Hide();
 
   this->Show();
+
+  // Activate the ImGui main-menu screen.
+  g_PreCareer.Clear();
+  g_PreCareer.screen   = PRECAREER_MAIN_MENU;
+  g_PreCareer.onNewGame  = boost::bind(&MainMenuPage::GoCreateManagerProfile, this);
+  g_PreCareer.onLoadGame = boost::bind(&MainMenuPage::GoLoadGame, this);
+  g_PreCareer.onSettings = []() {
+    printf("[IMGUI MAIN MENU] Processing Settings action\n");
+    printf("[IMGUI MAIN MENU] Opening ImGui Settings placeholder\n");
+    g_PreCareer.screen = PRECAREER_SETTINGS_PLACEHOLDER;
+    g_PreCareer.onBack = []() {
+      g_PreCareer.screen = PRECAREER_MAIN_MENU;
+    };
+  };
+  g_PreCareer.onQuit     = boost::bind(&MenuTask::QuitGame, GetMenuTask());
+  g_PreCareer.active   = true;
 }
 
 MainMenuPage::~MainMenuPage() {
+  g_PreCareer.active = false;
 }
 
 void MainMenuPage::GoNewManagerGame() {
@@ -142,17 +154,13 @@ void MainMenuPage::GoNewManagerGame() {
 }
 
 void MainMenuPage::GoCreateManagerProfile() {
-  this->Exit();
-  Properties properties;
-  windowManager->GetPageFactory()->CreatePage((int)e_PageID_Manager_CreateProfile, properties, 0);
-  delete this;
+  printf("[IMGUI MAIN MENU] Processing New Game — switching to Create Profile screen\n");
+  g_PreCareer.pendingAction = 1;
 }
 
 void MainMenuPage::GoLoadGame() {
-  this->Exit();
-  Properties properties;
-  windowManager->GetPageFactory()->CreatePage((int)e_PageID_Manager_LoadGame, properties, 0);
-  delete this;
+  printf("[IMGUI MAIN MENU] Processing Load Game — switching to Load Game screen\n");
+  g_PreCareer.pendingAction = 2;
 }
 
 void MainMenuPage::GoControllerSelect() {
@@ -179,14 +187,8 @@ void MainMenuPage::GoLeague() {
 }
 
 void MainMenuPage::GoSettings() {
-
-  this->Exit();
-
-  pageData.properties->Set("selectedButtonID", 4);
-  Properties properties;
-  windowManager->GetPageFactory()->CreatePage((int)e_PageID_Settings, properties, 0);
-
-  delete this;
+  printf("[IMGUI MAIN MENU] Processing Settings action\n");
+  g_PreCareer.pendingAction = 3;
 }
 
 void MainMenuPage::GoCredits() {
