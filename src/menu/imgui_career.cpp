@@ -657,8 +657,16 @@ static void DrawSidebar(float sideW, float winH) {
   ImGui::SetCursorPosX(16.0f);
   PushMgrFont(g_ManagerFontSmall);
   ImGui::PushStyleColor(ImGuiCol_Text, kTextDim);
-  const std::string &mgr = g_CareerHub.manager.name.empty() ? "Manager" : g_CareerHub.manager.name;
-  ImGui::TextUnformatted(mgr.c_str());
+  {
+    std::string mgr;
+    if (!g_CareerHub.manager.nationality.empty()) mgr = g_CareerHub.manager.nationality;
+    if (!g_CareerHub.manager.age.empty()) {
+      if (!mgr.empty()) mgr += " \xe2\x80\xa2 Age ";
+      else mgr = "Age ";
+      mgr += g_CareerHub.manager.age;
+    }
+    if (!mgr.empty()) ImGui::TextUnformatted(mgr.c_str());
+  }
   ImGui::PopStyleColor();
   PopMgrFont(g_ManagerFontSmall);
 

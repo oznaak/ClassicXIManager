@@ -177,16 +177,38 @@ static void EnterPreCareerSettingsPlaceholder() {
   g_PreCareer.active = true;
 }
 
+static const char *kNationalities[] = {
+  "Portugal", "England", "Spain", "France", "Germany",
+  "Italy", "Netherlands", "Brazil", "Argentina", "United States"
+};
+static const int kNationalityCount = 10;
+static const char *kGenders[] = { "Male", "Female" };
+static const int kGenderCount  = 2;
+
 static void PreCareerStartCareer() {
-  int managerId = g_PreCareer.currentManagerId;
   int clubId = g_PreCareer.selectedClubId;
-  if (managerId == 0 || clubId == 0) return;
+  if (clubId == 0) return;
+
+  std::string name = g_PreCareer.nameBuffer;
+  int age = atoi(g_PreCareer.ageBuf);
+  int natIdx = g_PreCareer.nationalityIdx;
+  int genIdx = g_PreCareer.genderIdx;
+  if (natIdx < 0 || natIdx > 9) natIdx = 0;
+  if (genIdx < 0 || genIdx > 1) genIdx = 0;
+  if (name.empty()) name = "Manager";
+  if (age < 18) age = 18;
+  if (age > 99) age = 99;
 
   std::stringstream q;
-  q << "UPDATE managers SET club_id = " << clubId
-    << " WHERE id = " << managerId << ";";
+  q << "INSERT INTO managers(name,age,nationality,gender,club_id) VALUES(";
+  q << "'" << SqlEscape(name) << "',";
+  q << age << ",";
+  q << "'" << SqlEscape(std::string(kNationalities[natIdx])) << "',";
+  q << "'" << SqlEscape(std::string(kGenders[genIdx])) << "',";
+  q << clubId << ");";
   DatabaseResult *r = GetDB()->Query(q.str());
   delete r;
+  int managerId = LastInsertId();
 
   GenerateCareerSeason(managerId);
   GetMenuTask()->RequestManagerCareerPage(managerId);
@@ -223,34 +245,13 @@ static void ProcessPreCareerPendingAction() {
       GetMenuTask()->QuitGame();
       break;
     case 5: {
+      // Validate and clamp inputs, then advance — no DB write until Start Career.
       std::string name = g_PreCareer.nameBuffer;
       int age = atoi(g_PreCareer.ageBuf);
-      int natIdx = g_PreCareer.nationalityIdx;
-      int genIdx = g_PreCareer.genderIdx;
-      static const char *kNats[] = {
-        "Portugal","England","Spain","France","Germany",
-        "Italy","Netherlands","Brazil","Argentina","United States"
-      };
-      static const char *kGens[] = { "Male", "Female" };
-      if (natIdx < 0 || natIdx > 9) natIdx = 0;
-      if (genIdx < 0 || genIdx > 1) genIdx = 0;
-      std::string nat = kNats[natIdx];
-      std::string gen = kGens[genIdx];
-      if (name.empty()) name = "Manager";
-      if (age < 18) age = 18;
-      if (age > 99) age = 99;
-
-      std::stringstream q;
-      q << "INSERT INTO managers(name,age,nationality,gender,club_id) VALUES(";
-      q << "'" << SqlEscape(name) << "',";
-      q << age << ",";
-      q << "'" << SqlEscape(nat) << "',";
-      q << "'" << SqlEscape(gen) << "',";
-      q << "NULL);";
-      DatabaseResult *r = GetDB()->Query(q.str());
-      delete r;
-      int managerId = LastInsertId();
-      EnterPreCareerSelectLeague(managerId);
+      if (name.empty()) strncpy(g_PreCareer.nameBuffer, "Manager", sizeof(g_PreCareer.nameBuffer) - 1);
+      if (age < 18) strncpy(g_PreCareer.ageBuf, "18", sizeof(g_PreCareer.ageBuf) - 1);
+      if (age > 99) strncpy(g_PreCareer.ageBuf, "99", sizeof(g_PreCareer.ageBuf) - 1);
+      EnterPreCareerSelectLeague(0);
     } break;
     case 6:
       switch (g_PreCareer.screen) {
@@ -263,7 +264,7 @@ static void ProcessPreCareerPendingAction() {
           EnterPreCareerCreateProfile();
           break;
         case PRECAREER_SELECT_CLUB:
-          EnterPreCareerSelectLeague(g_PreCareer.currentManagerId);
+          EnterPreCareerSelectLeague(0);
           break;
         default:
           EnterPreCareerMainMenu();
@@ -721,15 +722,6 @@ static void DrawMainMenuScreen(float winW, float winH) {
 // Screen: Create Manager Profile
 // =========================================================================
 
-static const char *kNationalities[] = {
-  "Portugal", "England", "Spain", "France", "Germany",
-  "Italy", "Netherlands", "Brazil", "Argentina", "United States"
-};
-static const int kNationalityCount = 10;
-
-static const char *kGenders[] = { "Male", "Female" };
-static const int kGenderCount  = 2;
-
 static void DrawCreateProfileScreen(float winW, float winH) {
   ImDrawList *dl = ImGui::GetWindowDrawList();
   ImVec2 wp = ImGui::GetWindowPos();
@@ -761,6 +753,8 @@ static void DrawCreateProfileScreen(float winW, float winH) {
   DrawCardRect(ImVec2(cardX, cardY), ImVec2(kCardW, kCardH));
   BeginCardContent(ImVec2(cardX, cardY), ImVec2(kCardW, kCardH), "##cp_card");
 
+  ImGui::Dummy(ImVec2(0, 12.0f));
+
   PushMF(g_ManagerFontTitle);
   float titleW = ImGui::CalcTextSize("Create Manager").x;
   ImGui::SetCursorPosX((kCardW - titleW) * 0.5f);
@@ -783,11 +777,13 @@ static void DrawCreateProfileScreen(float winW, float winH) {
   float formW = kCardW - kPad * 2.0f;
   float inputH = 34.0f;
 
+  ImGui::SetCursorPosX(kPad);
   PushMF(g_ManagerFontSmall);
   ImGui::PushStyleColor(ImGuiCol_Text, kTextSec);
   ImGui::TextUnformatted("MANAGER NAME");
   ImGui::PopStyleColor();
   PopMF(g_ManagerFontSmall);
+  ImGui::SetCursorPosX(kPad);
   ImGui::SetNextItemWidth(formW);
   PushMF(g_ManagerFontRegular);
   ImGui::InputText("##mgr_name", g_PreCareer.nameBuffer,
@@ -796,11 +792,13 @@ static void DrawCreateProfileScreen(float winW, float winH) {
 
   ImGui::Dummy(ImVec2(0, 12.0f));
 
+  ImGui::SetCursorPosX(kPad);
   PushMF(g_ManagerFontSmall);
   ImGui::PushStyleColor(ImGuiCol_Text, kTextSec);
   ImGui::TextUnformatted("AGE  (18 \xe2\x80\x93 99)");
   ImGui::PopStyleColor();
   PopMF(g_ManagerFontSmall);
+  ImGui::SetCursorPosX(kPad);
   ImGui::SetNextItemWidth(formW);
   PushMF(g_ManagerFontRegular);
   ImGui::InputText("##mgr_age", g_PreCareer.ageBuf,
@@ -810,11 +808,13 @@ static void DrawCreateProfileScreen(float winW, float winH) {
 
   ImGui::Dummy(ImVec2(0, 12.0f));
 
+  ImGui::SetCursorPosX(kPad);
   PushMF(g_ManagerFontSmall);
   ImGui::PushStyleColor(ImGuiCol_Text, kTextSec);
   ImGui::TextUnformatted("NATIONALITY");
   ImGui::PopStyleColor();
   PopMF(g_ManagerFontSmall);
+  ImGui::SetCursorPosX(kPad);
   ImGui::SetNextItemWidth(formW);
   PushMF(g_ManagerFontRegular);
   ImGui::Combo("##mgr_nat", &g_PreCareer.nationalityIdx,
@@ -823,11 +823,13 @@ static void DrawCreateProfileScreen(float winW, float winH) {
 
   ImGui::Dummy(ImVec2(0, 12.0f));
 
+  ImGui::SetCursorPosX(kPad);
   PushMF(g_ManagerFontSmall);
   ImGui::PushStyleColor(ImGuiCol_Text, kTextSec);
   ImGui::TextUnformatted("GENDER");
   ImGui::PopStyleColor();
   PopMF(g_ManagerFontSmall);
+  ImGui::SetCursorPosX(kPad);
   ImGui::SetNextItemWidth(formW);
   PushMF(g_ManagerFontRegular);
   ImGui::Combo("##mgr_gen", &g_PreCareer.genderIdx,
@@ -839,11 +841,13 @@ static void DrawCreateProfileScreen(float winW, float winH) {
   ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12.0f, 8.0f));
   PushMF(g_ManagerFontBold);
 
+  ImGui::SetCursorPosX(kPad);
   if (CTABtn("Create Manager Profile", ImVec2(formW, 52.0f)))
     g_PreCareer.pendingAction = 5;
 
   ImGui::Dummy(ImVec2(0, 6.0f));
 
+  ImGui::SetCursorPosX(kPad);
   if (SecBtn("Back", ImVec2(formW, 40.0f))) {
     printf("[IMGUI CREATE MANAGER] Back requested\n");
     g_PreCareer.pendingAction = 6;
@@ -889,6 +893,8 @@ static void DrawSettingsPlaceholderScreen(float winW, float winH) {
 
   DrawCardRect(ImVec2(cardX, cardY), ImVec2(kCardW, kCardH));
   BeginCardContent(ImVec2(cardX, cardY), ImVec2(kCardW, kCardH), "##settings_card");
+
+  ImGui::Dummy(ImVec2(0, 12.0f));
 
   PushMF(g_ManagerFontTitle);
   float titleW = ImGui::CalcTextSize("Settings").x;
@@ -961,6 +967,8 @@ static void DrawLoadGameScreen(float winW, float winH) {
   DrawCardRect(ImVec2(cardX, cardY), ImVec2(kCardW, kCardH));
   BeginCardContent(ImVec2(cardX, cardY), ImVec2(kCardW, kCardH), "##lg_card");
 
+  ImGui::Dummy(ImVec2(0, 12.0f));
+
   PushMF(g_ManagerFontTitle);
   float titleW = ImGui::CalcTextSize("Load Career").x;
   ImGui::SetCursorPosX((kCardW - titleW) * 0.5f);
@@ -968,8 +976,6 @@ static void DrawLoadGameScreen(float winW, float winH) {
   ImGui::TextUnformatted("Load Career");
   ImGui::PopStyleColor();
   PopMF(g_ManagerFontTitle);
-
-  ImGui::Dummy(ImVec2(0, 4.0f));
 
   char subBuf[64];
   snprintf(subBuf, sizeof(subBuf), "%d career%s found", (int)g_PreCareer.saves.size(),
@@ -1113,6 +1119,8 @@ static void DrawSelectLeagueScreen(float winW, float winH) {
   DrawCardRect(ImVec2(cardX, cardY), ImVec2(kCardW, kCardH));
   BeginCardContent(ImVec2(cardX, cardY), ImVec2(kCardW, kCardH), "##sl_card");
 
+  ImGui::Dummy(ImVec2(0, 12.0f));
+
   PushMF(g_ManagerFontTitle);
   float titleW = ImGui::CalcTextSize("Select League").x;
   ImGui::SetCursorPosX((kCardW - titleW) * 0.5f);
@@ -1120,8 +1128,6 @@ static void DrawSelectLeagueScreen(float winW, float winH) {
   ImGui::TextUnformatted("Select League");
   ImGui::PopStyleColor();
   PopMF(g_ManagerFontTitle);
-
-  ImGui::Dummy(ImVec2(0, 4.0f));
 
   const char *desc = "Choose the competition you will manage in.";
   PushMF(g_ManagerFontSmall);
@@ -1242,6 +1248,8 @@ static void DrawSelectClubScreen(float winW, float winH) {
   DrawCardRect(ImVec2(cardX, cardY), ImVec2(kCardW, kCardH));
   BeginCardContent(ImVec2(cardX, cardY), ImVec2(kCardW, kCardH), "##sc_card");
 
+  ImGui::Dummy(ImVec2(0, 12.0f));
+
   PushMF(g_ManagerFontTitle);
   float titleW = ImGui::CalcTextSize("Select Club").x;
   ImGui::SetCursorPosX((kCardW - titleW) * 0.5f);
@@ -1249,8 +1257,6 @@ static void DrawSelectClubScreen(float winW, float winH) {
   ImGui::TextUnformatted("Select Club");
   ImGui::PopStyleColor();
   PopMF(g_ManagerFontTitle);
-
-  ImGui::Dummy(ImVec2(0, 4.0f));
 
   const char *desc = "Click a club to select it, then press Start Career.";
   PushMF(g_ManagerFontSmall);
