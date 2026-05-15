@@ -792,6 +792,8 @@ void ManagerMainScreenPage::PlayMatch() {
   GetConfiguration()->Set("manager_mode",        1.0f);
   GetConfiguration()->Set("manager_ai_difficulty", 1.0f);
   GetConfiguration()->Set("match_difficulty",    1.0f);
+  GetConfiguration()->Set("match_duration",      0.0f); // shortest: 5-minute halves
+  printf("[MANAGER MODE] Match duration forced to shortest: match_duration=0.0 (5 min halves)\n");
 
   // Do NOT call CreatePage(LoadingMatch) here — this runs from the GL thread.
   // LoadingMatchPage constructor calls LoadImage which needs the main-thread ObjectFactory.
@@ -896,6 +898,8 @@ void ManagerMainScreenPage::PlayFixture() {
   GetConfiguration()->Set("manager_mode",         1.0f);
   GetConfiguration()->Set("manager_ai_difficulty", 1.0f);
   GetConfiguration()->Set("match_difficulty",      1.0f);
+  GetConfiguration()->Set("match_duration",        0.0f); // shortest: 5-minute halves
+  printf("[MANAGER MODE] Match duration forced to shortest: match_duration=0.0 (5 min halves)\n");
 
   GetMenuTask()->RequestManagerMatchStart();
   this->Exit();
