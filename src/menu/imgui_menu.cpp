@@ -48,12 +48,16 @@ void PreCareerState::Clear() {
 
   currentManagerId = 0;
   currentLeagueId = 0;
+  countries.clear();
+  selectedCountryId = 0;
+  selectedCountryName.clear();
   leagues.clear();
   clubs.clear();
   selectedClubId = 0;
   saves.clear();
-  selectLeaguePage = 0;
-  selectClubPage   = 0;
+  selectCountryPage = 0;
+  selectLeaguePage  = 0;
+  selectClubPage    = 0;
 }
 
 static std::string SqlEscape(const std::string &in) {
@@ -103,16 +107,26 @@ static void LoadPreCareerSaves() {
 
 static void LoadPreCareerLeagues() {
   g_PreCareer.leagues.clear();
-  DatabaseResult *res = GetDB()->Query("SELECT id, name, logo_url FROM leagues ORDER BY name ASC LIMIT 100;");
+  int countryId = g_PreCareer.selectedCountryId;
+  std::stringstream q;
+  if (countryId > 0) {
+    q << "SELECT id, name, logo_url FROM leagues WHERE country_id = "
+      << countryId << " ORDER BY name ASC LIMIT 100;";
+  } else {
+    q << "SELECT id, name, logo_url FROM leagues ORDER BY name ASC LIMIT 100;";
+  }
+  DatabaseResult *res = GetDB()->Query(q.str());
   for (unsigned int i = 0; i < res->data.size(); i++) {
     PreCareerState::LeagueItem item;
-    item.id   = atoi(res->data.at(i).at(0).c_str());
-    item.name = res->data.at(i).at(1);
+    item.id      = atoi(res->data.at(i).at(0).c_str());
+    item.name    = res->data.at(i).at(1);
     item.logoUrl = res->data.at(i).at(2);
     if (item.name.empty()) item.name = "League";
     g_PreCareer.leagues.push_back(item);
   }
   delete res;
+  printf("[PRECAREER] Loaded leagues for country=%d count=%d\n",
+         countryId, (int)g_PreCareer.leagues.size());
 }
 
 static void LoadPreCareerClubs(int leagueId) {
@@ -131,6 +145,27 @@ static void LoadPreCareerClubs(int leagueId) {
     g_PreCareer.clubs.push_back(item);
   }
   delete res;
+}
+
+static void LoadPreCareerCountries() {
+  g_PreCareer.countries.clear();
+  // Only load countries that have at least one league
+  const char *q =
+    "SELECT DISTINCT c.id, c.name, c.flag "
+    "FROM countries c "
+    "JOIN leagues l ON l.country_id = c.id "
+    "ORDER BY c.name ASC;";
+  DatabaseResult *res = GetDB()->Query(q);
+  for (unsigned int i = 0; i < res->data.size(); i++) {
+    PreCareerState::CountryItem item;
+    item.id   = atoi(res->data.at(i).at(0).c_str());
+    item.name = res->data.at(i).at(1);
+    item.flag = res->data.at(i).at(2);
+    if (item.name.empty()) item.name = "Country";
+    g_PreCareer.countries.push_back(item);
+  }
+  delete res;
+  printf("[PRECAREER] Loaded countries count=%d\n", (int)g_PreCareer.countries.size());
 }
 
 static void EnterPreCareerMainMenu() {
@@ -154,6 +189,19 @@ static void EnterPreCareerLoadGame() {
   g_PreCareer.Clear();
   LoadPreCareerSaves();
   g_PreCareer.screen = PRECAREER_LOAD_GAME;
+  g_PreCareer.active = true;
+}
+
+static void EnterPreCareerSelectCountry() {
+  g_PreCareer.selectedCountryId = 0;
+  g_PreCareer.selectedCountryName.clear();
+  g_PreCareer.selectCountryPage = 0;
+  g_PreCareer.leagues.clear();
+  g_PreCareer.clubs.clear();
+  g_PreCareer.selectedClubId = 0;
+  g_PreCareer.currentLeagueId = 0;
+  LoadPreCareerCountries();
+  g_PreCareer.screen = PRECAREER_SELECT_COUNTRY;
   g_PreCareer.active = true;
 }
 
@@ -259,7 +307,7 @@ static void ProcessPreCareerPendingAction() {
       if (name.empty()) strncpy(g_PreCareer.nameBuffer, "Manager", sizeof(g_PreCareer.nameBuffer) - 1);
       if (age < 18) strncpy(g_PreCareer.ageBuf, "18", sizeof(g_PreCareer.ageBuf) - 1);
       if (age > 99) strncpy(g_PreCareer.ageBuf, "99", sizeof(g_PreCareer.ageBuf) - 1);
-      EnterPreCareerSelectLeague(0);
+      EnterPreCareerSelectCountry();
     } break;
     case 6:
       switch (g_PreCareer.screen) {
@@ -268,17 +316,32 @@ static void ProcessPreCareerPendingAction() {
         case PRECAREER_SETTINGS_PLACEHOLDER:
           EnterPreCareerMainMenu();
           break;
-        case PRECAREER_SELECT_LEAGUE:
+        case PRECAREER_SELECT_COUNTRY:
           EnterPreCareerCreateProfile();
           break;
+        case PRECAREER_SELECT_LEAGUE:
+          EnterPreCareerSelectCountry();
+          break;
         case PRECAREER_SELECT_CLUB:
-          EnterPreCareerSelectLeague(0);
+          // Return to Select League keeping its page; leagues already loaded for this country
+          g_PreCareer.clubs.clear();
+          g_PreCareer.selectedClubId = 0;
+          g_PreCareer.currentLeagueId = 0;
+          g_PreCareer.screen = PRECAREER_SELECT_LEAGUE;
           break;
         default:
           EnterPreCareerMainMenu();
           break;
       }
       break;
+    case 9: {
+      // selectedCountryId / selectedCountryName already set by ImGui click handler
+      printf("[PRECAREER] Selected country id=%d name=%s\n",
+             g_PreCareer.selectedCountryId, g_PreCareer.selectedCountryName.c_str());
+      g_PreCareer.selectLeaguePage = 0;
+      LoadPreCareerLeagues();
+      g_PreCareer.screen = PRECAREER_SELECT_LEAGUE;
+    } break;
     case 7:
       PreCareerLoadManager(pid);
       break;
@@ -1149,6 +1212,159 @@ static void DrawPaginationRow(ImDrawList *dl, ImVec2 wp, float cardX, float card
 }
 
 // =========================================================================
+// Screen: Select Country
+// =========================================================================
+
+static void DrawSelectCountryScreen(float winW, float winH) {
+  ImDrawList *dl = ImGui::GetWindowDrawList();
+  ImVec2 wp = ImGui::GetWindowPos();
+  ImVec2 display = ImGui::GetIO().DisplaySize;
+
+  const float kLogoW = 100.0f;
+  const float kLogoH = 100.0f;
+  const float kLogoGap = 24.0f;
+  const float kCardW = 760.0f;
+  const float kCardH = 560.0f;
+
+  GLuint logoTex = GetMainLogoTexture();
+
+  float combinedH = kLogoH + kLogoGap + kCardH;
+  float logoX = (display.x - kLogoW) * 0.5f;
+  float logoY = (display.y - combinedH) * 0.5f;
+  if (logoY < 10.0f) logoY = 10.0f;
+  float cardX = (display.x - kCardW) * 0.5f;
+  float cardY = logoY + kLogoH + kLogoGap;
+
+  if (logoTex) {
+    dl->AddImage((ImTextureID)(intptr_t)logoTex,
+                 ImVec2(wp.x + logoX, wp.y + logoY),
+                 ImVec2(wp.x + logoX + kLogoW, wp.y + logoY + kLogoH));
+  }
+
+  DrawCardRect(ImVec2(cardX, cardY), ImVec2(kCardW, kCardH));
+  BeginCardContent(ImVec2(cardX, cardY), ImVec2(kCardW, kCardH), "##sco_card");
+
+  ImGui::Dummy(ImVec2(0, 12.0f));
+
+  PushMF(g_ManagerFontTitle);
+  float titleW = ImGui::CalcTextSize("Select Country").x;
+  ImGui::SetCursorPosX((kCardW - titleW) * 0.5f);
+  ImGui::PushStyleColor(ImGuiCol_Text, kTextPri);
+  ImGui::TextUnformatted("Select Country");
+  ImGui::PopStyleColor();
+  PopMF(g_ManagerFontTitle);
+
+  const char *desc = "Choose where your career begins.";
+  PushMF(g_ManagerFontSmall);
+  float descW = ImGui::CalcTextSize(desc).x;
+  ImGui::SetCursorPosX((kCardW - descW) * 0.5f);
+  ImGui::PushStyleColor(ImGuiCol_Text, kTextDim);
+  ImGui::TextUnformatted(desc);
+  ImGui::PopStyleColor();
+  PopMF(g_ManagerFontSmall);
+
+  ImGui::PushStyleColor(ImGuiCol_Separator, kBorder);
+  ImGui::Separator();
+  ImGui::PopStyleColor();
+
+  // ---- Grid layout constants ----
+  const int   ITEMS_PER_PAGE = 6;
+  const int   COLS = 2;
+  const int   ROWS = 3;
+  const float pad   = 36.0f;
+  const float gapX  = 20.0f;
+  const float gapY  = 16.0f;
+  const float tileW = (kCardW - pad * 2.0f - gapX) / (float)COLS;
+  const float tileH = 82.0f;
+  const float gridX = pad;
+  const float gridY = 110.0f;
+
+  // ---- Pagination state ----
+  int totalItems = (int)g_PreCareer.countries.size();
+  int totalPages = PageCount(totalItems, ITEMS_PER_PAGE);
+  int &page = g_PreCareer.selectCountryPage;
+  page = std::max(0, std::min(page, totalPages - 1));
+  int start = PageStart(page, ITEMS_PER_PAGE);
+  int end   = PageEnd(totalItems, page, ITEMS_PER_PAGE);
+
+  if (g_PreCareer.countries.empty()) {
+    ImGui::SetCursorPos(ImVec2(pad, gridY + 20.0f));
+    ImGui::PushStyleColor(ImGuiCol_Text, kTextSec);
+    ImGui::TextUnformatted("No countries found.");
+    ImGui::PopStyleColor();
+  }
+
+  ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12.0f, 8.0f));
+  PushMF(g_ManagerFontBold);
+
+  const float logoBadgeSz = 46.0f;
+
+  for (int i = start; i < end; i++) {
+    const auto &co = g_PreCareer.countries.at(i);
+    int visIdx = i - start;
+    int col = visIdx % COLS;
+    int row = visIdx / COLS;
+    float x = gridX + col * (tileW + gapX);
+    float y = gridY + row * (tileH + gapY);
+
+    ImVec2 tp0 = ImVec2(wp.x + cardX + x, wp.y + cardY + y);
+    ImVec2 tp1 = ImVec2(tp0.x + tileW, tp0.y + tileH);
+
+    char bid[32]; snprintf(bid, sizeof(bid), "##sco_c_%d", co.id);
+    ImGui::SetCursorPos(ImVec2(x, y));
+    bool clicked = ImGui::InvisibleButton(bid, ImVec2(tileW, tileH));
+    bool hov = ImGui::IsItemHovered();
+
+    dl->AddRectFilled(tp0, tp1,
+      hov ? C32(kBgCardAlt) : IM_COL32(18,28,52,100), 8.0f);
+    dl->AddRect(tp0, tp1, C32(kBorder), 8.0f, 0, 0.8f);
+    if (hov) dl->AddRectFilled(tp0, ImVec2(tp0.x + 3.0f, tp1.y), C32(kAccent), 2.0f);
+
+    GLuint flagTex = LoadImageTexture(co.flag);
+    DrawImageBadgeAt(dl, ImVec2(tp0.x + 10.0f, tp0.y + (tileH - logoBadgeSz) * 0.5f),
+                     flagTex, co.name, logoBadgeSz);
+
+    float nameH = ImGui::CalcTextSize(co.name.c_str()).y;
+    float textY = y + (tileH - nameH) * 0.5f;
+
+    ImFont *bf = hov ? g_ManagerFontBold : g_ManagerFontRegular;
+    if (bf) ImGui::PushFont(bf);
+    dl->AddText(ImVec2(wp.x + cardX + x + 66.0f, wp.y + cardY + textY),
+                C32(hov ? kTextPri : kTextSec), co.name.c_str());
+    if (bf) ImGui::PopFont();
+
+    if (clicked) {
+      g_PreCareer.selectedCountryId   = co.id;
+      g_PreCareer.selectedCountryName = co.name;
+      g_PreCareer.pendingAction = 9;
+    }
+  }
+
+  // ---- Pagination row ----
+  float gridH       = ROWS * tileH + (ROWS - 1) * gapY;
+  float paginationY = gridY + gridH + 18.0f;
+  float paginH      = 40.0f;
+  DrawPaginationRow(dl, wp, cardX, cardY, kCardW, paginationY, paginH,
+                    page, totalPages);
+
+  // ---- Back button ----
+  float backH = 48.0f;
+  float backY = kCardH - backH - 28.0f;
+  float backW = kCardW - pad * 2.0f;
+
+  ImGui::SetCursorPos(ImVec2(pad, backY));
+  if (SecBtn("Back", ImVec2(backW, backH)))
+    g_PreCareer.pendingAction = 6;
+
+  PopMF(g_ManagerFontBold);
+  ImGui::PopStyleVar();
+
+  EndCardContent();
+
+  DrawPreCareerFooter(winW, winH);
+}
+
+// =========================================================================
 // Screen: Select League
 // =========================================================================
 
@@ -1191,7 +1407,11 @@ static void DrawSelectLeagueScreen(float winW, float winH) {
   ImGui::PopStyleColor();
   PopMF(g_ManagerFontTitle);
 
-  const char *desc = "Choose the competition you will manage in.";
+  char desc[128];
+  if (!g_PreCareer.selectedCountryName.empty())
+    snprintf(desc, sizeof(desc), "Choose a league in %s.", g_PreCareer.selectedCountryName.c_str());
+  else
+    snprintf(desc, sizeof(desc), "Choose the competition you will manage in.");
   PushMF(g_ManagerFontSmall);
   float descW = ImGui::CalcTextSize(desc).x;
   ImGui::SetCursorPosX((kCardW - descW) * 0.5f);
@@ -1215,6 +1435,28 @@ static void DrawSelectLeagueScreen(float winW, float winH) {
   const float tileH = 82.0f;
   const float gridX = pad;
   const float gridY = 110.0f;
+
+  // Guard: if no country selected, show message and offer Back (processed safely after frame)
+  if (g_PreCareer.selectedCountryId == 0) {
+    printf("[PRECAREER] Select League requested without country; redirecting Select Country\n");
+    ImGui::SetCursorPos(ImVec2(pad, gridY + 20.0f));
+    ImGui::PushStyleColor(ImGuiCol_Text, kTextSec);
+    ImGui::TextUnformatted("Select a country first.");
+    ImGui::PopStyleColor();
+    float backH = 48.0f;
+    float backY = kCardH - backH - 28.0f;
+    float backW = kCardW - pad * 2.0f;
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12.0f, 8.0f));
+    PushMF(g_ManagerFontBold);
+    ImGui::SetCursorPos(ImVec2(pad, backY));
+    if (SecBtn("Back", ImVec2(backW, backH)))
+      g_PreCareer.pendingAction = 6;
+    PopMF(g_ManagerFontBold);
+    ImGui::PopStyleVar();
+    EndCardContent();
+    DrawPreCareerFooter(winW, winH);
+    return;
+  }
 
   // ---- Pagination state ----
   int totalItems = (int)g_PreCareer.leagues.size();
@@ -1513,6 +1755,9 @@ void RenderImGuiPreCareer() {
       break;
     case PRECAREER_LOAD_GAME:
       DrawLoadGameScreen(winW, winH);
+      break;
+    case PRECAREER_SELECT_COUNTRY:
+      DrawSelectCountryScreen(winW, winH);
       break;
     case PRECAREER_SELECT_LEAGUE:
       DrawSelectLeagueScreen(winW, winH);

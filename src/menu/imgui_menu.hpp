@@ -4,25 +4,27 @@
 #include <functional>
 
 enum e_PreCareerScreen {
-  PRECAREER_NONE           = 0,
-  PRECAREER_MAIN_MENU      = 1,
-  PRECAREER_CREATE_PROFILE = 2,
-  PRECAREER_LOAD_GAME      = 3,
-  PRECAREER_SELECT_LEAGUE  = 4,
-  PRECAREER_SELECT_CLUB    = 5,
+  PRECAREER_NONE             = 0,
+  PRECAREER_MAIN_MENU        = 1,
+  PRECAREER_CREATE_PROFILE   = 2,
+  PRECAREER_LOAD_GAME        = 3,
+  PRECAREER_SELECT_LEAGUE    = 4,
+  PRECAREER_SELECT_CLUB      = 5,
   PRECAREER_SETTINGS_PLACEHOLDER = 6,
+  PRECAREER_SELECT_COUNTRY   = 7,
 };
 
 // pendingAction values set by ImGui buttons and consumed by RenderImGuiPreCareer() in imgui_menu.cpp:
-//  1 = new game       (enter create profile)
-//  2 = load game      (enter load game)
-//  3 = settings       (enter settings placeholder)
-//  4 = quit           (quit game)
-//  5 = create profile (create manager profile and enter league selection)
-//  6 = back           (navigate back)
-//  7 = load manager   (load manager by pendingId)
-//  8 = select league  (enter club selection for pendingId league)
-// 10 = start career   (persist club and enter career hub)
+//  1 = new game        (enter create profile)
+//  2 = load game       (enter load game)
+//  3 = settings        (enter settings placeholder)
+//  4 = quit            (quit game)
+//  5 = create profile  (validate profile and enter select country)
+//  6 = back            (navigate back)
+//  7 = load manager    (load manager by pendingId)
+//  8 = select league   (enter club selection for pendingId league)
+//  9 = select country  (selectedCountryId/Name already set; enter filtered league)
+// 10 = start career    (persist club and enter career hub)
 
 struct PreCareerState {
   bool              active        = false;
@@ -49,6 +51,11 @@ struct PreCareerState {
   int  genderIdx;
 
   // Data lists for selection screens
+  struct CountryItem { int id; std::string name; std::string flag; };
+  std::vector<CountryItem> countries;
+  int    selectedCountryId   = 0;
+  std::string selectedCountryName;
+
   struct LeagueItem { int id; std::string name; std::string logoUrl; };
   std::vector<LeagueItem> leagues;
 
@@ -63,8 +70,9 @@ struct PreCareerState {
   std::vector<SaveEntry> saves;
 
   // Pagination
-  int selectLeaguePage = 0;
-  int selectClubPage   = 0;
+  int selectCountryPage = 0;
+  int selectLeaguePage  = 0;
+  int selectClubPage    = 0;
 
   void Clear();
 };
