@@ -92,8 +92,6 @@ bool superDebug = false;
 e_DebugMode debugMode = e_DebugMode_Off;
 
 std::string activeSaveDirectory;
-std::string saveDirectory;
-std::string saveDBPath;
 
 std::string configFile = "football.config";
 std::string GetConfigFilename() {
@@ -149,13 +147,6 @@ void SetActiveSaveDirectory(const std::string &dir) {
   activeSaveDirectory = dir;
 }
 
-std::string GetSaveDirectory() {
-  return saveDirectory;
-}
-
-std::string GetSaveDBPath() {
-  return saveDBPath;
-}
 
 bool SuperDebug() {
   return superDebug;
@@ -295,41 +286,11 @@ int main(int argc, const char** argv) {
   int timeStep_ms = config->GetInt("physics_frametime_ms", 10);
 
 
-  // database — stored in user save directory, seeded from static data/ on first run
-
-  {
-    namespace fs = boost::filesystem;
-
-    // Resolve save directory: $XDG_DATA_HOME/ClassicManager or ~/.local/share/ClassicManager
-    const char *xdgDataHome = getenv("XDG_DATA_HOME");
-    if (xdgDataHome && xdgDataHome[0] != '\0') {
-      saveDirectory = std::string(xdgDataHome) + "/ClassicManager";
-    } else {
-      const char *home = getenv("HOME");
-      saveDirectory = std::string(home ? home : "/tmp") + "/.local/share/ClassicManager";
-    }
-
-    boost::system::error_code ec;
-    fs::create_directories(saveDirectory, ec);
-    if (ec) Log(e_FatalError, "main", "()", "Could not create save directory: " + ec.message());
-
-    fs::path saveDb = fs::path(saveDirectory) / "database.sqlite";
-    saveDBPath = saveDb.string();
-
-    if (!fs::exists(saveDb)) {
-      // First run: copy the seed database from the static data directory
-      fs::path seedDb("databases/default/database.sqlite");
-      fs::copy_file(seedDb, saveDb, ec);
-      if (ec) Log(e_FatalError, "main", "()", "Could not copy seed database: " + ec.message());
-      printf("[DB] First run — initialized save database at %s\n", saveDBPath.c_str());
-    } else {
-      printf("[DB] Save database: %s\n", saveDBPath.c_str());
-    }
-  }
-
+  // Single database: game data and career saves in build/databases/default/database.sqlite
   db = new Database();
-  bool dbSuccess = db->Load(saveDBPath);
+  bool dbSuccess = db->Load("databases/default/database.sqlite");
   if (!dbSuccess) Log(e_FatalError, "main", "()", "Could not open database");
+  printf("[DB] Using database: databases/default/database.sqlite\n");
 
 
   // initialize systems

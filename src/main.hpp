@@ -60,8 +60,6 @@ Properties *GetConfiguration();
 std::string GetActiveSaveDirectory();
 void SetActiveSaveDirectory(const std::string &dir);
 
-std::string GetSaveDirectory();
-std::string GetSaveDBPath();
 bool SuperDebug();
 e_DebugMode GetDebugMode();
 boost::intrusive_ptr<Image2D> GetDebugImage();
