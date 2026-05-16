@@ -56,6 +56,7 @@ struct CareerHubState {
 
   struct ClubInfo {
     std::string name, shortName, logoPath, leagueName;
+    int leagueId = 0;
   } club;
 
   struct Player {
@@ -65,15 +66,18 @@ struct CareerHubState {
 
   struct Fixture {
     std::string league, matchday, round;
-    std::string home, away;
+    std::string home, away;          // shortnames — used for user-club matching
+    std::string homeFull, awayFull;  // full names — used for display
     std::string homeLogo, awayLogo;
+    std::string leagueLogo;
+    int         leagueId = 0;
     std::string status, score;
     std::string fixtureDate;
   };
   std::vector<Fixture> fixtures;
 
   struct Standing {
-    std::string league, team, teamLogo;
+    std::string league, team, teamFull, teamLogo;
     std::string p, w, d, l, gf, ga, gd, pts;
   };
   std::vector<Standing> standings;

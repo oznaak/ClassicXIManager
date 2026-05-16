@@ -293,15 +293,14 @@ static void GenerateFixturesForLeague(int managerId, int leagueId,
   int rounds = M - 1;
   int half   = M / 2;
 
-  int matchday = 0;
   for (int r = 0; r < rounds; r++) {
+    int matchday = r + 1;  // all pairs in this round share the same matchweek number
     std::string date1 = MakeFixtureDate(seasonYear, startMonth, startDay, r);
     std::string date2 = MakeFixtureDate(seasonYear, startMonth, startDay, rounds + r);
     for (int p = 0; p < half; p++) {
       int home = circle[p];
       int away = circle[M - 1 - p];
       if (home == 0 || away == 0) continue; // bye
-      matchday++;
       InsertFixture(managerId, leagueId, seasonYear, 1, matchday,         home, away, date1);
       InsertFixture(managerId, leagueId, seasonYear, 2, matchday + rounds, away, home, date2);
     }
