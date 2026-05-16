@@ -3,6 +3,7 @@
 #include "managercareer.hpp"
 
 #include "../main.hpp"
+#include <ctime>
 #include "imgui.h"
 #include <SDL2/SDL_image.h>
 #ifdef __APPLE__
@@ -210,7 +211,10 @@ static void PreCareerStartCareer() {
   delete r;
   int managerId = LastInsertId();
 
-  GenerateCareerSeason(managerId);
+  time_t now = time(nullptr);
+  struct tm *lt = localtime(&now);
+  int currentYear = 1900 + lt->tm_year;
+  GenerateCareerSeason(managerId, currentYear);
   GetMenuTask()->RequestManagerCareerPage(managerId);
 
   g_PreCareer.Clear();

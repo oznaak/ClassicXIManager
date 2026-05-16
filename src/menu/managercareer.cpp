@@ -69,6 +69,7 @@ static void EnsureCareerTables() {
     "manager_id INTEGER NOT NULL,"
     "league_id INTEGER NOT NULL,"
     "team_id INTEGER NOT NULL,"
+    "season_year INTEGER NOT NULL DEFAULT 0,"
     "played INTEGER DEFAULT 0,"
     "won INTEGER DEFAULT 0,"
     "drawn INTEGER DEFAULT 0,"
@@ -78,12 +79,51 @@ static void EnsureCareerTables() {
     "goal_difference INTEGER DEFAULT 0,"
     "points INTEGER DEFAULT 0,"
     "created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
-    "UNIQUE(manager_id, league_id, team_id)"
+    "UNIQUE(manager_id, league_id, team_id, season_year)"
     ");"
   );
   delete r2;
 
+  DatabaseResult *r3 = GetDB()->Query(
+    "CREATE TABLE IF NOT EXISTS manager_achievements ("
+    "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "manager_id INTEGER NOT NULL,"
+    "season_year INTEGER NOT NULL,"
+    "season_label TEXT NOT NULL,"
+    "league_id INTEGER NOT NULL,"
+    "team_id INTEGER NOT NULL,"
+    "league_result INTEGER NOT NULL,"
+    "record TEXT NOT NULL,"
+    "home_winrate REAL DEFAULT 0,"
+    "away_winrate REAL DEFAULT 0,"
+    "played INTEGER DEFAULT 0,"
+    "won INTEGER DEFAULT 0,"
+    "drawn INTEGER DEFAULT 0,"
+    "lost INTEGER DEFAULT 0,"
+    "goals_for INTEGER DEFAULT 0,"
+    "goals_against INTEGER DEFAULT 0,"
+    "goal_difference INTEGER DEFAULT 0,"
+    "points INTEGER DEFAULT 0,"
+    "created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+    "UNIQUE(manager_id, season_year, league_id, team_id)"
+    ");"
+  );
+  delete r3;
+
   // Safe migration: add columns if they don't already exist.
+  {
+    DatabaseResult *info = GetDB()->Query("PRAGMA table_info(standings);");
+    bool hasSeasonYearCol = false;
+    for (unsigned int i = 0; i < info->data.size(); i++) {
+      if (info->data.at(i).size() > 1 && info->data.at(i).at(1) == "season_year")
+        hasSeasonYearCol = true;
+    }
+    delete info;
+    if (!hasSeasonYearCol) {
+      DatabaseResult *a = GetDB()->Query("ALTER TABLE standings ADD COLUMN season_year INTEGER NOT NULL DEFAULT 0;");
+      delete a;
+    }
+  }
   {
     DatabaseResult *info = GetDB()->Query("PRAGMA table_info(managers);");
     bool hasCurrentDate = false, hasSeasonYear = false;
@@ -263,30 +303,29 @@ static void GenerateFixturesForLeague(int managerId, int leagueId,
   }
 }
 
-static void GenerateStandingsForLeague(int managerId, int leagueId,
+static void GenerateStandingsForLeague(int managerId, int leagueId, int seasonYear,
                                        const std::vector<int> &teamIds) {
   for (unsigned int i = 0; i < teamIds.size(); i++) {
     std::stringstream q;
-    q << "INSERT OR IGNORE INTO standings(manager_id,league_id,team_id)"
-      << " VALUES(" << managerId << "," << leagueId << "," << teamIds.at(i) << ");";
+    q << "INSERT OR IGNORE INTO standings(manager_id,league_id,team_id,season_year)"
+      << " VALUES(" << managerId << "," << leagueId << "," << teamIds.at(i)
+      << "," << seasonYear << ");";
     DatabaseResult *r = GetDB()->Query(q.str());
     delete r;
   }
 }
 
-void GenerateCareerSeason(int managerId) {
-  printf("[CAREER] Generating season for manager %d\n", managerId);
+void GenerateCareerSeason(int managerId, int seasonYear) {
+  printf("[CAREER] Generating season for manager %d season_year=%d\n", managerId, seasonYear);
   EnsureCareerTables();
   DeleteCareerSeason(managerId);
-
-  const int seasonYear = GetCurrentYear();
 
   DatabaseResult *lr = GetDB()->Query("SELECT id FROM leagues ORDER BY id;");
   for (unsigned int i = 0; i < lr->data.size(); i++) {
     int leagueId = atoi(lr->data.at(i).at(0).c_str());
     std::vector<int> teamIds = GetLeagueTeamIds(leagueId);
     GenerateFixturesForLeague(managerId, leagueId, seasonYear, teamIds);
-    GenerateStandingsForLeague(managerId, leagueId, teamIds);
+    GenerateStandingsForLeague(managerId, leagueId, seasonYear, teamIds);
   }
   delete lr;
 
@@ -300,9 +339,8 @@ void GenerateCareerSeason(int managerId) {
   DatabaseResult *ur = GetDB()->Query(uq.str());
   delete ur;
 
-  printf("[CAREER] Created manager save id=%d season_year=%d current_date=%s\n",
+  printf("[CAREER] New season generated manager=%d season_year=%d current_date=%s\n",
          managerId, seasonYear, careerDate);
-  printf("[CAREER] Season generated for manager %d\n", managerId);
 }
 
 static void EnsureManagerTable() {
@@ -532,7 +570,7 @@ void ManagerSelectClubPage::StartCareer() {
   DatabaseResult *r = GetDB()->Query(q.str());
   delete r;
 
-  GenerateCareerSeason(managerId);
+  GenerateCareerSeason(managerId, GetCurrentYear());
 
   Properties props;
   props.Set("managerId", managerId);
@@ -574,10 +612,11 @@ ManagerMainScreenPage::ManagerMainScreenPage(
 
   if (useImGuiCareerHub) {
     // Wire ImGui action callbacks before loading so they are ready when active=true.
-    g_CareerHub.onPlayMatch   = boost::bind(&ManagerMainScreenPage::PlayMatch,   this);
-    g_CareerHub.onMainMenu    = boost::bind(&ManagerMainScreenPage::BackToMainMenu, this);
-    g_CareerHub.onAdvance     = boost::bind(&ManagerMainScreenPage::AdvanceDay,  this);
-    g_CareerHub.onPlayFixture = boost::bind(&ManagerMainScreenPage::PlayFixture, this);
+    g_CareerHub.onPlayMatch       = boost::bind(&ManagerMainScreenPage::PlayMatch,       this);
+    g_CareerHub.onMainMenu        = boost::bind(&ManagerMainScreenPage::BackToMainMenu,  this);
+    g_CareerHub.onAdvance         = boost::bind(&ManagerMainScreenPage::AdvanceDay,      this);
+    g_CareerHub.onPlayFixture     = boost::bind(&ManagerMainScreenPage::PlayFixture,     this);
+    g_CareerHub.onStartNextSeason = boost::bind(&ManagerMainScreenPage::StartNextSeason, this);
     g_CareerHub.LoadFromDB(managerId, clubId);
     this->Show();
   } else {
@@ -978,6 +1017,166 @@ static void SimulateNonUserFixturesForDate(int managerId, int clubId, int season
            simCount, date.c_str(), managerId);
 }
 
+// ---- Season achievement + rollover -----------------------------------------
+
+static void StoreManagerAchievementForCompletedSeason(int managerId) {
+  // Load manager's club_id and current season_year.
+  std::stringstream mq;
+  mq << "SELECT club_id, season_year FROM managers WHERE id=" << managerId << " LIMIT 1;";
+  DatabaseResult *mr = GetDB()->Query(mq.str());
+  if (mr->data.size() == 0) { delete mr; return; }
+  int clubId     = atoi(mr->data.at(0).at(0).c_str());
+  int seasonYear = atoi(mr->data.at(0).at(1).c_str());
+  delete mr;
+
+  if (clubId == 0 || seasonYear == 0) {
+    printf("[ACHIEVEMENT] Manager %d has no club/season, skipping\n", managerId);
+    return;
+  }
+
+  // Find manager club's league.
+  std::stringstream lq;
+  lq << "SELECT league_id FROM teams WHERE id=" << clubId << " LIMIT 1;";
+  DatabaseResult *lr = GetDB()->Query(lq.str());
+  if (lr->data.size() == 0) { delete lr; return; }
+  int leagueId = atoi(lr->data.at(0).at(0).c_str());
+  delete lr;
+
+  // Load manager club's standings row.
+  std::stringstream sq;
+  sq << "SELECT played, won, drawn, lost, goals_for, goals_against, goal_difference, points"
+     << " FROM standings"
+     << " WHERE manager_id=" << managerId
+     << " AND league_id=" << leagueId
+     << " AND team_id=" << clubId
+     << " AND season_year=" << seasonYear << " LIMIT 1;";
+  DatabaseResult *sr = GetDB()->Query(sq.str());
+  if (sr->data.size() == 0) {
+    printf("[ACHIEVEMENT] No standings row for manager=%d club=%d league=%d season=%d\n",
+           managerId, clubId, leagueId, seasonYear);
+    delete sr;
+    return;
+  }
+  int played = atoi(sr->data.at(0).at(0).c_str());
+  int won    = atoi(sr->data.at(0).at(1).c_str());
+  int drawn  = atoi(sr->data.at(0).at(2).c_str());
+  int lost   = atoi(sr->data.at(0).at(3).c_str());
+  int gf     = atoi(sr->data.at(0).at(4).c_str());
+  int ga     = atoi(sr->data.at(0).at(5).c_str());
+  int gd     = atoi(sr->data.at(0).at(6).c_str());
+  int pts    = atoi(sr->data.at(0).at(7).c_str());
+  delete sr;
+
+  // Compute league position: rank all teams in this league for this season.
+  std::stringstream rq;
+  rq << "SELECT team_id FROM standings"
+     << " WHERE manager_id=" << managerId
+     << " AND league_id=" << leagueId
+     << " AND season_year=" << seasonYear
+     << " ORDER BY points DESC, goal_difference DESC, goals_for DESC, team_id ASC;";
+  DatabaseResult *rr = GetDB()->Query(rq.str());
+  int leagueResult = 1;
+  for (unsigned int i = 0; i < rr->data.size(); i++) {
+    if (atoi(rr->data.at(i).at(0).c_str()) == clubId) {
+      leagueResult = (int)i + 1;
+      break;
+    }
+  }
+  delete rr;
+
+  // Compute home win rate.
+  double homeWR = 0.0;
+  {
+    std::stringstream hq;
+    hq << "SELECT home_score, away_score FROM fixtures"
+       << " WHERE manager_id=" << managerId
+       << " AND season_year=" << seasonYear
+       << " AND status='played'"
+       << " AND home_team_id=" << clubId << ";";
+    DatabaseResult *hr = GetDB()->Query(hq.str());
+    int homeMatches = (int)hr->data.size(), homeWins = 0;
+    for (unsigned int i = 0; i < hr->data.size(); i++) {
+      int hs = atoi(hr->data.at(i).at(0).c_str());
+      int as = atoi(hr->data.at(i).at(1).c_str());
+      if (hs > as) homeWins++;
+    }
+    delete hr;
+    homeWR = homeMatches > 0 ? (homeWins * 100.0 / homeMatches) : 0.0;
+  }
+
+  // Compute away win rate.
+  double awayWR = 0.0;
+  {
+    std::stringstream aq;
+    aq << "SELECT home_score, away_score FROM fixtures"
+       << " WHERE manager_id=" << managerId
+       << " AND season_year=" << seasonYear
+       << " AND status='played'"
+       << " AND away_team_id=" << clubId << ";";
+    DatabaseResult *ar = GetDB()->Query(aq.str());
+    int awayMatches = (int)ar->data.size(), awayWins = 0;
+    for (unsigned int i = 0; i < ar->data.size(); i++) {
+      int hs = atoi(ar->data.at(i).at(0).c_str());
+      int as = atoi(ar->data.at(i).at(1).c_str());
+      if (as > hs) awayWins++;
+    }
+    delete ar;
+    awayWR = awayMatches > 0 ? (awayWins * 100.0 / awayMatches) : 0.0;
+  }
+
+  // Build record string "W/D/L" and season label "YYYY/YY".
+  char record[16];
+  snprintf(record, sizeof(record), "%d/%d/%d", won, drawn, lost);
+  char seasonLabel[16];
+  snprintf(seasonLabel, sizeof(seasonLabel), "%d/%02d", seasonYear, (seasonYear + 1) % 100);
+
+  // Insert or replace achievement.
+  std::stringstream iq;
+  iq << "INSERT OR REPLACE INTO manager_achievements"
+     << "(manager_id,season_year,season_label,league_id,team_id,"
+     << " league_result,record,home_winrate,away_winrate,"
+     << " played,won,drawn,lost,goals_for,goals_against,goal_difference,points)"
+     << " VALUES("
+     << managerId << "," << seasonYear << ",'" << seasonLabel << "',"
+     << leagueId << "," << clubId << ","
+     << leagueResult << ",'" << record << "',"
+     << homeWR << "," << awayWR << ","
+     << played << "," << won << "," << drawn << "," << lost << ","
+     << gf << "," << ga << "," << gd << "," << pts << ");";
+  DatabaseResult *ir = GetDB()->Query(iq.str());
+  delete ir;
+
+  printf("[ACHIEVEMENT] Stored manager=%d season=%s league=%d team=%d pos=%d"
+         " record=%s homeWR=%.1f awayWR=%.1f\n",
+         managerId, seasonLabel, leagueId, clubId, leagueResult,
+         record, homeWR, awayWR);
+}
+
+void ManagerMainScreenPage::StartNextSeason() {
+  int currentSeasonYear = g_CareerHub.seasonYear;
+  if (currentSeasonYear == 0) {
+    printf("[CAREER] StartNextSeason: no season_year loaded, aborting\n");
+    g_CareerHub.LoadFromDB(managerId, clubId);
+    return;
+  }
+
+  int nextSeasonYear = currentSeasonYear + 1;
+  printf("[CAREER] Starting next season manager=%d from=%d to=%d\n",
+         managerId, currentSeasonYear, nextSeasonYear);
+
+  // Store achievements for the completed season before deleting its data.
+  StoreManagerAchievementForCompletedSeason(managerId);
+
+  // Generate next season (deletes old fixtures/standings internally).
+  GenerateCareerSeason(managerId, nextSeasonYear);
+
+  // Reload career state (GenerateCareerSeason already set current_date/season_year in DB).
+  g_CareerHub.LoadFromDB(managerId, clubId);
+
+  printf("[CAREER] Season rollover complete manager=%d season_year=%d current_date=%s\n",
+         managerId, g_CareerHub.seasonYear, g_CareerHub.currentDate.c_str());
+}
+
 // ---- Calendar helpers ------------------------------------------------------
 
 // Add exactly one calendar day to an ISO date string YYYY-MM-DD.
@@ -1006,8 +1205,6 @@ void ManagerMainScreenPage::AdvanceDay() {
     return;
   }
 
-  g_CareerHub.isAdvancing = true;
-
   // Step 1: simulate all non-user fixtures scheduled for the current date.
   SimulateNonUserFixturesForDate(managerId, clubId, g_CareerHub.seasonYear, fromDate);
 
@@ -1020,22 +1217,7 @@ void ManagerMainScreenPage::AdvanceDay() {
   DatabaseResult *ur = GetDB()->Query(uq.str());
   delete ur;
 
-  // Verify the write landed.
-  {
-    std::stringstream rq;
-    rq << "SELECT current_date FROM managers WHERE id=" << managerId << ";";
-    DatabaseResult *rr = GetDB()->Query(rq.str());
-    std::string dbDate = (rr->data.size() > 0 && rr->data.at(0).size() > 0)
-                           ? rr->data.at(0).at(0) : "";
-    delete rr;
-    if (dbDate.empty()) {
-      printf("[CAREER] AdvanceDay ERROR: DB write failed, aborting state reload\n");
-      g_CareerHub.isAdvancing = false;
-      return;
-    }
-  }
-
-  // Step 4: reload career state (also clears isAdvancing).
+  // Step 4: reload career state (also clears isAdvancing via LoadFromDB).
   g_CareerHub.LoadFromDB(managerId, clubId);
 
   printf("[CAREER] Advance day manager=%d from=%s to=%s\n",

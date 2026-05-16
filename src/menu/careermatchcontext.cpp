@@ -19,7 +19,7 @@ void CompleteScheduledFixture(int managerId, int fixtureId,
                               const std::string &statsJson) {
   // Guard: verify fixture exists and is not already played.
   std::stringstream chk;
-  chk << "SELECT id, league_id, home_team_id, away_team_id, status"
+  chk << "SELECT id, league_id, home_team_id, away_team_id, status, season_year"
       << " FROM fixtures WHERE id=" << fixtureId
       << " AND manager_id=" << managerId << " LIMIT 1;";
   DatabaseResult *cr = GetDB()->Query(chk.str());
@@ -33,6 +33,7 @@ void CompleteScheduledFixture(int managerId, int fixtureId,
   int leagueId   = atoi(DBCell(cr, 0, 1).c_str());
   int homeTeamId = atoi(DBCell(cr, 0, 2).c_str());
   int awayTeamId = atoi(DBCell(cr, 0, 3).c_str());
+  int seasonYear = atoi(DBCell(cr, 0, 5).c_str());
   delete cr;
 
   if (status == "played") {
@@ -82,7 +83,8 @@ void CompleteScheduledFixture(int managerId, int fixtureId,
      << " points=points+" << homePts
      << " WHERE manager_id=" << managerId
      << " AND league_id="   << leagueId
-     << " AND team_id="     << homeTeamId << ";";
+     << " AND team_id="     << homeTeamId
+     << " AND season_year=" << seasonYear << ";";
   DatabaseResult *hr = GetDB()->Query(hq.str());
   delete hr;
 
@@ -99,7 +101,8 @@ void CompleteScheduledFixture(int managerId, int fixtureId,
      << " points=points+" << awayPts
      << " WHERE manager_id=" << managerId
      << " AND league_id="   << leagueId
-     << " AND team_id="     << awayTeamId << ";";
+     << " AND team_id="     << awayTeamId
+     << " AND season_year=" << seasonYear << ";";
   DatabaseResult *ar = GetDB()->Query(aq.str());
   delete ar;
 

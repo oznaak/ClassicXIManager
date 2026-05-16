@@ -146,9 +146,13 @@ void CareerHubState::Clear() {
   currentDate.clear();
   currentDateDisplay.clear();
   seasonYear      = 0;
-  hasTodayFixture = false;
-  todayFixture    = {};
-  isAdvancing     = false;
+  hasTodayFixture     = false;
+  todayFixture        = {};
+  hasSeasonEnded       = false;
+  isAdvancing          = false;
+  pendingAdvanceAction = ADVANCE_NONE;
+  advanceFramesWaited  = 0;
+  onStartNextSeason    = nullptr;
   manager = {};
   club    = {};
   players.clear();
@@ -347,7 +351,35 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
     delete fr;
   }
 
-  isAdvancing = false;
+  // Detect end of season: all fixtures for this manager/season are played.
+  hasSeasonEnded = false;
+  if (seasonYear > 0) {
+    std::stringstream cq;
+    cq << "SELECT COUNT(*) FROM fixtures WHERE manager_id=" << mgrId
+       << " AND season_year=" << seasonYear << ";";
+    DatabaseResult *cr = GetDB()->Query(cq.str());
+    int total = (cr->data.size() > 0 && !cr->data.at(0).at(0).empty())
+                  ? atoi(cr->data.at(0).at(0).c_str()) : 0;
+    delete cr;
+
+    if (total > 0) {
+      std::stringstream sq;
+      sq << "SELECT COUNT(*) FROM fixtures WHERE manager_id=" << mgrId
+         << " AND season_year=" << seasonYear << " AND status='scheduled';";
+      DatabaseResult *sr = GetDB()->Query(sq.str());
+      int remaining = (sr->data.size() > 0 && !sr->data.at(0).at(0).empty())
+                        ? atoi(sr->data.at(0).at(0).c_str()) : 0;
+      delete sr;
+      hasSeasonEnded = (remaining == 0);
+      if (hasSeasonEnded)
+        printf("[CAREER] Season ended manager=%d season=%d remainingScheduled=0\n",
+               mgrId, seasonYear);
+    }
+  }
+
+  isAdvancing          = false;
+  pendingAdvanceAction = ADVANCE_NONE;
+  advanceFramesWaited  = 0;
   active = true;
 }
 
@@ -690,9 +722,10 @@ static void DrawNavItem(const char *label, e_ManagerPage page, int badge = 0) {
 
 // ---- Action flags (deferred, consumed after Handle()) -------------------
 
-static bool s_playClicked    = false; // test engine (hardcoded match)
-static bool s_advanceClicked = false; // advance day or play fixture
-static bool s_menuClicked    = false;
+static bool s_playClicked        = false; // test engine (hardcoded match)
+static bool s_advanceClicked     = false; // advance day or play fixture
+static bool s_startSeasonClicked = false; // start next season
+static bool s_menuClicked        = false;
 
 // ---- DrawSidebar --------------------------------------------------------
 
@@ -872,7 +905,11 @@ static void DrawTopHeader(float contentX, float contentW) {
   ImGui::SetCursorPos(ImVec2(rightEdge - kBtnW, elemY));
   if (SecBtn("Test Engine", ImVec2(kBtnW, kElemH))) s_playClicked = true;
 
-  // Advance / Play Match button — changes label based on matchday / advancing state.
+  // Advance / Play Match / Start Season button — priority:
+  // 1. isAdvancing -> disabled "Advancing..."
+  // 2. hasTodayFixture -> "Play Match"
+  // 3. hasSeasonEnded -> "Start Season"
+  // 4. else -> "Advance"
   float advBtnX = rightEdge - kBtnW - kGap - kBtnW;
   ImGui::SetCursorPos(ImVec2(advBtnX, elemY));
   if (g_CareerHub.isAdvancing) {
@@ -881,6 +918,8 @@ static void DrawTopHeader(float contentX, float contentW) {
     ImGui::EndDisabled();
   } else if (g_CareerHub.hasTodayFixture) {
     if (CTAButton("Play Match", ImVec2(kBtnW, kElemH))) s_advanceClicked = true;
+  } else if (g_CareerHub.hasSeasonEnded) {
+    if (CTAButton("Start Season", ImVec2(kBtnW, kElemH))) s_startSeasonClicked = true;
   } else {
     if (CTAButton("Advance", ImVec2(kBtnW, kElemH))) s_advanceClicked = true;
   }
@@ -1725,6 +1764,51 @@ static void DrawWorkspace(float contentW, float workH) {
   ImGui::EndChild();
 }
 
+// ---- DrawAdvancingModalOverlay ------------------------------------------
+// Drawn via the foreground drawlist so it floats above all ImGui windows.
+// The normal career hub is still rendered underneath.
+
+static void DrawAdvancingModalOverlay() {
+  ImVec2 display = ImGui::GetIO().DisplaySize;
+  ImDrawList *fg = ImGui::GetForegroundDrawList();
+
+  // Semi-transparent full-screen dim.
+  fg->AddRectFilled(ImVec2(0, 0), display, IM_COL32(0, 0, 0, 120));
+
+  // Centered card.
+  const float kCardW = 420.0f, kCardH = 140.0f, kRounding = 12.0f;
+  ImVec2 cardPos((display.x - kCardW) * 0.5f, (display.y - kCardH) * 0.5f);
+  ImVec2 cardEnd(cardPos.x + kCardW, cardPos.y + kCardH);
+  fg->AddRectFilled(cardPos, cardEnd, IM_COL32(18, 26, 44, 245), kRounding);
+  fg->AddRect(cardPos, cardEnd, IM_COL32(120, 80, 255, 180), kRounding, 0, 1.5f);
+
+  // Animated dots: cycle "." / ".." / "..." at ~1.5 Hz.
+  double t = ImGui::GetTime();
+  int dotCount = 1 + (int)(fmod(t * 1.5, 3.0));
+  std::string dots(dotCount, '.');
+
+  const char *titleBase = (g_CareerHub.pendingAdvanceAction == ADVANCE_START_SEASON)
+                            ? "Starting new season" : "Advancing";
+  std::string titleStr = std::string(titleBase) + dots;
+  const char *subtitle = "Processing fixtures and career events";
+
+  // Draw title text via drawlist (avoids cursor/window context dependency).
+  ImFont *titleFont = g_ManagerFontTitle   ? g_ManagerFontTitle   : ImGui::GetIO().Fonts->Fonts[0];
+  ImFont *subFont   = g_ManagerFontRegular ? g_ManagerFontRegular : ImGui::GetIO().Fonts->Fonts[0];
+
+  ImVec2 titleSz = titleFont->CalcTextSizeA(titleFont->FontSize, FLT_MAX, 0.0f, titleStr.c_str());
+  float titleX = cardPos.x + (kCardW - titleSz.x) * 0.5f;
+  float titleY = cardPos.y + 34.0f;
+  fg->AddText(titleFont, titleFont->FontSize,
+              ImVec2(titleX, titleY), IM_COL32(237, 242, 246, 255), titleStr.c_str());
+
+  ImVec2 subSz = subFont->CalcTextSizeA(subFont->FontSize, FLT_MAX, 0.0f, subtitle);
+  float subX = cardPos.x + (kCardW - subSz.x) * 0.5f;
+  float subY = titleY + titleSz.y + 10.0f;
+  fg->AddText(subFont, subFont->FontSize,
+              ImVec2(subX, subY), IM_COL32(61, 74, 99, 255), subtitle);
+}
+
 // ---- DrawManagerShell ---------------------------------------------------
 
 static void DrawManagerShell(float winW, float winH) {
@@ -1777,31 +1861,70 @@ void RenderImGuiCareerHub() {
                ImGuiWindowFlags_NoScrollWithMouse);
   ImGui::PopStyleVar();
 
-  s_playClicked    = false;
-  s_advanceClicked = false;
-  s_menuClicked    = false;
+  s_playClicked        = false;
+  s_advanceClicked     = false;
+  s_startSeasonClicked = false;
+  s_menuClicked        = false;
 
+  // Always draw the normal hub behind any overlay.
   DrawAppBackground(winW, winH);
   DrawManagerShell(winW, winH);
 
   ImGui::End();
 
-  // Deferred action flags — consumed by opengl_renderer3d after Handle() returns.
+  // Modal overlay drawn via foreground drawlist — sits above all ImGui windows.
+  if (g_CareerHub.isAdvancing) {
+    DrawAdvancingModalOverlay();
+  }
+
+  // ---- Deferred action dispatch ----------------------------------------
+  // Immediate actions (Test Engine, Main Menu, Play Fixture) fire right away.
+  // Advance/Start Season set isAdvancing=true and defer work by one frame so
+  // the overlay is guaranteed to appear before processing begins.
+
   if (g_CareerHub.pendingAction == 0) {
     if (s_playClicked) {
-      g_CareerHub.pendingAction = 1; // Test Engine
+      g_CareerHub.pendingAction = 1;
       printf("[IMGUI MANAGER] Test Engine requested\n");
+
     } else if (s_menuClicked) {
-      g_CareerHub.pendingAction = 2; // Main Menu
+      g_CareerHub.pendingAction = 2;
       printf("[IMGUI MANAGER] Main Menu requested\n");
-    } else if (s_advanceClicked) {
+
+    } else if (s_startSeasonClicked && !g_CareerHub.isAdvancing) {
+      g_CareerHub.isAdvancing          = true;
+      g_CareerHub.pendingAdvanceAction = ADVANCE_START_SEASON;
+      g_CareerHub.advanceFramesWaited  = 0;
+      printf("[IMGUI MANAGER] Start Season: overlay shown, work deferred one frame\n");
+
+    } else if (s_advanceClicked && !g_CareerHub.isAdvancing) {
       if (g_CareerHub.hasTodayFixture) {
-        g_CareerHub.pendingAction = 4; // Play Fixture
+        g_CareerHub.pendingAction = 4; // Play Fixture — no overlay needed
         printf("[IMGUI MANAGER] Play Fixture requested fixture=%d\n",
                g_CareerHub.todayFixture.id);
       } else {
-        g_CareerHub.pendingAction = 3; // Advance day
-        printf("[IMGUI MANAGER] Advance day requested\n");
+        g_CareerHub.isAdvancing          = true;
+        g_CareerHub.pendingAdvanceAction = ADVANCE_NEXT_DAY;
+        g_CareerHub.advanceFramesWaited  = 0;
+        printf("[IMGUI MANAGER] Advance Day: overlay shown, work deferred one frame\n");
+      }
+    }
+
+    // Single-frame defer: let the overlay render for one frame before firing work.
+    if (g_CareerHub.isAdvancing && g_CareerHub.pendingAdvanceAction != ADVANCE_NONE) {
+      if (g_CareerHub.advanceFramesWaited == 0) {
+        // First frame with overlay visible — wait one more before firing.
+        g_CareerHub.advanceFramesWaited = 1;
+      } else {
+        // Overlay has been visible at least one frame — fire the work now.
+        if (g_CareerHub.pendingAdvanceAction == ADVANCE_NEXT_DAY) {
+          g_CareerHub.pendingAction = 3;
+          printf("[IMGUI MANAGER] Firing AdvanceDay after overlay frame\n");
+        } else if (g_CareerHub.pendingAdvanceAction == ADVANCE_START_SEASON) {
+          g_CareerHub.pendingAction = 5;
+          printf("[IMGUI MANAGER] Firing StartNextSeason after overlay frame\n");
+        }
+        g_CareerHub.pendingAdvanceAction = ADVANCE_NONE;
       }
     }
   }

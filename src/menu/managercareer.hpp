@@ -12,7 +12,8 @@
 
 using namespace blunted;
 
-void GenerateCareerSeason(int managerId);
+// seasonYear is the season start year (e.g. 2026 = 2026/27 season).
+void GenerateCareerSeason(int managerId, int seasonYear);
 
 class ManagerCreateProfilePage : public Gui2Page {
  public:
@@ -91,6 +92,7 @@ class ManagerMainScreenPage : public Gui2Page {
   void BackToMainMenu();
   void AdvanceDay();
   void PlayFixture();
+  void StartNextSeason();
 
  protected:
   int managerId;

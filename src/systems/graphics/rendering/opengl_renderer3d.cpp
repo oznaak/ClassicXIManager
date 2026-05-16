@@ -2367,6 +2367,9 @@ struct GLfunctions {
         } else if (action == 4 && g_CareerHub.onPlayFixture) {
           printf("[IMGUI MANAGER] Processing Play Fixture action\n");
           g_CareerHub.onPlayFixture();
+        } else if (action == 5 && g_CareerHub.onStartNextSeason) {
+          printf("[IMGUI MANAGER] Processing Start Next Season action\n");
+          g_CareerHub.onStartNextSeason();
         }
       }
 
