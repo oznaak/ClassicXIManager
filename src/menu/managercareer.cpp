@@ -270,9 +270,10 @@ static void InsertFixture(int managerId, int leagueId, int seasonYear,
 static void GenerateFixturesForLeague(int managerId, int leagueId,
                                       int seasonYear,
                                       const std::vector<int> &teamIds) {
-  printf("[CAREER] League %d teams: %lu\n", leagueId, (unsigned long)teamIds.size());
+  int N = (int)teamIds.size();
+  if (N < 2) return;
+  printf("[CAREER] League %d teams: %d\n", leagueId, N);
 
-  // Read per-league start date (MM-DD) from the leagues table.
   int startMonth = 8, startDay = 15;
   {
     std::stringstream sq;
@@ -284,22 +285,30 @@ static void GenerateFixturesForLeague(int managerId, int leagueId,
   }
   printf("[CAREER] League %d start date: %02d-%02d\n", leagueId, startMonth, startDay);
 
-  // Each pair plays home and away.
-  // roundOffset 0 = first pair date, +1 = next week, etc.
-  int pairIndex = 0;
-  for (unsigned int i = 0; i < teamIds.size(); i++) {
-    for (unsigned int j = i + 1; j < teamIds.size(); j++) {
-      int matchday = pairIndex + 1;
-      std::string date1 = MakeFixtureDate(seasonYear, startMonth, startDay, pairIndex);
-      std::string date2 = MakeFixtureDate(seasonYear, startMonth, startDay, pairIndex + 1);
-      InsertFixture(managerId, leagueId, seasonYear,
-                    1, matchday,
-                    teamIds.at(i), teamIds.at(j), date1);
-      InsertFixture(managerId, leagueId, seasonYear,
-                    2, matchday + 1,
-                    teamIds.at(j), teamIds.at(i), date2);
-      pairIndex++;
+  // Circle method: fix teams[0], rotate teams[1..M-1] each round so every team
+  // plays exactly once per round. N-1 rounds first half, N-1 rounds return leg.
+  std::vector<int> circle = teamIds;
+  if (N % 2 == 1) circle.push_back(0); // bye slot for odd N
+  int M      = (int)circle.size();
+  int rounds = M - 1;
+  int half   = M / 2;
+
+  int matchday = 0;
+  for (int r = 0; r < rounds; r++) {
+    std::string date1 = MakeFixtureDate(seasonYear, startMonth, startDay, r);
+    std::string date2 = MakeFixtureDate(seasonYear, startMonth, startDay, rounds + r);
+    for (int p = 0; p < half; p++) {
+      int home = circle[p];
+      int away = circle[M - 1 - p];
+      if (home == 0 || away == 0) continue; // bye
+      matchday++;
+      InsertFixture(managerId, leagueId, seasonYear, 1, matchday,         home, away, date1);
+      InsertFixture(managerId, leagueId, seasonYear, 2, matchday + rounds, away, home, date2);
     }
+    // Rotate: keep circle[0] fixed, shift circle[1..M-1] right by one.
+    int last = circle[M - 1];
+    for (int k = M - 1; k > 1; k--) circle[k] = circle[k - 1];
+    circle[1] = last;
   }
 }
 

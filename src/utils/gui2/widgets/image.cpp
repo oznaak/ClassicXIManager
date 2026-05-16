@@ -38,6 +38,14 @@ Gui2Image::Gui2Image(Gui2WindowManager *windowManager, const std::string &name,
 
   void Gui2Image::LoadImage(const std::string &filename) {
     SDL_Surface *imageSurfTmp = IMG_Load(filename.c_str());
+    if (!imageSurfTmp) {
+      printf("[WARNING] Gui2Image: could not load '%s', trying fallback\n", filename.c_str());
+      imageSurfTmp = IMG_Load("media/menu/main/loading01.png");
+    }
+    if (!imageSurfTmp) {
+      printf("[ERROR] Gui2Image: fallback image also missing, skipping load\n");
+      return;
+    }
     imageSource = windowManager->CreateImage2D(name + "source", imageSurfTmp->w, imageSurfTmp->h, false);
 
     boost::intrusive_ptr < Resource<Surface> > surfaceRes = imageSource->GetImage();
