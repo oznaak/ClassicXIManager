@@ -62,6 +62,10 @@ struct PreCareerState {
   struct SaveEntry { int id; std::string name, clubName, nationality, shortName, logoUrl; int age; };
   std::vector<SaveEntry> saves;
 
+  // Pagination
+  int selectLeaguePage = 0;
+  int selectClubPage   = 0;
+
   void Clear();
 };
 

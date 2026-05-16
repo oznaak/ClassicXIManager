@@ -52,6 +52,8 @@ void PreCareerState::Clear() {
   clubs.clear();
   selectedClubId = 0;
   saves.clear();
+  selectLeaguePage = 0;
+  selectClubPage   = 0;
 }
 
 static std::string SqlEscape(const std::string &in) {
@@ -101,7 +103,7 @@ static void LoadPreCareerSaves() {
 
 static void LoadPreCareerLeagues() {
   g_PreCareer.leagues.clear();
-  DatabaseResult *res = GetDB()->Query("SELECT id, name, logo_url FROM leagues ORDER BY name LIMIT 20;");
+  DatabaseResult *res = GetDB()->Query("SELECT id, name, logo_url FROM leagues ORDER BY name ASC LIMIT 100;");
   for (unsigned int i = 0; i < res->data.size(); i++) {
     PreCareerState::LeagueItem item;
     item.id   = atoi(res->data.at(i).at(0).c_str());
@@ -117,7 +119,7 @@ static void LoadPreCareerClubs(int leagueId) {
   g_PreCareer.clubs.clear();
   std::stringstream q;
   q << "SELECT id, name, shortname, logo_url FROM teams WHERE league_id = "
-    << leagueId << " ORDER BY name LIMIT 20;";
+    << leagueId << " ORDER BY name ASC LIMIT 100;";
   DatabaseResult *res = GetDB()->Query(q.str());
   for (unsigned int i = 0; i < res->data.size(); i++) {
     PreCareerState::ClubItem item;
@@ -159,6 +161,7 @@ static void EnterPreCareerSelectLeague(int managerId) {
   g_PreCareer.currentManagerId = managerId;
   g_PreCareer.currentLeagueId = 0;
   g_PreCareer.selectedClubId = 0;
+  g_PreCareer.selectLeaguePage = 0;
   LoadPreCareerLeagues();
   g_PreCareer.screen = PRECAREER_SELECT_LEAGUE;
   g_PreCareer.active = true;
@@ -168,6 +171,7 @@ static void EnterPreCareerSelectClub(int managerId, int leagueId) {
   g_PreCareer.currentManagerId = managerId;
   g_PreCareer.currentLeagueId = leagueId;
   g_PreCareer.selectedClubId = 0;
+  g_PreCareer.selectClubPage = 0;
   LoadPreCareerClubs(leagueId);
   g_PreCareer.screen = PRECAREER_SELECT_CLUB;
   g_PreCareer.active = true;
@@ -1091,6 +1095,60 @@ static void DrawLoadGameScreen(float winW, float winH) {
 }
 
 // =========================================================================
+// Pagination helpers
+// =========================================================================
+
+static int PageCount(int totalItems, int itemsPerPage) {
+  if (totalItems <= 0) return 1;
+  return (totalItems + itemsPerPage - 1) / itemsPerPage;
+}
+
+static int PageStart(int page, int itemsPerPage) {
+  return page * itemsPerPage;
+}
+
+static int PageEnd(int totalItems, int page, int itemsPerPage) {
+  return std::min(totalItems, PageStart(page, itemsPerPage) + itemsPerPage);
+}
+
+static void DrawPaginationRow(ImDrawList *dl, ImVec2 wp, float cardX, float cardY,
+                              float cardW, float rowY, float rowH,
+                              int &page, int totalPages) {
+  const float prevW   = 110.0f;
+  const float nextW   = 110.0f;
+  const float labelW  = 130.0f;
+  const float gap     = 12.0f;
+  const float totalW  = prevW + gap + labelW + gap + nextW;
+  const float startX  = (cardW - totalW) * 0.5f;
+
+  // Prev button
+  ImGui::SetCursorPos(ImVec2(startX, rowY));
+  bool prevDisabled = (page <= 0);
+  if (prevDisabled) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 0.35f);
+  bool prevClicked = SecBtn("< Prev", ImVec2(prevW, rowH));
+  if (prevDisabled) ImGui::PopStyleVar();
+  if (prevClicked && !prevDisabled) page--;
+
+  // Page label via DrawList (avoids cursor flow issues)
+  char pageLabel[32];
+  snprintf(pageLabel, sizeof(pageLabel), "Page %d / %d", page + 1, totalPages);
+  PushMF(g_ManagerFontSmall);
+  ImVec2 labelSz = ImGui::CalcTextSize(pageLabel);
+  float labelScreenX = wp.x + cardX + startX + prevW + gap + (labelW - labelSz.x) * 0.5f;
+  float labelScreenY = wp.y + cardY + rowY + (rowH - labelSz.y) * 0.5f;
+  dl->AddText(ImVec2(labelScreenX, labelScreenY), C32(kTextSec), pageLabel);
+  PopMF(g_ManagerFontSmall);
+
+  // Next button
+  ImGui::SetCursorPos(ImVec2(startX + prevW + gap + labelW + gap, rowY));
+  bool nextDisabled = (page >= totalPages - 1);
+  if (nextDisabled) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 0.35f);
+  bool nextClicked = SecBtn("Next >", ImVec2(nextW, rowH));
+  if (nextDisabled) ImGui::PopStyleVar();
+  if (nextClicked && !nextDisabled) page++;
+}
+
+// =========================================================================
 // Screen: Select League
 // =========================================================================
 
@@ -1103,7 +1161,7 @@ static void DrawSelectLeagueScreen(float winW, float winH) {
   const float kLogoH = 100.0f;
   const float kLogoGap = 24.0f;
   const float kCardW = 760.0f;
-  const float kCardH = 520.0f;
+  const float kCardH = 560.0f;
 
   GLuint logoTex = GetMainLogoTexture();
 
@@ -1145,26 +1203,42 @@ static void DrawSelectLeagueScreen(float winW, float winH) {
   ImGui::PushStyleColor(ImGuiCol_Separator, kBorder);
   ImGui::Separator();
   ImGui::PopStyleColor();
-  ImGui::Dummy(ImVec2(0, 8.0f));
+
+  // ---- Grid layout constants ----
+  const int   ITEMS_PER_PAGE = 6;
+  const int   COLS = 2;
+  const int   ROWS = 3;
+  const float pad   = 36.0f;
+  const float gapX  = 20.0f;
+  const float gapY  = 16.0f;
+  const float tileW = (kCardW - pad * 2.0f - gapX) / (float)COLS;
+  const float tileH = 82.0f;
+  const float gridX = pad;
+  const float gridY = 110.0f;
+
+  // ---- Pagination state ----
+  int totalItems = (int)g_PreCareer.leagues.size();
+  int totalPages = PageCount(totalItems, ITEMS_PER_PAGE);
+  int &page = g_PreCareer.selectLeaguePage;
+  page = std::max(0, std::min(page, totalPages - 1));
+  int start = PageStart(page, ITEMS_PER_PAGE);
+  int end   = PageEnd(totalItems, page, ITEMS_PER_PAGE);
 
   if (g_PreCareer.leagues.empty()) {
+    ImGui::SetCursorPos(ImVec2(pad, gridY + 20.0f));
     ImGui::PushStyleColor(ImGuiCol_Text, kTextSec);
-    ImGui::TextUnformatted("No leagues found in database.");
+    ImGui::TextUnformatted("No leagues found.");
     ImGui::PopStyleColor();
   }
 
-  float pad = 36.0f;
-  float gapX = 20.0f;
-  float gapY = 18.0f;
-  float tileW = (kCardW - pad * 2.0f - gapX) * 0.5f;
-  float tileH = 86.0f;
-  float gridX = pad;
-  float gridY = 120.0f;
+  ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12.0f, 8.0f));
+  PushMF(g_ManagerFontBold);
 
-  for (unsigned int i = 0; i < g_PreCareer.leagues.size(); i++) {
+  for (int i = start; i < end; i++) {
     const auto &lg = g_PreCareer.leagues.at(i);
-    int col = i % 2;
-    int row = i / 2;
+    int visIdx = i - start;
+    int col = visIdx % COLS;
+    int row = visIdx / COLS;
     float x = gridX + col * (tileW + gapX);
     float y = gridY + row * (tileH + gapY);
 
@@ -1179,20 +1253,19 @@ static void DrawSelectLeagueScreen(float winW, float winH) {
     dl->AddRectFilled(tp0, tp1,
       hov ? C32(kBgCardAlt) : IM_COL32(18,28,52,100), 8.0f);
     dl->AddRect(tp0, tp1, C32(kBorder), 8.0f, 0, 0.8f);
-    if (hov) dl->AddRectFilled(tp0, ImVec2(tp0.x+3.0f, tp1.y), C32(kAccent), 2.0f);
+    if (hov) dl->AddRectFilled(tp0, ImVec2(tp0.x + 3.0f, tp1.y), C32(kAccent), 2.0f);
 
+    const float logoBadgeSz = 48.0f;
     GLuint leagueTex = LoadImageTexture(lg.logoUrl);
-    float logoBadgeSz = 48.0f;
-    float badgeY = y + (tileH - logoBadgeSz) * 0.5f;
-    DrawImageBadgeAt(dl, ImVec2(tp0.x + 10.0f, tp0.y + (tileH - logoBadgeSz) * 0.5f), leagueTex, lg.name, logoBadgeSz);
+    DrawImageBadgeAt(dl, ImVec2(tp0.x + 10.0f, tp0.y + (tileH - logoBadgeSz) * 0.5f),
+                     leagueTex, lg.name, logoBadgeSz);
 
-    float textX = x + 68.0f;
     float nameH = ImGui::CalcTextSize(lg.name.c_str()).y;
     float textY = y + (tileH - nameH) * 0.5f;
 
     ImFont *bf = hov ? g_ManagerFontBold : g_ManagerFontRegular;
     if (bf) ImGui::PushFont(bf);
-    dl->AddText(ImVec2(wp.x + cardX + textX, wp.y + cardY + textY),
+    dl->AddText(ImVec2(wp.x + cardX + x + 68.0f, wp.y + cardY + textY),
                 C32(hov ? kTextPri : kTextSec), lg.name.c_str());
     if (bf) ImGui::PopFont();
 
@@ -1202,15 +1275,22 @@ static void DrawSelectLeagueScreen(float winW, float winH) {
     }
   }
 
-  float backW = kCardW - pad * 2.0f;
+  // ---- Pagination row ----
+  float gridH       = ROWS * tileH + (ROWS - 1) * gapY;
+  float paginationY = gridY + gridH + 18.0f;
+  float paginH      = 40.0f;
+  DrawPaginationRow(dl, wp, cardX, cardY, kCardW, paginationY, paginH,
+                    page, totalPages);
+
+  // ---- Back button ----
   float backH = 48.0f;
   float backY = kCardH - backH - 28.0f;
+  float backW = kCardW - pad * 2.0f;
 
   ImGui::SetCursorPos(ImVec2(pad, backY));
-  ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12.0f, 8.0f));
-  PushMF(g_ManagerFontBold);
   if (SecBtn("Back", ImVec2(backW, backH)))
     g_PreCareer.pendingAction = 6;
+
   PopMF(g_ManagerFontBold);
   ImGui::PopStyleVar();
 
@@ -1232,7 +1312,7 @@ static void DrawSelectClubScreen(float winW, float winH) {
   const float kLogoH = 100.0f;
   const float kLogoGap = 24.0f;
   const float kCardW = 760.0f;
-  const float kCardH = 520.0f;
+  const float kCardH = 640.0f;
 
   GLuint logoTex = GetMainLogoTexture();
 
@@ -1274,28 +1354,44 @@ static void DrawSelectClubScreen(float winW, float winH) {
   ImGui::PushStyleColor(ImGuiCol_Separator, kBorder);
   ImGui::Separator();
   ImGui::PopStyleColor();
-  ImGui::Dummy(ImVec2(0, 8.0f));
+
+  // ---- Grid layout constants ----
+  const int   ITEMS_PER_PAGE = 6;
+  const int   COLS = 2;
+  const int   ROWS = 3;
+  const float pad    = 36.0f;
+  const float gapX   = 20.0f;
+  const float gapY   = 16.0f;
+  const float tileW  = (kCardW - pad * 2.0f - gapX) / (float)COLS;
+  const float tileH  = 82.0f;
+  const float gridX  = pad;
+  const float gridY  = 110.0f;
+  const float badgeSz = 48.0f;
+
+  // ---- Pagination state ----
+  int totalItems = (int)g_PreCareer.clubs.size();
+  int totalPages = PageCount(totalItems, ITEMS_PER_PAGE);
+  int &page = g_PreCareer.selectClubPage;
+  page = std::max(0, std::min(page, totalPages - 1));
+  int start = PageStart(page, ITEMS_PER_PAGE);
+  int end   = PageEnd(totalItems, page, ITEMS_PER_PAGE);
 
   if (g_PreCareer.clubs.empty()) {
+    ImGui::SetCursorPos(ImVec2(pad, gridY + 20.0f));
     ImGui::PushStyleColor(ImGuiCol_Text, kTextSec);
     ImGui::TextUnformatted("No clubs found in this league.");
     ImGui::PopStyleColor();
   }
 
-  float pad = 36.0f;
-  float gapX = 20.0f;
-  float gapY = 18.0f;
-  float tileW = (kCardW - pad * 2.0f - gapX) * 0.5f;
-  float tileH = 96.0f;
-  float gridX = pad;
-  float gridY = 120.0f;
-  float badgeSz = 48.0f;
+  ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12.0f, 8.0f));
+  PushMF(g_ManagerFontBold);
 
-  for (unsigned int i = 0; i < g_PreCareer.clubs.size(); i++) {
+  for (int i = start; i < end; i++) {
     const auto &cl = g_PreCareer.clubs.at(i);
     bool sel = (g_PreCareer.selectedClubId == cl.id);
-    int col = i % 2;
-    int row = i / 2;
+    int visIdx = i - start;
+    int col = visIdx % COLS;
+    int row = visIdx / COLS;
     float x = gridX + col * (tileW + gapX);
     float y = gridY + row * (tileH + gapY);
 
@@ -1317,12 +1413,13 @@ static void DrawSelectClubScreen(float winW, float winH) {
 
     const std::string &sn = cl.shortName.empty() ? cl.name : cl.shortName;
     GLuint badgeTex = LoadImageTexture(cl.logoPath);
-    DrawImageBadgeAt(dl, ImVec2(tp0.x + 10.0f, tp0.y + (tileH - badgeSz) * 0.5f), badgeTex, sn, badgeSz);
+    DrawImageBadgeAt(dl, ImVec2(tp0.x + 10.0f, tp0.y + (tileH - badgeSz) * 0.5f),
+                     badgeTex, sn, badgeSz);
 
     float nameH = ImGui::CalcTextSize(cl.name.c_str()).y;
     float textY = y + (tileH - nameH) * 0.5f;
 
-    ImFont *bf = sel ? g_ManagerFontBold : (hov ? g_ManagerFontBold : g_ManagerFontRegular);
+    ImFont *bf = (sel || hov) ? g_ManagerFontBold : g_ManagerFontRegular;
     if (bf) ImGui::PushFont(bf);
     ImVec4 nc = sel ? kAccent : (hov ? kTextPri : kTextSec);
     dl->AddText(ImVec2(wp.x + cardX + x + 68.0f, wp.y + cardY + textY),
@@ -1332,7 +1429,7 @@ static void DrawSelectClubScreen(float winW, float winH) {
     if (sel) {
       PushMF(g_ManagerFontSmall);
       ImVec2 tsz = ImGui::CalcTextSize("Selected");
-      dl->AddText(ImVec2(wp.x + cardX + x + tileW - tsz.x - 12.0f, wp.y + cardY + textY),
+      dl->AddText(ImVec2(tp1.x - tsz.x - 12.0f, wp.y + cardY + textY),
                   C32(kGold), "Selected");
       PopMF(g_ManagerFontSmall);
     }
@@ -1340,29 +1437,35 @@ static void DrawSelectClubScreen(float winW, float winH) {
     if (clicked) g_PreCareer.selectedClubId = cl.id;
   }
 
-  ImGui::Dummy(ImVec2(0, 12.0f));
+  // ---- Pagination row ----
+  float gridH       = ROWS * tileH + (ROWS - 1) * gapY;
+  float paginationY = gridY + gridH + 16.0f;
+  float paginH      = 40.0f;
+  DrawPaginationRow(dl, wp, cardX, cardY, kCardW, paginationY, paginH,
+                    page, totalPages);
 
-  ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12.0f, 8.0f));
-  PushMF(g_ManagerFontBold);
-
-  float btnW = kCardW - pad * 2.0f;
-  float btnX = pad;
+  // ---- Start Career button (always visible, disabled when no club selected) ----
+  float btnW        = kCardW - pad * 2.0f;
+  float startCareerY = paginationY + paginH + 14.0f;
+  float startCareerH = 52.0f;
 
   bool canStart = (g_PreCareer.selectedClubId > 0);
-  ImGui::SetCursorPosX(btnX);
+  ImGui::SetCursorPos(ImVec2(pad, startCareerY));
   if (!canStart) {
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 0.40f);
-    SecBtn("Start Career", ImVec2(btnW, 52.0f));
+    SecBtn("Start Career", ImVec2(btnW, startCareerH));
     ImGui::PopStyleVar();
   } else {
-    if (CTABtn("Start Career", ImVec2(btnW, 52.0f)))
+    if (CTABtn("Start Career", ImVec2(btnW, startCareerH)))
       g_PreCareer.pendingAction = 10;
   }
 
-  ImGui::Dummy(ImVec2(0, 6.0f));
+  // ---- Back button ----
+  float backH = 40.0f;
+  float backY = startCareerY + startCareerH + 8.0f;
 
-  ImGui::SetCursorPosX(btnX);
-  if (SecBtn("Back", ImVec2(btnW, 40.0f)))
+  ImGui::SetCursorPos(ImVec2(pad, backY));
+  if (SecBtn("Back", ImVec2(btnW, backH)))
     g_PreCareer.pendingAction = 6;
 
   PopMF(g_ManagerFontBold);
