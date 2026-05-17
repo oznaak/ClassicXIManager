@@ -2178,26 +2178,20 @@ static void DrawLineupTable(const char *tableId,
   ImGui::PushStyleColor(ImGuiCol_Text, textCol);
   for (int i = 0; i < maxRows; i++) {
     ImGui::TableNextRow();
-    // Home cell
     ImGui::TableSetColumnIndex(0);
     if (i < (int)home.size()) {
       const PreMatchLineupPlayer &p = home[i];
       char buf[128];
-      if (p.role.empty())
-        snprintf(buf, sizeof(buf), "%2d  %s", p.number, p.name.c_str());
-      else
-        snprintf(buf, sizeof(buf), "%2d  %-20s %s", p.number, p.name.c_str(), p.role.c_str());
+      snprintf(buf, sizeof(buf), "%-3s  %2d  %s",
+               p.role.empty() ? "" : p.role.c_str(), p.number, p.name.c_str());
       ImGui::TextUnformatted(buf);
     }
-    // Away cell
     ImGui::TableSetColumnIndex(1);
     if (i < (int)away.size()) {
       const PreMatchLineupPlayer &p = away[i];
       char buf[128];
-      if (p.role.empty())
-        snprintf(buf, sizeof(buf), "%2d  %s", p.number, p.name.c_str());
-      else
-        snprintf(buf, sizeof(buf), "%2d  %-20s %s", p.number, p.name.c_str(), p.role.c_str());
+      snprintf(buf, sizeof(buf), "%-3s  %2d  %s",
+               p.role.empty() ? "" : p.role.c_str(), p.number, p.name.c_str());
       ImGui::TextUnformatted(buf);
     }
   }
@@ -2213,8 +2207,10 @@ void RenderImGuiPreMatchLineup() {
   float winH = io.DisplaySize.y;
 
   // Track elapsed time for auto-continue.
-  if (g_PreMatchLineup.startedAt == 0.0)
+  if (g_PreMatchLineup.startedAt == 0.0) {
     g_PreMatchLineup.startedAt = ImGui::GetTime();
+    g_SilentMatchLoadingOverlay = false; // prematch card is now rendering — drop the cover
+  }
   double elapsed = ImGui::GetTime() - g_PreMatchLineup.startedAt;
 
   // Full-screen dark navy background.
@@ -2285,15 +2281,13 @@ void RenderImGuiPreMatchLineup() {
   {
     float badgeSz = 64.0f;
     ImGui::SetCursorPosX(pad);
-    if (ImGui::BeginTable("##team_row", 3,
+    if (ImGui::BeginTable("##team_row", 2,
                           ImGuiTableFlags_NoHostExtendX |
-                          ImGuiTableFlags_SizingStretchProp)) {
-      ImGui::TableSetupColumn("home", ImGuiTableColumnFlags_WidthStretch, 2.0f);
-      ImGui::TableSetupColumn("vs",   ImGuiTableColumnFlags_WidthFixed,   40.0f);
-      ImGui::TableSetupColumn("away", ImGuiTableColumnFlags_WidthStretch, 2.0f);
+                          ImGuiTableFlags_SizingStretchSame)) {
+      ImGui::TableSetupColumn("home", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+      ImGui::TableSetupColumn("away", ImGuiTableColumnFlags_WidthStretch, 1.0f);
       ImGui::TableNextRow();
 
-      // Home cell
       ImGui::TableSetColumnIndex(0);
       {
         GLuint hb = LoadBadgeTex(g_PreMatchLineup.homeBadgePath);
@@ -2309,14 +2303,7 @@ void RenderImGuiPreMatchLineup() {
         ImGui::PopFont();
       }
 
-      // "v" cell
       ImGui::TableSetColumnIndex(1);
-      ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(140, 160, 200, 255));
-      ImGui::TextUnformatted("  v");
-      ImGui::PopStyleColor();
-
-      // Away cell
-      ImGui::TableSetColumnIndex(2);
       {
         GLuint ab = LoadBadgeTex(g_PreMatchLineup.awayBadgePath);
         if (ab) {
@@ -2379,18 +2366,15 @@ void RenderImGuiPreMatchLineup() {
     ImGui::PopFont();
   }
 
+
   // ---- Footer ------------------------------------------------------------
   {
     float footerY = cardH - 42.0f;
     ImGui::SetCursorPos(ImVec2(pad, footerY));
 
-    const char *footerMsg;
-    if (g_PreMatchLineup.continueRequested)
-      footerMsg = "Starting match...";
-    else if (elapsed >= 2.5)
-      footerMsg = "Starting match...";
-    else
-      footerMsg = "Click or press any key to continue";
+    const char *footerMsg = (elapsed >= 2.5 || g_PreMatchLineup.continueRequested)
+      ? "Starting match..."
+      : "Click or press any key to continue";
 
     ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(160, 180, 220, 200));
     float tw = ImGui::CalcTextSize(footerMsg).x;
