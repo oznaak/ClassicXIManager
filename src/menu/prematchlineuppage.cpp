@@ -160,7 +160,9 @@ PreMatchLineupPage::PreMatchLineupPage(Gui2WindowManager *windowManager,
 }
 
 PreMatchLineupPage::~PreMatchLineupPage() {
-  if (g_PreMatchLineup.active) g_PreMatchLineup.Clear();
+  // Only clear if we did NOT continue to match — in that case GamePage clears it.
+  if (g_PreMatchLineup.active && !g_PreMatchLineup.continueRequested)
+    g_PreMatchLineup.Clear();
 }
 
 void PreMatchLineupPage::Process() {
