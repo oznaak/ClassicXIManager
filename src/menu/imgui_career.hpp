@@ -130,6 +130,11 @@ struct PreMatchLineupState {
 
 extern PreMatchLineupState g_PreMatchLineup;
 
+// Persists across match start so RenderImGuiMatchOverlay can use the competition logo
+// even after g_PreMatchLineup is cleared by GamePage.
+extern std::string g_MatchCompetitionLogoPath;
+extern std::string g_MatchCompetitionName;
+
 void RenderImGuiPreMatchLineup();
 
 // Full-screen black overlay drawn while silent LoadingMatchPage does its handoff.

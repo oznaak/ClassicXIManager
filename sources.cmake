@@ -388,6 +388,7 @@ set(CORE_SOURCES
    src/main.cpp
    src/dbquery.cpp
    src/gamedefines.cpp
+   src/menu/imgui_match.cpp
 )
 
 set(GAME_HEADERS
@@ -486,6 +487,7 @@ set(MENU_HEADERS
    src/menu/mainmenu.hpp
    src/menu/managercareer.hpp
    src/menu/imgui_career.hpp
+   src/menu/imgui_match.hpp
    src/menu/prematchlineuppage.hpp
    src/menu/careermatchcontext.hpp
    src/menu/menuscene.hpp

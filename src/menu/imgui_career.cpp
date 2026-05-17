@@ -29,6 +29,8 @@ CareerHubState g_CareerHub;
 PreMatchLineupState g_PreMatchLineup;
 bool g_SilentMatchLoadingOverlay = false;
 bool g_SilentMatchLoadingOverlayLogged = false;
+std::string g_MatchCompetitionLogoPath;
+std::string g_MatchCompetitionName;
 
 // ---- Font globals -------------------------------------------------------
 
@@ -99,7 +101,7 @@ static std::string DBCell(DatabaseResult *r, unsigned int row, unsigned int col)
 
 static std::map<std::string, GLuint> s_BadgeCache;
 
-static GLuint LoadBadgeTex(const std::string &logoRelPath) {
+GLuint LoadBadgeTex(const std::string &logoRelPath) {
   if (logoRelPath.empty()) return 0;
   std::string fullPath = "databases/default/" + logoRelPath;
   auto it = s_BadgeCache.find(fullPath);
@@ -2205,6 +2207,13 @@ void RenderImGuiPreMatchLineup() {
   ImGuiIO &io = ImGui::GetIO();
   float winW = io.DisplaySize.x;
   float winH = io.DisplaySize.y;
+
+  // Persist competition branding so the in-match scoreboard can use it
+  // even after g_PreMatchLineup is cleared by GamePage.
+  if (!g_PreMatchLineup.competitionLogoPath.empty())
+    g_MatchCompetitionLogoPath = g_PreMatchLineup.competitionLogoPath;
+  if (!g_PreMatchLineup.competitionName.empty())
+    g_MatchCompetitionName = g_PreMatchLineup.competitionName;
 
   // Track elapsed time for auto-continue.
   if (g_PreMatchLineup.startedAt == 0.0) {

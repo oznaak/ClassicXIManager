@@ -17,6 +17,7 @@
 
 #include "opengl_renderer3d.hpp"
 #include "menu/imgui_career.hpp"
+#include "menu/imgui_match.hpp"
 #include "menu/imgui_manager_fonts.hpp"
 #include "menu/imgui_menu.hpp"
 
@@ -81,6 +82,7 @@ struct GLfunctions {
 
       RenderImGuiCareerHub();
       RenderImGuiPreCareer();
+      RenderImGuiMatchOverlay();               // in-match scoreboard (only when Match* active)
       RenderImGuiSilentMatchLoadingOverlay();
       RenderImGuiPreMatchLineup(); // must be last — covers MenuScene during match load
 

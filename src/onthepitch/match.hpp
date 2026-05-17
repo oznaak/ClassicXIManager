@@ -165,6 +165,8 @@ class Match {
 
     unsigned long GetIterations() const { return iterations.GetData(); }
     unsigned long GetMatchTime_ms() const { return matchTime_ms; }
+
+    void HideScoreboard() { if (scoreboard) scoreboard->Hide(); }
     unsigned long GetActualTime_ms() const { return actualTime_ms; }
 
     void GameOver();
