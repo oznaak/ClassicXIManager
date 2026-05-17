@@ -89,3 +89,51 @@ struct CareerHubState {
 extern CareerHubState g_CareerHub;
 
 void RenderImGuiCareerHub();
+
+// ---- Pre-match lineup presentation state -----------------------------------
+
+struct PreMatchLineupPlayer {
+  int number = 0;
+  std::string name;
+  std::string role;
+};
+
+struct PreMatchLineupState {
+  bool active           = false;
+  bool valid            = false;
+  double startedAt      = 0.0;
+
+  int fixtureId  = 0;
+  int managerId  = 0;
+  int leagueId   = 0;
+  int homeTeamId = 0;
+  int awayTeamId = 0;
+
+  std::string competitionName;
+  std::string competitionLogoPath;
+
+  std::string homeTeamName;
+  std::string awayTeamName;
+  std::string homeBadgePath;
+  std::string awayBadgePath;
+
+  std::vector<PreMatchLineupPlayer> homeStartingXI;
+  std::vector<PreMatchLineupPlayer> awayStartingXI;
+  std::vector<PreMatchLineupPlayer> homeBench;
+  std::vector<PreMatchLineupPlayer> awayBench;
+  bool hasBench = false;
+
+  bool continueRequested = false;
+
+  void Clear() { *this = PreMatchLineupState(); }
+};
+
+extern PreMatchLineupState g_PreMatchLineup;
+
+void RenderImGuiPreMatchLineup();
+
+// Full-screen black overlay drawn while silent LoadingMatchPage does its handoff.
+// Set true by LoadingMatchPage(skipVisual), cleared after SetMenuAction(e_MenuAction_Game).
+extern bool g_SilentMatchLoadingOverlay;
+extern bool g_SilentMatchLoadingOverlayLogged;
+void RenderImGuiSilentMatchLoadingOverlay();

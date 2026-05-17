@@ -28,6 +28,7 @@
 #include "league/league_system.hpp"
 #include "league/league_team.hpp"
 #include "managercareer.hpp"
+#include "prematchlineuppage.hpp"
 
 #include "../main.hpp"
 
@@ -174,6 +175,10 @@ Gui2Page *PageFactory::CreatePage(const Gui2PageData &pageData) {
 
     case e_PageID_Manager_LoadGame:
       page = new ManagerLoadGamePage(windowManager, pageData);
+      break;
+
+    case e_PageID_Manager_PreMatchLineup:
+      page = new PreMatchLineupPage(windowManager, pageData);
       break;
 
 

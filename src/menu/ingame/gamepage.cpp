@@ -13,6 +13,7 @@
 #include "gameover.hpp"
 
 #include "../../onthepitch/match.hpp"
+#include "../imgui_career.hpp"
 
 using namespace blunted;
 
@@ -60,6 +61,15 @@ void GamePage::Process() {
     if (GetGameTask()->GetMatch() != 0) {
 
       match = GetGameTask()->GetMatch();
+
+      if (g_SilentMatchLoadingOverlay) {
+        printf("[MATCH] Silent match loading cover cleared\n");
+        g_SilentMatchLoadingOverlay = false;
+      }
+      if (g_PreMatchLineup.active) {
+        printf("[MATCH] Pre-match lineup overlay cleared\n");
+        g_PreMatchLineup.Clear();
+      }
 
       if (Verbose()) printf("connecting signals\n");
 

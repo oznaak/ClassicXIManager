@@ -1263,7 +1263,7 @@ void ManagerMainScreenPage::PlayFixture() {
   GetConfiguration()->Set("match_duration",        0.0f); // shortest: 5-minute halves
   printf("[MANAGER MODE] Match duration forced to shortest: match_duration=0.0 (5 min halves)\n");
 
-  GetMenuTask()->RequestManagerMatchStart();
+  GetMenuTask()->RequestManagerPreMatchLineup();
   this->Exit();
   delete this;
 }

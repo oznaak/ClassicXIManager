@@ -89,8 +89,10 @@ MenuTask::MenuTask(float aspectRatio, float margin, TTF_Font *defaultFont, TTF_F
   queuedFixture->team1KitNum = 1;
   queuedFixture->team2KitNum = 2;
 
-  managerMatchPending    = false;
-  managerMainMenuPending = false;
+  managerPreMatchLineupPending = false;
+  managerMatchPending          = false;
+  managerMatchSkipVisual       = false;
+  managerMainMenuPending       = false;
   managerCareerPagePending = false;
   managerCareerPageId = 0;
   returnToCareerAfterMatchPending = false;
@@ -111,6 +113,18 @@ void MenuTask::ProcessPhase() {
 
   Gui2Task::ProcessPhase();
 
+  // Pre-match lineup: show lineup card before creating LoadingMatchPage.
+  if (managerPreMatchLineupPending) {
+    managerPreMatchLineupPending = false;
+    printf("[MENUTASK] Creating PreMatchLineupPage from MenuTask\n");
+    Properties properties;
+    windowManager->GetPageFactory()->CreatePage((int)e_PageID_Manager_PreMatchLineup, properties, 0);
+    printf("[MENUTASK] PreMatchLineupPage created\n");
+    return;
+  }
+
+  // Manager match start: ManagerMainScreenPage already Exit()'d itself from the GL thread.
+  // We create LoadingMatchPage here (main thread) so image loading via ObjectFactory is safe.
   // Manager match start: ManagerMainScreenPage already Exit()'d itself from the GL thread.
   // We create LoadingMatchPage here (main thread) so image loading via ObjectFactory is safe.
   if (managerMatchPending) {

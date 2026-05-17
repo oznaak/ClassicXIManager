@@ -486,6 +486,7 @@ set(MENU_HEADERS
    src/menu/mainmenu.hpp
    src/menu/managercareer.hpp
    src/menu/imgui_career.hpp
+   src/menu/prematchlineuppage.hpp
    src/menu/careermatchcontext.hpp
    src/menu/menuscene.hpp
    src/menu/visualoptions.hpp
@@ -526,6 +527,7 @@ set(MENU_SOURCES
    src/menu/mainmenu.cpp
    src/menu/managercareer.cpp
    src/menu/imgui_career.cpp
+   src/menu/prematchlineuppage.cpp
    src/menu/imgui_menu.cpp
    src/menu/careermatchcontext.cpp
    src/menu/ingame/radar.cpp

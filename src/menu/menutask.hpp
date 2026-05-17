@@ -71,9 +71,21 @@ class MenuTask : public Gui2Task {
 
     void SetMenuAction(e_MenuAction menuAction) { this->menuAction = menuAction; }
 
-    void RequestManagerMatchStart() {
-      printf("[MENUTASK] Manager match start requested\n");
-      managerMatchPending = true;
+    void RequestManagerPreMatchLineup() {
+      printf("[MENUTASK] Manager pre-match lineup page requested\n");
+      managerPreMatchLineupPending = true;
+    }
+
+    void RequestManagerMatchStart(bool skipLoadingVisual = false) {
+      printf("[MENUTASK] Manager match start requested skipVisual=%d\n", (int)skipLoadingVisual);
+      managerMatchPending    = true;
+      managerMatchSkipVisual = skipLoadingVisual;
+    }
+
+    bool ConsumeMatchSkipVisual() {
+      bool v = managerMatchSkipVisual;
+      managerMatchSkipVisual = false;
+      return v;
     }
 
     void RequestManagerMainMenuPage() {
@@ -99,7 +111,9 @@ class MenuTask : public Gui2Task {
 
   protected:
     e_MenuAction menuAction;
+    bool managerPreMatchLineupPending;
     bool managerMatchPending;
+    bool managerMatchSkipVisual;
     bool managerMainMenuPending;
     bool managerCareerPagePending;
     int  managerCareerPageId;

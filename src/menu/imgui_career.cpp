@@ -26,6 +26,9 @@
 #include "base/utils.hpp"
 
 CareerHubState g_CareerHub;
+PreMatchLineupState g_PreMatchLineup;
+bool g_SilentMatchLoadingOverlay = false;
+bool g_SilentMatchLoadingOverlayLogged = false;
 
 // ---- Font globals -------------------------------------------------------
 
@@ -2126,4 +2129,290 @@ void RenderImGuiCareerHub() {
       }
     }
   }
+}
+
+// ============================================================================
+// Silent match loading overlay
+// Covers MenuScene background during LoadingMatchPage silent handoff.
+// ============================================================================
+
+void RenderImGuiSilentMatchLoadingOverlay() {
+  if (!g_SilentMatchLoadingOverlay) return;
+
+  if (!g_SilentMatchLoadingOverlayLogged) {
+    printf("[RENDER] Silent match loading cover active\n");
+    g_SilentMatchLoadingOverlayLogged = true;
+  }
+
+  ImGuiIO &io = ImGui::GetIO();
+  ImDrawList *fg = ImGui::GetForegroundDrawList();
+
+  fg->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(0, 0, 0, 255));
+
+  const char *txt = "Loading match...";
+  ImVec2 ts = ImGui::CalcTextSize(txt);
+  fg->AddText(
+    ImVec2((io.DisplaySize.x - ts.x) * 0.5f, (io.DisplaySize.y - ts.y) * 0.5f),
+    IM_COL32(180, 185, 200, 255),
+    txt
+  );
+
+}
+
+// ============================================================================
+// Pre-match lineup presentation
+// ============================================================================
+
+static void DrawLineupTable(const char *tableId,
+                            const std::vector<PreMatchLineupPlayer> &home,
+                            const std::vector<PreMatchLineupPlayer> &away,
+                            float padX, ImU32 textCol) {
+  ImGui::SetCursorPosX(padX);
+  ImGuiTableFlags tflags = ImGuiTableFlags_NoHostExtendX |
+                           ImGuiTableFlags_SizingStretchSame;
+  if (!ImGui::BeginTable(tableId, 2, tflags)) return;
+  ImGui::TableSetupColumn("home", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+  ImGui::TableSetupColumn("away", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+
+  int maxRows = (int)std::max(home.size(), away.size());
+  ImGui::PushStyleColor(ImGuiCol_Text, textCol);
+  for (int i = 0; i < maxRows; i++) {
+    ImGui::TableNextRow();
+    // Home cell
+    ImGui::TableSetColumnIndex(0);
+    if (i < (int)home.size()) {
+      const PreMatchLineupPlayer &p = home[i];
+      char buf[128];
+      if (p.role.empty())
+        snprintf(buf, sizeof(buf), "%2d  %s", p.number, p.name.c_str());
+      else
+        snprintf(buf, sizeof(buf), "%2d  %-20s %s", p.number, p.name.c_str(), p.role.c_str());
+      ImGui::TextUnformatted(buf);
+    }
+    // Away cell
+    ImGui::TableSetColumnIndex(1);
+    if (i < (int)away.size()) {
+      const PreMatchLineupPlayer &p = away[i];
+      char buf[128];
+      if (p.role.empty())
+        snprintf(buf, sizeof(buf), "%2d  %s", p.number, p.name.c_str());
+      else
+        snprintf(buf, sizeof(buf), "%2d  %-20s %s", p.number, p.name.c_str(), p.role.c_str());
+      ImGui::TextUnformatted(buf);
+    }
+  }
+  ImGui::PopStyleColor();
+  ImGui::EndTable();
+}
+
+void RenderImGuiPreMatchLineup() {
+  if (!g_PreMatchLineup.active) return;
+
+  ImGuiIO &io = ImGui::GetIO();
+  float winW = io.DisplaySize.x;
+  float winH = io.DisplaySize.y;
+
+  // Track elapsed time for auto-continue.
+  if (g_PreMatchLineup.startedAt == 0.0)
+    g_PreMatchLineup.startedAt = ImGui::GetTime();
+  double elapsed = ImGui::GetTime() - g_PreMatchLineup.startedAt;
+
+  // Full-screen dark navy background.
+  ImDrawList *bg = ImGui::GetBackgroundDrawList();
+  bg->AddRectFilled(ImVec2(0, 0), ImVec2(winW, winH),
+                    IM_COL32(12, 18, 35, 255));
+
+  // Centered match-sheet card.
+  float cardW = 880.0f;
+  float cardH = 860.0f;
+  if (cardW > winW * 0.92f) cardW = winW * 0.92f;
+  if (cardH > winH * 0.95f) cardH = winH * 0.95f;
+  float cardX = (winW - cardW) * 0.5f;
+  float cardY = (winH - cardH) * 0.5f;
+
+  // Card background — on BackgroundDrawList so the ImGui window renders on top of it.
+  bg->AddRectFilled(ImVec2(cardX, cardY),
+                    ImVec2(cardX + cardW, cardY + cardH),
+                    IM_COL32(22, 30, 50, 248), 8.0f);
+  bg->AddRect(ImVec2(cardX, cardY),
+              ImVec2(cardX + cardW, cardY + cardH),
+              IM_COL32(60, 80, 130, 200), 8.0f, 0, 1.5f);
+
+  // ImGui window covering the card.
+  ImGui::SetNextWindowPos(ImVec2(cardX, cardY), ImGuiCond_Always);
+  ImGui::SetNextWindowSize(ImVec2(cardW, cardH), ImGuiCond_Always);
+  ImGui::SetNextWindowBgAlpha(0.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+  ImGui::Begin("##prematch_card", nullptr,
+               ImGuiWindowFlags_NoTitleBar   |
+               ImGuiWindowFlags_NoResize     |
+               ImGuiWindowFlags_NoMove       |
+               ImGuiWindowFlags_NoCollapse   |
+               ImGuiWindowFlags_NoScrollbar  |
+               ImGuiWindowFlags_NoScrollWithMouse |
+               ImGuiWindowFlags_NoBringToFrontOnFocus);
+  ImGui::PopStyleVar(2);
+
+  float pad = 20.0f;
+  ImGui::SetCursorPos(ImVec2(pad, pad));
+
+  // ---- Competition header ------------------------------------------------
+  {
+    float leagueBadgeSz = 28.0f;
+    GLuint lt = LoadBadgeTex(g_PreMatchLineup.competitionLogoPath);
+    ImGui::SetCursorPosX(pad);
+    if (lt) {
+      ImGui::Image((ImTextureID)(intptr_t)lt, ImVec2(leagueBadgeSz, leagueBadgeSz));
+      ImGui::SameLine(0.0f, 8.0f);
+    }
+    ImFont *font = g_ManagerFontMedium ? g_ManagerFontMedium : ImGui::GetFont();
+    ImGui::PushFont(font);
+    ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(180, 200, 240, 255));
+    ImGui::TextUnformatted(g_PreMatchLineup.competitionName.c_str());
+    ImGui::PopStyleColor();
+    ImGui::PopFont();
+  }
+
+  float sepY = ImGui::GetCursorPosY() + 4.0f;
+  ImGui::GetWindowDrawList()->AddLine(
+    ImVec2(cardX + pad, cardY + sepY),
+    ImVec2(cardX + cardW - pad, cardY + sepY),
+    IM_COL32(60, 80, 130, 180), 1.0f);
+  ImGui::SetCursorPosY(sepY + 10.0f);
+
+  // ---- Team row ----------------------------------------------------------
+  {
+    float badgeSz = 64.0f;
+    ImGui::SetCursorPosX(pad);
+    if (ImGui::BeginTable("##team_row", 3,
+                          ImGuiTableFlags_NoHostExtendX |
+                          ImGuiTableFlags_SizingStretchProp)) {
+      ImGui::TableSetupColumn("home", ImGuiTableColumnFlags_WidthStretch, 2.0f);
+      ImGui::TableSetupColumn("vs",   ImGuiTableColumnFlags_WidthFixed,   40.0f);
+      ImGui::TableSetupColumn("away", ImGuiTableColumnFlags_WidthStretch, 2.0f);
+      ImGui::TableNextRow();
+
+      // Home cell
+      ImGui::TableSetColumnIndex(0);
+      {
+        GLuint hb = LoadBadgeTex(g_PreMatchLineup.homeBadgePath);
+        if (hb) {
+          ImGui::Image((ImTextureID)(intptr_t)hb, ImVec2(badgeSz, badgeSz));
+          ImGui::SameLine(0.0f, 8.0f);
+        }
+        ImFont *bigFont = g_ManagerFontBold ? g_ManagerFontBold : ImGui::GetFont();
+        ImGui::PushFont(bigFont);
+        ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(235, 240, 255, 255));
+        ImGui::TextUnformatted(g_PreMatchLineup.homeTeamName.c_str());
+        ImGui::PopStyleColor();
+        ImGui::PopFont();
+      }
+
+      // "v" cell
+      ImGui::TableSetColumnIndex(1);
+      ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(140, 160, 200, 255));
+      ImGui::TextUnformatted("  v");
+      ImGui::PopStyleColor();
+
+      // Away cell
+      ImGui::TableSetColumnIndex(2);
+      {
+        GLuint ab = LoadBadgeTex(g_PreMatchLineup.awayBadgePath);
+        if (ab) {
+          ImGui::Image((ImTextureID)(intptr_t)ab, ImVec2(badgeSz, badgeSz));
+          ImGui::SameLine(0.0f, 8.0f);
+        }
+        ImFont *bigFont = g_ManagerFontBold ? g_ManagerFontBold : ImGui::GetFont();
+        ImGui::PushFont(bigFont);
+        ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(235, 240, 255, 255));
+        ImGui::TextUnformatted(g_PreMatchLineup.awayTeamName.c_str());
+        ImGui::PopStyleColor();
+        ImGui::PopFont();
+      }
+
+      ImGui::EndTable();
+    }
+  }
+
+  // ---- Divider -----------------------------------------------------------
+  {
+    float dy = ImGui::GetCursorPosY();
+    ImGui::GetWindowDrawList()->AddLine(
+      ImVec2(cardX + pad, cardY + dy),
+      ImVec2(cardX + cardW - pad, cardY + dy),
+      IM_COL32(60, 80, 130, 180), 1.0f);
+    ImGui::SetCursorPosY(dy + 8.0f);
+  }
+
+  // ---- Starting XI (table) -----------------------------------------------
+  {
+    ImFont *listFont = g_ManagerFontSmall ? g_ManagerFontSmall : ImGui::GetFont();
+    ImGui::PushFont(listFont);
+    DrawLineupTable("##lineup_xi",
+                    g_PreMatchLineup.homeStartingXI,
+                    g_PreMatchLineup.awayStartingXI,
+                    pad, IM_COL32(210, 220, 240, 255));
+    ImGui::PopFont();
+  }
+
+  // ---- Substitutes -------------------------------------------------------
+  if (g_PreMatchLineup.hasBench &&
+      (!g_PreMatchLineup.homeBench.empty() || !g_PreMatchLineup.awayBench.empty())) {
+    float dy = ImGui::GetCursorPosY();
+    ImGui::GetWindowDrawList()->AddLine(
+      ImVec2(cardX + pad, cardY + dy),
+      ImVec2(cardX + cardW - pad, cardY + dy),
+      IM_COL32(60, 80, 130, 120), 1.0f);
+    ImGui::SetCursorPosY(dy + 6.0f);
+    ImGui::SetCursorPosX(pad);
+    ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(120, 150, 200, 200));
+    ImGui::TextUnformatted("Substitutes");
+    ImGui::PopStyleColor();
+
+    ImFont *listFont = g_ManagerFontSmall ? g_ManagerFontSmall : ImGui::GetFont();
+    ImGui::PushFont(listFont);
+    DrawLineupTable("##lineup_bench",
+                    g_PreMatchLineup.homeBench,
+                    g_PreMatchLineup.awayBench,
+                    pad, IM_COL32(170, 185, 215, 200));
+    ImGui::PopFont();
+  }
+
+  // ---- Footer ------------------------------------------------------------
+  {
+    float footerY = cardH - 42.0f;
+    ImGui::SetCursorPos(ImVec2(pad, footerY));
+
+    const char *footerMsg;
+    if (g_PreMatchLineup.continueRequested)
+      footerMsg = "Starting match...";
+    else if (elapsed >= 2.5)
+      footerMsg = "Starting match...";
+    else
+      footerMsg = "Click or press any key to continue";
+
+    ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(160, 180, 220, 200));
+    float tw = ImGui::CalcTextSize(footerMsg).x;
+    ImGui::SetCursorPosX((cardW - tw) * 0.5f);
+    ImGui::TextUnformatted(footerMsg);
+    ImGui::PopStyleColor();
+  }
+
+  // ---- Continue logic (only while waiting for user) ----------------------
+  if (!g_PreMatchLineup.continueRequested) {
+    bool doContinue = false;
+    if (elapsed >= 3.0) doContinue = true;
+    if (ImGui::IsMouseClicked(0)) doContinue = true;
+    if (ImGui::IsKeyPressed(ImGuiKey_Enter)  ||
+        ImGui::IsKeyPressed(ImGuiKey_Space)  ||
+        ImGui::IsKeyPressed(ImGuiKey_Escape))   doContinue = true;
+
+    if (doContinue) {
+      printf("[PREMATCH] Continue requested\n");
+      g_PreMatchLineup.continueRequested = true;
+    }
+  }
+
+  ImGui::End();
 }

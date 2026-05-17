@@ -81,6 +81,8 @@ struct GLfunctions {
 
       RenderImGuiCareerHub();
       RenderImGuiPreCareer();
+      RenderImGuiSilentMatchLoadingOverlay();
+      RenderImGuiPreMatchLineup(); // must be last — covers MenuScene during match load
 
       ImGui::Render();
       ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());

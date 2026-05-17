@@ -28,6 +28,7 @@ class LoadingMatchPage : public Gui2Page {
 
   protected:
     bool sentStartGameSignal;
+    bool m_skipVisual;
 
 };
 
