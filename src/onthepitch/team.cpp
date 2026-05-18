@@ -14,6 +14,64 @@
 
 #include "managers/resourcemanagerpool.hpp"
 
+#include "base/sdl_surface.hpp"
+
+static int ClampColor(float v) { int i = (int)v; return i < 0 ? 0 : (i > 255 ? 255 : i); }
+
+// Creates a banded 1024x1024 kit texture: shirt (rows 0-539), shorts (540-761), socks (762-1023).
+// Cached by the three colors so each unique combination is only created once.
+static boost::intrusive_ptr<Resource<Surface>> MakeColorKit(
+    const Vector3 &shirtColor,
+    const Vector3 &shortsColor,
+    const Vector3 &socksColor) {
+  int sr = ClampColor(shirtColor.coords[0]),  sg = ClampColor(shirtColor.coords[1]),  sb = ClampColor(shirtColor.coords[2]);
+  int kr = ClampColor(shortsColor.coords[0]), kg = ClampColor(shortsColor.coords[1]), kb = ClampColor(shortsColor.coords[2]);
+  int pr = ClampColor(socksColor.coords[0]),  pg = ClampColor(socksColor.coords[1]),  pb = ClampColor(socksColor.coords[2]);
+  char name[128];
+  snprintf(name, sizeof(name), "__kit_s%d_%d_%d__k%d_%d_%d__p%d_%d_%d",
+           sr, sg, sb, kr, kg, kb, pr, pg, pb);
+  bool alreadyThere = false;
+  auto res = ResourceManagerPool::GetInstance()
+               .GetManager<Surface>(e_ResourceType_Surface)
+               ->Fetch(std::string(name), false, alreadyThere, true);
+  if (!alreadyThere) {
+    const int W = 1024, H = 1024;
+    SDL_Surface *sdl = CreateSDLSurface(W, H);
+    Uint32 shirtPx  = SDL_MapRGB(sdl->format, (Uint8)sr, (Uint8)sg, (Uint8)sb);
+    Uint32 shortsPx = SDL_MapRGB(sdl->format, (Uint8)kr, (Uint8)kg, (Uint8)kb);
+    Uint32 socksPx  = SDL_MapRGB(sdl->format, (Uint8)pr, (Uint8)pg, (Uint8)pb);
+    // UV layout (empirically): shirt top, socks middle, shorts bottom
+    SDL_Rect shirtRect  = { 0,   0, W, 540 };
+    SDL_Rect socksRect  = { 0, 540, W, 222 };
+    SDL_Rect shortsRect = { 0, 762, W, 262 };
+    SDL_FillRect(sdl, &shirtRect,  shirtPx);
+    SDL_FillRect(sdl, &socksRect,  socksPx);
+    SDL_FillRect(sdl, &shortsRect, shortsPx);
+    res->GetResource()->SetData(sdl);
+  }
+  return res;
+}
+
+// Determines shirt/shorts/socks colors for this team, handling away color clashes.
+static void GetKitColors(Team *team, Vector3 &shirtOut, Vector3 &shortsOut, Vector3 &socksOut) {
+  Vector3 primary   = team->GetTeamData()->GetColor1();
+  Vector3 secondary = team->GetTeamData()->GetColor2();
+  shirtOut  = primary;
+  shortsOut = secondary;
+  socksOut  = primary;
+  if (team->GetID() == 1) {
+    Vector3 homePrimary = team->GetMatch()->GetTeam(0)->GetTeamData()->GetColor1();
+    float dr = primary.coords[0] - homePrimary.coords[0];
+    float dg = primary.coords[1] - homePrimary.coords[1];
+    float db = primary.coords[2] - homePrimary.coords[2];
+    if (dr*dr + dg*dg + db*db < 2500.0f) { // ~50 per channel threshold
+      shirtOut  = secondary;
+      shortsOut = primary;
+      socksOut  = secondary;
+    }
+  }
+}
+
 Team::Team(int id, Match *match, TeamData *teamData) : id(id), match(match), teamData(teamData) {
   assert(id == 0 || id == 1);
   assert(teamData->GetPlayerNum() >= playerNum); // does team have enough players?
@@ -86,7 +144,13 @@ void Team::InitPlayers(boost::intrusive_ptr<Node> fullbodyNode, std::map<Vector3
       //printf("%i player id\n", player->GetID());
       if (GetFormationEntry(player->GetID()).role != e_PlayerRole_GK) {
         kitFilename = GetTeamData()->GetKitUrl() + "_kit_0" + int_to_str(GetMenuTask()->GetTeamKitNum(GetID())) + ".png";
-        if (!boost::filesystem::exists(kitFilename)) kitFilename = (GetID() == 0) ? "media/textures/almost_white.png" : "media/textures/almost_black.png";
+        if (!boost::filesystem::exists(kitFilename)) {
+          Vector3 shirtC, shortsC, socksC;
+          GetKitColors(this, shirtC, shortsC, socksC);
+          kit = MakeColorKit(shirtC, shortsC, socksC);
+          player->Activate(playerNode, fullbodyNode, colorCoords, kit, match->GetAnimCollection());
+          continue;
+        }
       } else {
         kitFilename = "media/objects/players/textures/goalie_kit.png";
       }
@@ -558,10 +622,14 @@ void Team::SetKitNumber(int num) {
   std::string kitNumberString = int_to_str(num);
   if (kitNumberString.size() < 2) kitNumberString = "0" + kitNumberString;
   std::string kitFilename = GetTeamData()->GetKitUrl() + "_kit_" + kitNumberString + ".png";
-  if (!boost::filesystem::exists(kitFilename)) kitFilename = GetID() == 0 ? "media/textures/white.png" : "media/textures/black.png";
-
-  // new kits on the block!
-  boost::intrusive_ptr < Resource<Surface> > newKit = ResourceManagerPool::GetInstance().GetManager<Surface>(e_ResourceType_Surface)->Fetch(kitFilename);
+  boost::intrusive_ptr<Resource<Surface>> newKit;
+  if (!boost::filesystem::exists(kitFilename)) {
+    Vector3 shirtC, shortsC, socksC;
+    GetKitColors(this, shirtC, shortsC, socksC);
+    newKit = MakeColorKit(shirtC, shortsC, socksC);
+  } else {
+    newKit = ResourceManagerPool::GetInstance().GetManager<Surface>(e_ResourceType_Surface)->Fetch(kitFilename);
+  }
 
   for (unsigned int i = 0; i < players.size(); i++) {
     if (players.at(i)->IsActive()) {
