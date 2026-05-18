@@ -42,10 +42,11 @@ static std::string s_leagueName;
 static std::string s_leagueLogoPath;
 static GLuint      s_leagueTex        = 0;
 
-static ImU32 s_homeColor     = IM_COL32(210, 0, 0, 255);
-static ImU32 s_awayColor     = IM_COL32(0, 40, 220, 255);
-static ImU32 s_homeTextColor = IM_COL32(255, 255, 255, 255);
-static ImU32 s_awayTextColor = IM_COL32(255, 255, 255, 255);
+static ImU32 s_homeColor      = IM_COL32(210, 0, 0, 255);   // home primary (row bg + strip)
+static ImU32 s_awayColor      = IM_COL32(0, 40, 220, 255);  // away row bg (primary or secondary)
+static ImU32 s_awayPrimary    = IM_COL32(0, 40, 220, 255);  // away primary always (strip only)
+static ImU32 s_homeTextColor  = IM_COL32(255, 255, 255, 255);
+static ImU32 s_awayTextColor  = IM_COL32(255, 255, 255, 255);
 
 // ---------------------------------------------------------------------------
 
@@ -63,6 +64,28 @@ static ImU32 TextColorForBg(ImU32 bg) {
   float b = (float)((bg >> 16) & 0xFF);
   float lum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
   return lum > 155.0f ? IM_COL32(15, 15, 15, 255) : IM_COL32(255, 255, 255, 255);
+}
+
+// Perceptual color distance in RGB space.
+static float ColorDistance(ImU32 a, ImU32 b) {
+  float dr = (float)((int)((a >> 0) & 0xFF) - (int)((b >> 0) & 0xFF));
+  float dg = (float)((int)((a >> 8) & 0xFF) - (int)((b >> 8) & 0xFF));
+  float db = (float)((int)((a >>16) & 0xFF) - (int)((b >>16) & 0xFF));
+  return sqrtf(dr*dr + dg*dg + db*db);
+}
+
+// Boost a color so it is bright enough to read on a dark background.
+static ImU32 BrightenForDark(ImU32 col, float minLum = 110.0f) {
+  float r = (float)((col >>  0) & 0xFF);
+  float g = (float)((col >>  8) & 0xFF);
+  float b = (float)((col >> 16) & 0xFF);
+  float lum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+  if (lum >= minLum) return col;
+  float boost = (lum < 1.0f) ? 255.0f : minLum / lum;
+  int ri = (int)(r * boost); if (ri > 255) ri = 255;
+  int gi = (int)(g * boost); if (gi > 255) gi = 255;
+  int bi = (int)(b * boost); if (bi > 255) bi = 255;
+  return IM_COL32(ri, gi, bi, 255);
 }
 
 static void AddTextCentered(ImDrawList *dl, ImFont *font, float sz,
@@ -122,18 +145,29 @@ static void ResetPerMatch(Match *match) {
   ResetPauseCache();
 
   // Capture team kit colors
-  s_homeColor = IM_COL32(210, 0, 0, 255);
-  s_awayColor = IM_COL32(0, 40, 220, 255);
+  s_homeColor     = IM_COL32(210, 0, 0, 255);
+  s_awayColor     = IM_COL32(0, 40, 220, 255);
+  s_awayPrimary   = s_awayColor;
+  s_homeTextColor = IM_COL32(255, 255, 255, 255); // home text always white
+  s_awayTextColor = IM_COL32(255, 255, 255, 255); // away text white by default
+
   if (match->GetTeam(0) && match->GetTeam(0)->GetTeamData()) {
     Vector3 c = match->GetTeam(0)->GetTeamData()->GetColor1();
     s_homeColor = Vec3ToCol32(c.coords[0], c.coords[1], c.coords[2]);
   }
   if (match->GetTeam(1) && match->GetTeam(1)->GetTeamData()) {
-    Vector3 c = match->GetTeam(1)->GetTeamData()->GetColor1();
-    s_awayColor = Vec3ToCol32(c.coords[0], c.coords[1], c.coords[2]);
+    Vector3 c1 = match->GetTeam(1)->GetTeamData()->GetColor1();
+    s_awayPrimary = Vec3ToCol32(c1.coords[0], c1.coords[1], c1.coords[2]);
+    s_awayColor   = s_awayPrimary; // default: primary as row background
+
+    if (ColorDistance(s_homeColor, s_awayPrimary) < 80.0f) {
+      // Clash: use secondary color as away row background, primary as text
+      Vector3 c2 = match->GetTeam(1)->GetTeamData()->GetColor2();
+      s_awayColor     = Vec3ToCol32(c2.coords[0], c2.coords[1], c2.coords[2]);
+      s_awayTextColor = BrightenForDark(s_awayPrimary); // primary color as text
+      printf("[IMGUI MATCH] Away color clash — secondary bg, primary text\n");
+    }
   }
-  s_homeTextColor = TextColorForBg(s_homeColor);
-  s_awayTextColor = TextColorForBg(s_awayColor);
 }
 
 // ---------------------------------------------------------------------------
@@ -240,14 +274,14 @@ void RenderImGuiMatchOverlay() {
                   ImVec2(leagueX + leagueW, botY),
                   IM_COL32(255, 255, 255, 255), timeBuf);
 
-  // ---- Home team row -------------------------------------------------------
+  // ---- Home team row — primary background, white text ----------------------
   dl->AddRectFilled(ImVec2(teamX, homeY),
                     ImVec2(teamX + teamW, awayY), s_homeColor);
   AddTextLeftCY(dl, g_ManagerFontHero, 30.0f,
                 ImVec2(teamX, homeY), ImVec2(teamX + teamW, awayY),
                 s_homeTextColor, homeName.c_str(), 12.0f);
 
-  // ---- Away team row -------------------------------------------------------
+  // ---- Away team row — primary bg (or secondary if clash), text adapts -----
   dl->AddRectFilled(ImVec2(teamX, awayY),
                     ImVec2(teamX + teamW, botY), s_awayColor);
   AddTextLeftCY(dl, g_ManagerFontHero, 30.0f,
@@ -276,7 +310,7 @@ void RenderImGuiMatchOverlay() {
               ImVec2(scoreX + scoreW - 6, awayY),
               IM_COL32(170, 170, 170, 200), 1.0f);
 
-  // ---- Kit color strip (far right) ----------------------------------------
+  // ---- Kit color strip (far right) — same logic as row background ----------
   dl->AddRectFilled(ImVec2(stripX, homeY),
                     ImVec2(stripX + stripW, awayY), s_homeColor);
   dl->AddRectFilled(ImVec2(stripX, awayY),
@@ -332,7 +366,7 @@ static PausePlayer MakePausePlayer(TeamData *td, int i) {
   }
   // coords[0] = depth (GK ~-1, attackers ~+1) → portrait Y (negated so GK at bottom)
   // coords[1] = lateral (left=-1, right=+1)   → portrait X
-  pp.nx = Clamp01(pos.coords[1] *  0.44f + 0.5f);
+  pp.nx = Clamp01(pos.coords[1] * -0.44f + 0.5f);
   pp.ny = Clamp01(pos.coords[0] * -0.44f + 0.5f);
   return pp;
 }

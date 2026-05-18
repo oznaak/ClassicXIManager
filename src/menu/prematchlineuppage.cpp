@@ -10,6 +10,7 @@
 
 #include <sstream>
 #include <cstdio>
+#include <map>
 
 using namespace blunted;
 
@@ -27,10 +28,47 @@ static std::string MapCompetitionName(const std::string &raw) {
 }
 
 // ---------------------------------------------------------------------------
+// Parse formation_xml from the teams table and return a map of
+// formationorder (1-11) → role string ("GK", "LB", "CM", ...).
+static std::map<int, std::string> ParseFormationRoles(const std::string &xml) {
+  std::map<int, std::string> roles;
+  for (int i = 1; i <= 11; i++) {
+    std::string open  = "<p" + std::to_string(i) + ">";
+    std::string close = "</p" + std::to_string(i) + ">";
+    size_t s = xml.find(open);
+    if (s == std::string::npos) continue;
+    s += open.size();
+    size_t e = xml.find(close, s);
+    if (e == std::string::npos) continue;
+    std::string block = xml.substr(s, e - s);
+
+    size_t rs = block.find("<role>");
+    if (rs == std::string::npos) continue;
+    rs += 6; // strlen("<role>")
+    size_t re = block.find("</role>", rs);
+    if (re == std::string::npos) continue;
+    roles[i] = block.substr(rs, re - rs);
+  }
+  return roles;
+}
+
+// ---------------------------------------------------------------------------
 
 std::vector<PreMatchLineupPlayer>
 PreMatchLineupPage::LoadXI(int teamId, int limit, int offset) {
   std::vector<PreMatchLineupPlayer> out;
+
+  // Load formation roles from the team's formation XML
+  std::map<int, std::string> formationRoles;
+  {
+    std::stringstream fq;
+    fq << "SELECT formation_xml FROM teams WHERE id = " << teamId << " LIMIT 1;";
+    DatabaseResult *fr = GetDB()->Query(fq.str());
+    if (fr && !fr->data.empty() && !fr->data[0].empty())
+      formationRoles = ParseFormationRoles(fr->data[0][0]);
+    delete fr;
+  }
+
   std::stringstream q;
   q << "SELECT firstname, lastname, role, formationorder"
     << " FROM players WHERE team_id = " << teamId
@@ -53,7 +91,6 @@ PreMatchLineupPage::LoadXI(int teamId, int limit, int offset) {
     PreMatchLineupPlayer p;
     std::string fn = DBCell(r, i, 0);
     std::string ln = DBCell(r, i, 1);
-    p.role         = DBCell(r, i, 2);
 
     if (!fn.empty() || !ln.empty())
       p.name = fn.empty() ? ln : (ln.empty() ? fn : fn + " " + ln);
@@ -62,6 +99,14 @@ PreMatchLineupPage::LoadXI(int teamId, int limit, int offset) {
 
     int fo = atoi(DBCell(r, i, 3).c_str());
     p.number = (fo >= 1 && fo <= 99) ? fo : (offset + (int)i + 1);
+
+    // Bench players always show "SUB"; starters use formation XML role
+    if (offset > 0)
+      p.role = "SUB";
+    else if (fo >= 1 && fo <= 11 && formationRoles.count(fo))
+      p.role = formationRoles[fo];
+    else
+      p.role = DBCell(r, i, 2);
 
     out.push_back(p);
   }
