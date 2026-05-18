@@ -64,7 +64,7 @@ static void GetKitColors(Team *team, Vector3 &shirtOut, Vector3 &shortsOut, Vect
     float dr = primary.coords[0] - homePrimary.coords[0];
     float dg = primary.coords[1] - homePrimary.coords[1];
     float db = primary.coords[2] - homePrimary.coords[2];
-    if (dr*dr + dg*dg + db*db < 2500.0f) { // ~50 per channel threshold
+    if (dr*dr + dg*dg + db*db < 15000.0f) { // Euclidean distance < ~122 across all channels
       shirtOut  = secondary;
       shortsOut = primary;
       socksOut  = secondary;
