@@ -634,6 +634,20 @@ static void DrawTeamLabel(const std::string &logoPath, const std::string &sn, fl
   ImGui::TextUnformatted(sn.c_str());
 }
 
+// ---- Date formatter -----------------------------------------------------
+
+static std::string FormatFixtureDate(const std::string &iso) {
+  if (iso.size() < 10) return iso;
+  static const char *kMon[] = {"Jan","Feb","Mar","Apr","May","Jun",
+                                "Jul","Aug","Sep","Oct","Nov","Dec"};
+  int m = atoi(iso.substr(5, 2).c_str());
+  int d = atoi(iso.substr(8, 2).c_str());
+  if (m < 1 || m > 12) return iso;
+  char buf[16];
+  snprintf(buf, sizeof(buf), "%d %s", d, kMon[m - 1]);
+  return std::string(buf);
+}
+
 // ---- Status pill --------------------------------------------------------
 
 static void DrawStatusPill(const std::string &status) {
@@ -1744,7 +1758,7 @@ static void DrawSchedulePage(float w, float h) {
       ImGui::TableSetupColumn("Rd",     ImGuiTableColumnFlags_WidthFixed,  26.0f);
       ImGui::TableSetupColumn("Home",   ImGuiTableColumnFlags_WidthStretch);
       ImGui::TableSetupColumn("Away",   ImGuiTableColumnFlags_WidthStretch);
-      ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed,  86.0f);
+      ImGui::TableSetupColumn("Date",   ImGuiTableColumnFlags_WidthFixed,  60.0f);
       ImGui::TableSetupColumn("Score",  ImGuiTableColumnFlags_WidthFixed,  52.0f);
       PushMgrFont(g_ManagerFontSmall);
       ImGui::TableHeadersRow();
@@ -1767,7 +1781,12 @@ static void DrawSchedulePage(float w, float h) {
         ImGui::TableSetColumnIndex(3);
         DrawTeamLabel(f.awayLogo, f.away, 20.0f);
         ImGui::TableSetColumnIndex(4);
-        DrawStatusPill(f.status);
+        {
+          ImU32 dateCol = (f.status == "played") ? C32(kTextDim) : C32(kTextSec);
+          ImGui::PushStyleColor(ImGuiCol_Text, dateCol);
+          ImGui::TextUnformatted(FormatFixtureDate(f.fixtureDate).c_str());
+          ImGui::PopStyleColor();
+        }
         ImGui::TableSetColumnIndex(5);
         if (!f.score.empty()) {
           ImGui::PushStyleColor(ImGuiCol_Text, kSuccess);

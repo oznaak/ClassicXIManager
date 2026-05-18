@@ -303,15 +303,19 @@ static void GenerateFixturesForLeague(int managerId, int leagueId,
   int half   = M / 2;
 
   for (int r = 0; r < rounds; r++) {
-    int matchday = r + 1;  // all pairs in this round share the same matchweek number
-    std::string date1 = MakeFixtureDate(seasonYear, startMonth, startDay, r);
-    std::string date2 = MakeFixtureDate(seasonYear, startMonth, startDay, rounds + r);
+    // Interleave first and return legs: round r occupies matchdays 2r+1 and 2r+2.
+    // This guarantees the fixed team alternates H/A every matchday and no team
+    // accumulates long runs of consecutive home or away games.
+    int md_first  = 2 * r + 1;
+    int md_return = 2 * r + 2;
+    std::string date1 = MakeFixtureDate(seasonYear, startMonth, startDay, 2 * r);
+    std::string date2 = MakeFixtureDate(seasonYear, startMonth, startDay, 2 * r + 1);
     for (int p = 0; p < half; p++) {
       int home = circle[p];
       int away = circle[M - 1 - p];
       if (home == 0 || away == 0) continue; // bye
-      InsertFixture(managerId, leagueId, seasonYear, 1, matchday,         home, away, date1);
-      InsertFixture(managerId, leagueId, seasonYear, 2, matchday + rounds, away, home, date2);
+      InsertFixture(managerId, leagueId, seasonYear, 1, md_first,  home, away, date1);
+      InsertFixture(managerId, leagueId, seasonYear, 2, md_return, away, home, date2);
     }
     // Rotate: keep circle[0] fixed, shift circle[1..M-1] right by one.
     int last = circle[M - 1];
