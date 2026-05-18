@@ -61,7 +61,15 @@ struct CareerHubState {
   } club;
 
   struct Player {
+    int         id            = 0;
     std::string firstName, lastName, role, age, ability;
+    int         formationOrder = -1;
+    int         weeklywage    = 0;
+    std::string contractExpiry;
+    float       baseStat      = 0.0f;
+    int         potential     = 0;
+    std::string foot;          // "L" or "R"
+    int         stamina       = 0; // 0-100
   };
   std::vector<Player> players;
 

@@ -294,33 +294,48 @@ static void GenerateFixturesForLeague(int managerId, int leagueId,
   }
   printf("[CAREER] League %d start date: %02d-%02d\n", leagueId, startMonth, startDay);
 
-  // Circle method: fix teams[0], rotate teams[1..M-1] each round so every team
-  // plays exactly once per round. N-1 rounds first half, N-1 rounds return leg.
+  // Circle (round-robin) algorithm.
+  // Fix circle[0], rotate circle[1..M-1] each round — every team plays once per round.
+  // Two-round league: all first-leg matchdays come before any return-leg matchday so
+  // teams never play the same opponent twice in a row.
   std::vector<int> circle = teamIds;
   if (N % 2 == 1) circle.push_back(0); // bye slot for odd N
   int M      = (int)circle.size();
   int rounds = M - 1;
   int half   = M / 2;
 
-  for (int r = 0; r < rounds; r++) {
-    // Interleave first and return legs: round r occupies matchdays 2r+1 and 2r+2.
-    // This guarantees the fixed team alternates H/A every matchday and no team
-    // accumulates long runs of consecutive home or away games.
-    int md_first  = 2 * r + 1;
-    int md_return = 2 * r + 2;
-    std::string date1 = MakeFixtureDate(seasonYear, startMonth, startDay, 2 * r);
-    std::string date2 = MakeFixtureDate(seasonYear, startMonth, startDay, 2 * r + 1);
-    for (int p = 0; p < half; p++) {
-      int home = circle[p];
-      int away = circle[M - 1 - p];
-      if (home == 0 || away == 0) continue; // bye
-      InsertFixture(managerId, leagueId, seasonYear, 1, md_first,  home, away, date1);
-      InsertFixture(managerId, leagueId, seasonYear, 2, md_return, away, home, date2);
+  // Collect pairings for each round before modifying the rotation vector.
+  struct Pair { int home, away; };
+  std::vector<std::vector<Pair>> roundPairs(rounds);
+  {
+    std::vector<int> c = circle;
+    for (int r = 0; r < rounds; r++) {
+      for (int p = 0; p < half; p++) {
+        int h = c[p], a = c[M - 1 - p];
+        if (h != 0 && a != 0)
+          roundPairs[r].push_back({h, a});
+      }
+      // Rotate: keep c[0] fixed, shift c[1..M-1] right.
+      int last = c[M - 1];
+      for (int k = M - 1; k > 1; k--) c[k] = c[k - 1];
+      c[1] = last;
     }
-    // Rotate: keep circle[0] fixed, shift circle[1..M-1] right by one.
-    int last = circle[M - 1];
-    for (int k = M - 1; k > 1; k--) circle[k] = circle[k - 1];
-    circle[1] = last;
+  }
+
+  // ── First half: all first-leg matchdays 1 .. rounds ──────────────────────
+  for (int r = 0; r < rounds; r++) {
+    int         md   = r + 1;
+    std::string date = MakeFixtureDate(seasonYear, startMonth, startDay, r);
+    for (const auto &pr : roundPairs[r])
+      InsertFixture(managerId, leagueId, seasonYear, 1, md, pr.home, pr.away, date);
+  }
+
+  // ── Second half: return legs matchdays rounds+1 .. 2*rounds, H/A swapped ─
+  for (int r = 0; r < rounds; r++) {
+    int         md   = rounds + r + 1;
+    std::string date = MakeFixtureDate(seasonYear, startMonth, startDay, rounds + r);
+    for (const auto &pr : roundPairs[r])
+      InsertFixture(managerId, leagueId, seasonYear, 2, md, pr.away, pr.home, date);
   }
 }
 

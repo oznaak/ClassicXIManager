@@ -14,6 +14,7 @@
 #include <string>
 #include <map>
 #include <vector>
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -65,12 +66,19 @@ void LoadManagerFonts() {
     nullptr
   };
 
+  // Glyph range: Basic Latin + Latin-1 Supplement + Euro sign (U+20AC)
+  static const ImWchar kGlyphRanges[] = {
+    0x0020, 0x00FF,  // Basic Latin + Latin-1 Supplement
+    0x20AC, 0x20AC,  // Euro sign €
+    0
+  };
+
   auto tryLoad = [](ImFontAtlas *a, const char **paths, float sz) -> ImFont * {
     for (; *paths; ++paths) {
       FILE *f = fopen(*paths, "rb");
       if (!f) continue;
       fclose(f);
-      ImFont *font = a->AddFontFromFileTTF(*paths, sz);
+      ImFont *font = a->AddFontFromFileTTF(*paths, sz, nullptr, kGlyphRanges);
       if (font) {
         printf("[IMGUI] Loaded manager font: %s (%.0fpx)\n", *paths, sz);
         return font;
@@ -252,17 +260,34 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
   players.clear();
   {
     std::stringstream q;
-    q << "SELECT firstname, lastname, role, age, base_stat"
+    q << "SELECT id, firstname, lastname, role, age, base_stat,"
+      << " formationorder, weekly_wage, contract_expiry, player_potential,"
+      << " foot, stamina"
       << " FROM players WHERE team_id = " << clubId
-      << " ORDER BY formationorder ASC, base_stat DESC LIMIT 22;";
+      << " ORDER BY"
+      << "  CASE WHEN formationorder IS NULL OR formationorder < 0 THEN 999"
+      << "       ELSE formationorder END ASC,"
+      << "  base_stat DESC LIMIT 50;";
     DatabaseResult *r = GetDB()->Query(q.str());
     for (unsigned int i = 0; i < r->data.size(); i++) {
       Player p;
-      p.firstName = DBCell(r, i, 0);
-      p.lastName  = DBCell(r, i, 1);
-      p.role      = DBCell(r, i, 2);
-      p.age       = DBCell(r, i, 3);
-      p.ability   = DBCell(r, i, 4);
+      p.id             = atoi(DBCell(r, i, 0).c_str());
+      p.firstName      = DBCell(r, i, 1);
+      p.lastName       = DBCell(r, i, 2);
+      p.role           = DBCell(r, i, 3);
+      p.age            = DBCell(r, i, 4);
+      p.ability        = DBCell(r, i, 5);
+      p.baseStat       = p.ability.empty() ? 0.0f : (float)atof(p.ability.c_str());
+      std::string foStr = DBCell(r, i, 6);
+      p.formationOrder  = foStr.empty() ? -1 : atoi(foStr.c_str());
+      std::string wStr  = DBCell(r, i, 7);
+      p.weeklywage      = wStr.empty() ? 0 : atoi(wStr.c_str());
+      p.contractExpiry  = DBCell(r, i, 8);
+      std::string potStr = DBCell(r, i, 9);
+      p.potential        = potStr.empty() ? 0 : atoi(potStr.c_str());
+      p.foot             = DBCell(r, i, 10);
+      std::string stStr  = DBCell(r, i, 11);
+      p.stamina          = stStr.empty() ? 0 : atoi(stStr.c_str());
       players.push_back(p);
     }
     delete r;
@@ -414,7 +439,7 @@ enum e_ManagerPage {
   PAGE_HOME = 0,
   PAGE_INBOX,
   PAGE_NEWS,
-  PAGE_SCHEDULE,
+  PAGE_CALENDAR,   // new: my-club calendar view under MAIN
   PAGE_SQUAD,
   PAGE_TACTICS,
   PAGE_TRAINING,
@@ -423,6 +448,7 @@ enum e_ManagerPage {
   PAGE_FINANCES,
   PAGE_TRANSFERS,
   PAGE_COMPETITIONS,
+  PAGE_SCHEDULE,   // all-league fixtures browser (was Schedule, now Fixtures in WORLD)
   PAGE_PLAYERS,
   PAGE_TEAMS,
   PAGE_SETTINGS,
@@ -432,13 +458,21 @@ enum e_ManagerPage {
 static const char *kPageNames[PAGE_COUNT] = {
   "Home", "Inbox", "News", "Schedule",
   "Squad", "Tactics", "Training", "Staff", "Scouting", "Finances", "Transfers",
-  "Competitions", "Players", "Teams", "Settings"
+  "Competitions", "Fixtures", "Players", "Teams", "Settings"
 };
 
 static e_ManagerPage g_activePage = PAGE_HOME;
+static bool          s_calInit    = false; // forward: reset when career loads
+static bool          s_compInit   = false; // forward: reset when career loads
+static int           s_compCountry = -1;
+static int           s_compLeague  = -1;
 
 static void ResetNavState() {
   g_activePage = PAGE_HOME;
+  s_calInit    = false;
+  s_compInit   = false;
+  s_compCountry = -1;
+  s_compLeague  = -1;
 }
 
 // ---- Color palette ------------------------------------------------------
@@ -855,7 +889,7 @@ static void DrawSidebar(float sideW, float winH) {
   DrawNavItem("Home",     PAGE_HOME);
   DrawNavItem("Inbox",    PAGE_INBOX, 3);
   DrawNavItem("News",     PAGE_NEWS);
-  DrawNavItem("Schedule", PAGE_SCHEDULE);
+  DrawNavItem("Schedule", PAGE_CALENDAR);
   ImGui::Dummy(ImVec2(0, 6.0f));
 
   DrawNavSectionHeader("CLUB");
@@ -869,9 +903,10 @@ static void DrawSidebar(float sideW, float winH) {
   ImGui::Dummy(ImVec2(0, 6.0f));
 
   DrawNavSectionHeader("WORLD");
-  DrawNavItem("Competitions", PAGE_COMPETITIONS);
-  DrawNavItem("Players",      PAGE_PLAYERS);
-  DrawNavItem("Teams",        PAGE_TEAMS);
+  DrawNavItem("Fixtures",      PAGE_SCHEDULE);
+  DrawNavItem("Competitions",  PAGE_COMPETITIONS);
+  DrawNavItem("Players",       PAGE_PLAYERS);
+  DrawNavItem("Teams",         PAGE_TEAMS);
 
   ImGui::EndChild(); // nav_area
 
@@ -1574,26 +1609,156 @@ static void DrawHomePage(float w, float h) {
   ImGui::PopStyleColor();
   DrawFixtureScheduleCard(ImVec2(rightW, schedH));
   ImGui::Dummy(ImVec2(0, kGap));
-  DrawLeagueSnapshotCard(ImVec2(rightW, kSnapH));
+  {
+    ImVec2 snapPos = ImGui::GetCursorScreenPos();
+    DrawLeagueSnapshotCard(ImVec2(rightW, kSnapH));
+    // Click anywhere on the League Snapshot card → go to Competitions
+    ImVec2 snapMax(snapPos.x + rightW, snapPos.y + kSnapH);
+    if (ImGui::IsMouseHoveringRect(snapPos, snapMax) &&
+        ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+      g_activePage = PAGE_COMPETITIONS;
+  }
   ImGui::EndChild();
+}
+
+// ---- Star rating renderer -----------------------------------------------
+
+static void DrawStars(float value, float maxValue, ImU32 filledCol) {
+  float stars = (maxValue > 0.0f) ? (value / maxValue) * 5.0f : 0.0f;
+  stars = std::max(0.0f, std::min(5.0f, stars));
+  ImDrawList *dl = ImGui::GetWindowDrawList();
+  ImVec2 p = ImGui::GetCursorScreenPos();
+  const float kW = 9.0f, kH = 7.0f, kGap = 2.0f;
+  float lh = ImGui::GetTextLineHeight();
+  float oy = (lh - kH) * 0.5f;
+  ImU32 emptyCol = IM_COL32(30, 44, 72, 200);
+  for (int i = 0; i < 5; i++) {
+    float x0 = p.x + (float)i * (kW + kGap);
+    float fill = std::max(0.0f, std::min(1.0f, stars - (float)i));
+    dl->AddRectFilled(ImVec2(x0, p.y + oy),
+                      ImVec2(x0 + kW, p.y + oy + kH), emptyCol, 2.0f);
+    if (fill > 0.02f)
+      dl->AddRectFilled(ImVec2(x0, p.y + oy),
+                        ImVec2(x0 + kW * fill, p.y + oy + kH), filledCol, 2.0f);
+  }
+  ImGui::Dummy(ImVec2(5.0f * (kW + kGap) - kGap, lh));
+}
+
+// ---- Country / league filter cache (shared by Competitions + Schedule) --
+
+struct CountryEntry { int id; std::string name; };
+struct LeagueEntry  { int id; int countryId; std::string name; };
+
+static std::vector<CountryEntry> s_filterCountries;
+static std::vector<LeagueEntry>  s_filterLeagues;
+static bool s_filterCacheLoaded = false;
+
+static void EnsureFilterCache() {
+  if (s_filterCacheLoaded) return;
+  {
+    DatabaseResult *r = GetDB()->Query("SELECT id, name FROM countries ORDER BY name;");
+    for (unsigned int i = 0; i < r->data.size(); i++) {
+      CountryEntry c;
+      c.id   = atoi(r->data[i][0].c_str());
+      c.name = r->data[i][1];
+      s_filterCountries.push_back(c);
+    }
+    delete r;
+  }
+  {
+    DatabaseResult *r = GetDB()->Query(
+        "SELECT id, country_id, name FROM leagues ORDER BY country_id, name;");
+    for (unsigned int i = 0; i < r->data.size(); i++) {
+      LeagueEntry l;
+      l.id        = atoi(r->data[i][0].c_str());
+      l.countryId = atoi(r->data[i][1].c_str());
+      l.name      = r->data[i][2];
+      s_filterLeagues.push_back(l);
+    }
+    delete r;
+  }
+  s_filterCacheLoaded = true;
 }
 
 // ---- DrawSquadPage ------------------------------------------------------
 
-static int s_squadFilter = 0;
+// Position slot definitions for 4-3-3
+struct PosSlot { int fo; const char *label; };
+static const PosSlot kPosSlots[] = {
+  {0,"GK"},{1,"LB"},{2,"CB"},{3,"CB"},{4,"RB"},
+  {5,"CM"},{6,"CM"},{7,"LM"},{8,"AM"},{9,"RM"},{10,"CF"},
+  {11,"S1"},{12,"S2"},{13,"S3"},{14,"S4"},
+  {15,"S5"},{16,"S6"},{17,"S7"},{18,"S8"},{19,"S9"}
+};
+static const int kNumSlots = 20;
+
+static const char *PosLabel(int fo) {
+  for (int i = 0; i < kNumSlots; i++)
+    if (kPosSlots[i].fo == fo) return kPosSlots[i].label;
+  return "—";
+}
+
+// Pending POS swap — executed after the frame to avoid iterating while modifying
+static int s_swapPlayerA = -1; // player id
+static int s_swapFoA     = -1; // its current fo
+static int s_swapFoB     = -1; // target fo
+
+static void FlushSquadSwap() {
+  if (s_swapPlayerA < 0) return;
+  // Find the player currently occupying the target slot (if any)
+  int otherPlayerId = -1;
+  for (const auto &p : g_CareerHub.players) {
+    if (p.id != s_swapPlayerA && p.formationOrder == s_swapFoB) {
+      otherPlayerId = p.id;
+      break;
+    }
+  }
+  if (otherPlayerId >= 0) {
+    std::stringstream q;
+    q << "UPDATE players SET formationorder=" << s_swapFoA
+      << " WHERE id=" << otherPlayerId << ";";
+    DatabaseResult *r = GetDB()->Query(q.str()); delete r;
+  }
+  {
+    std::stringstream q;
+    q << "UPDATE players SET formationorder=" << s_swapFoB
+      << " WHERE id=" << s_swapPlayerA << ";";
+    DatabaseResult *r = GetDB()->Query(q.str()); delete r;
+  }
+  g_CareerHub.LoadFromDB(g_CareerHub.managerId, g_CareerHub.clubId);
+  s_swapPlayerA = s_swapFoA = s_swapFoB = -1;
+}
 
 static void DrawSquadPage(float w, float h) {
-  const float kPad = 16.0f, kGap = 10.0f;
+  FlushSquadSwap();
+
+  const float kPad = 16.0f, kGap = 8.0f;
   ImGui::SetCursorPos(ImVec2(kPad, 8.0f));
   float usW = w - kPad * 2.0f;
   float usH = h - 14.0f;
 
-  // Header card
-  float hdrH = 68.0f;
+  // Header
+  float hdrH = 64.0f;
   BeginModernCard("##sqhdr", ImVec2(usW, hdrH));
   const auto &cl = g_CareerHub.club;
-  DrawTeamBadge(cl.logoPath, cl.shortName, 44.0f);
+  // Vertically center the badge + text group inside the card
+  // Card inner height = hdrH - 2*WindowPadding.y = 64-24 = 40px; badge = 40px → fits exactly
+  ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 4.0f); // left margin
+  ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 0.0f); // already centred at 40px height
+  DrawTeamBadge(cl.logoPath, cl.shortName, 40.0f);
   ImGui::SameLine(0, 14.0f);
+  // Vertically centre the two text lines relative to the badge height
+  {
+    PushMgrFont(g_ManagerFontTitle);
+    float titleH = ImGui::GetTextLineHeight();
+    PopMgrFont(g_ManagerFontTitle);
+    PushMgrFont(g_ManagerFontSmall);
+    float subH = ImGui::GetTextLineHeight();
+    PopMgrFont(g_ManagerFontSmall);
+    float totalTextH = titleH + 2.0f + subH;
+    float offsetY = (40.0f - totalTextH) * 0.5f;
+    if (offsetY > 0.0f) ImGui::SetCursorPosY(ImGui::GetCursorPosY() + offsetY);
+  }
   ImGui::BeginGroup();
   PushMgrFont(g_ManagerFontTitle);
   ImGui::PushStyleColor(ImGuiCol_Text, kTextPri);
@@ -1610,76 +1775,257 @@ static void DrawSquadPage(float w, float h) {
 
   ImGui::Dummy(ImVec2(0, kGap));
 
-  // Toolbar card
-  float toolH = 38.0f;
-  BeginModernCard("##sqtool", ImVec2(usW, toolH));
-  ImGui::SetCursorPosY(ImGui::GetCursorPosY() - 3.0f);
-  PushMgrFont(g_ManagerFontSmall);
-  ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(9.0f, 4.0f));
-  ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,  ImVec2(4.0f, 0.0f));
-  SecBtn("In Possession");
-  ImGui::SameLine(0, 4);
-  SecBtn("Out of Possession");
-  ImGui::SameLine(0, 14);
-  ImGui::PushStyleColor(ImGuiCol_Text, kTextDim);
-  ImGui::TextUnformatted("|");
-  ImGui::PopStyleColor();
-  ImGui::SameLine(0, 14);
-  static const char *kPos[] = { "All","GK","DEF","MID","ATT" };
-  for (int i = 0; i < 5; i++) {
-    if (i > 0) ImGui::SameLine(0, 4);
-    bool sel = (s_squadFilter == i);
-    if (sel) {
-      ImGui::PushStyleColor(ImGuiCol_Button,        kViolet);
-      ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.58f,0.33f,0.97f,1.0f));
-      ImGui::PushStyleColor(ImGuiCol_Text,          kTextPri);
-    } else {
-      ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0,0,0,0));
-      ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.08f,0.12f,0.22f,0.7f));
-      ImGui::PushStyleColor(ImGuiCol_Text,          kTextSec);
-    }
-    if (ImGui::Button(kPos[i])) s_squadFilter = i;
-    ImGui::PopStyleColor(3);
-  }
-  ImGui::PopStyleVar(2);
-  PopMgrFont(g_ManagerFontSmall);
-  EndModernCard();
-
-  ImGui::Dummy(ImVec2(0, kGap));
-
-  // Squad table card
-  float squadH = usH - hdrH - toolH - kGap * 2.0f - 6.0f;
+  // Table
+  float squadH = usH - hdrH - kGap - 4.0f;
   if (squadH < 60.0f) squadH = 60.0f;
-  BeginModernCard("##sqtbl", ImVec2(usW, squadH), "SQUAD");
-  float tblH = squadH - 56.0f;
+  BeginModernCard("##sqtbl", ImVec2(usW, squadH));
+  float tblH = squadH - 32.0f;
   if (tblH < 30.0f) tblH = 30.0f;
-  ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(8.0f, 6.0f));
-  if (ImGui::BeginTable("##sq", 4,
-                        ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
-                        ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_PadOuterX,
-                        ImVec2(0, tblH))) {
-    ImGui::TableSetupScrollFreeze(0, 1);
-    ImGui::TableSetupColumn("Name",    ImGuiTableColumnFlags_WidthStretch);
-    ImGui::TableSetupColumn("Role",    ImGuiTableColumnFlags_WidthFixed, 152.0f);
-    ImGui::TableSetupColumn("Age",     ImGuiTableColumnFlags_WidthFixed,  38.0f);
-    ImGui::TableSetupColumn("Ability", ImGuiTableColumnFlags_WidthFixed,  92.0f);
+
+  // Sort state — persists across frames, reset when player list changes size
+  static std::vector<int> s_squadSortIdx;
+  static int  s_squadSortLastSize = -1;
+
+  ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(5.0f, 4.0f));
+  // Col indices: 0=POS 1=Name 2=Position 3=Wage 4=Age 5=Foot 6=Expires 7=Ability 8=Potential
+  //              9=CON 10=SHP 11=Morale 12=Happiness 13=L5 14=Apps
+  static const int kColAge = 4, kColFoot = 5, kColAbility = 7, kColPotential = 8;
+  if (ImGui::BeginTable("##sqfm", 15,
+        ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
+        ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_PadOuterX |
+        ImGuiTableFlags_ScrollX |
+        ImGuiTableFlags_Sortable | ImGuiTableFlags_SortTristate,
+        ImVec2(0, tblH))) {
+    ImGui::TableSetupScrollFreeze(2, 1);
+    ImGui::TableSetupColumn("POS",       ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort,  54.0f);
+    ImGui::TableSetupColumn("Name",      ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort, 180.0f);
+    ImGui::TableSetupColumn("Position",  ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort,  90.0f);
+    ImGui::TableSetupColumn("Wage",      ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort,  80.0f);
+    ImGui::TableSetupColumn("Age",       ImGuiTableColumnFlags_WidthFixed,  36.0f);
+    ImGui::TableSetupColumn("Foot",      ImGuiTableColumnFlags_WidthFixed,  36.0f);
+    ImGui::TableSetupColumn("Expires",   ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort,  72.0f);
+    ImGui::TableSetupColumn("Ability",   ImGuiTableColumnFlags_WidthFixed,  60.0f);
+    ImGui::TableSetupColumn("Potential", ImGuiTableColumnFlags_WidthFixed,  60.0f);
+    ImGui::TableSetupColumn("CON",       ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort,  36.0f);
+    ImGui::TableSetupColumn("SHP",       ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort,  36.0f);
+    ImGui::TableSetupColumn("Morale",    ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort,  60.0f);
+    ImGui::TableSetupColumn("Happiness", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort,  72.0f);
+    ImGui::TableSetupColumn("L5",        ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort,  60.0f);
+    ImGui::TableSetupColumn("Apps",      ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort,  36.0f);
     PushMgrFont(g_ManagerFontSmall);
     ImGui::TableHeadersRow();
-    for (const auto &p : g_CareerHub.players) {
-      ImGui::TableNextRow(0, 30.0f);
+    PopMgrFont(g_ManagerFontSmall);
+
+    // Build / update sorted index
+    int nPlayers = (int)g_CareerHub.players.size();
+    if (nPlayers != s_squadSortLastSize) {
+      s_squadSortIdx.resize(nPlayers);
+      for (int i = 0; i < nPlayers; i++) s_squadSortIdx[i] = i;
+      s_squadSortLastSize = nPlayers;
+    }
+    if (ImGuiTableSortSpecs *specs = ImGui::TableGetSortSpecs()) {
+      if (specs->SpecsDirty) {
+        // Rebuild index then re-sort
+        for (int i = 0; i < nPlayers; i++) s_squadSortIdx[i] = i;
+        if (specs->SpecsCount > 0 &&
+            specs->Specs[0].SortDirection != ImGuiSortDirection_None) {
+          const ImGuiTableColumnSortSpecs &sp = specs->Specs[0];
+          bool asc = (sp.SortDirection == ImGuiSortDirection_Ascending);
+          std::sort(s_squadSortIdx.begin(), s_squadSortIdx.end(),
+            [&](int a, int b) {
+              const auto &pa = g_CareerHub.players[a];
+              const auto &pb = g_CareerHub.players[b];
+              float va = 0.0f, vb = 0.0f;
+              std::string sa, sb;
+              if (sp.ColumnIndex == kColAge) {
+                va = (float)atoi(pa.age.c_str());
+                vb = (float)atoi(pb.age.c_str());
+              } else if (sp.ColumnIndex == kColFoot) {
+                sa = pa.foot; sb = pb.foot;
+                return asc ? (sa < sb) : (sa > sb);
+              } else if (sp.ColumnIndex == kColAbility) {
+                va = pa.baseStat; vb = pb.baseStat;
+              } else if (sp.ColumnIndex == kColPotential) {
+                va = (float)pa.potential; vb = (float)pb.potential;
+              }
+              return asc ? (va < vb) : (va > vb);
+            });
+        }
+        specs->SpecsDirty = false;
+      }
+    }
+
+    const ImU32 kGoldU = C32(kGold);
+    const ImU32 kBlueU = IM_COL32(100, 160, 220, 220);
+    const ImU32 kDimU  = C32(kTextDim);
+
+    PushMgrFont(g_ManagerFontSmall);
+    for (int si = 0; si < nPlayers; si++) {
+      const auto &p = g_CareerHub.players[s_squadSortIdx[si]];
+      ImGui::TableNextRow(0, 28.0f);
+
+      // POS — dropdown button
       ImGui::TableSetColumnIndex(0);
-      ImGui::Text("%s %s", p.firstName.c_str(), p.lastName.c_str());
+      {
+        const char *posLbl = PosLabel(p.formationOrder);
+        bool isSub  = (p.formationOrder >= 11);
+        bool isXI   = (p.formationOrder >= 0 && p.formationOrder <= 10);
+        ImU32 badgeBg  = isXI  ? C32(kViolet)
+                       : isSub ? IM_COL32(30,60,100,220)
+                               : IM_COL32(25,35,58,180);
+        ImU32 badgeTxt = IM_COL32(220,225,235,255);
+
+        ImVec2 cp = ImGui::GetCursorScreenPos();
+        const float bW = 42.0f, bH = 18.0f;
+        float cy = cp.y + (28.0f - bH) * 0.5f;
+        ImDrawList *dl = ImGui::GetWindowDrawList();
+
+        // Badge background (clickable via InvisibleButton)
+        char btnId[32]; snprintf(btnId, sizeof(btnId), "##pos_%d", p.id);
+        ImGui::SetCursorScreenPos(ImVec2(cp.x, cy));
+        bool clicked = ImGui::InvisibleButton(btnId, ImVec2(bW, bH));
+        dl->AddRectFilled(ImVec2(cp.x, cy), ImVec2(cp.x+bW, cy+bH), badgeBg, 4.0f);
+        ImVec2 tsz = g_ManagerFontSmall
+            ? g_ManagerFontSmall->CalcTextSizeA(11.0f, FLT_MAX, 0.f, posLbl)
+            : ImGui::CalcTextSize(posLbl);
+        dl->AddText(g_ManagerFontSmall, 11.0f,
+                    ImVec2(cp.x + (bW - tsz.x)*0.5f, cy + (bH - tsz.y)*0.5f),
+                    badgeTxt, posLbl);
+
+        if (clicked) {
+          char popId[32]; snprintf(popId, sizeof(popId), "##posdd_%d", p.id);
+          ImGui::OpenPopup(popId);
+        }
+        char popId2[32]; snprintf(popId2, sizeof(popId2), "##posdd_%d", p.id);
+        if (ImGui::BeginPopup(popId2)) {
+          PushMgrFont(g_ManagerFontSmall);
+          ImGui::PushStyleColor(ImGuiCol_Text, kTextSec);
+          ImGui::TextUnformatted("Assign position:");
+          ImGui::PopStyleColor();
+          ImGui::Separator();
+          for (int si = 0; si < kNumSlots; si++) {
+            bool isCurrent = (kPosSlots[si].fo == p.formationOrder);
+            if (isCurrent) ImGui::PushStyleColor(ImGuiCol_Text, kGold);
+            char selId[32];
+            snprintf(selId, sizeof(selId), "%s##fo%d", kPosSlots[si].label, kPosSlots[si].fo);
+            if (ImGui::Selectable(selId, isCurrent,
+                                  0, ImVec2(60, 0))) {
+              if (!isCurrent) {
+                s_swapPlayerA = p.id;
+                s_swapFoA     = p.formationOrder;
+                s_swapFoB     = kPosSlots[si].fo;
+              }
+              ImGui::CloseCurrentPopup();
+            }
+            if (isCurrent) ImGui::PopStyleColor();
+          }
+          PopMgrFont(g_ManagerFontSmall);
+          ImGui::EndPopup();
+        }
+      }
+
+      // Name
       ImGui::TableSetColumnIndex(1);
+      {
+        std::string name = p.firstName.empty() ? p.lastName
+                         : (p.lastName.empty() ? p.firstName
+                         : p.firstName + " " + p.lastName);
+        ImGui::PushStyleColor(ImGuiCol_Text, kTextPri);
+        ImGui::TextUnformatted(name.c_str());
+        ImGui::PopStyleColor();
+      }
+
+      // Position (role)
+      ImGui::TableSetColumnIndex(2);
       ImGui::PushStyleColor(ImGuiCol_Text, kTextSec);
       ImGui::TextUnformatted(p.role.c_str());
       ImGui::PopStyleColor();
-      ImGui::TableSetColumnIndex(2);
+
+      // Wage
+      ImGui::TableSetColumnIndex(3);
+      if (p.weeklywage > 0) {
+        char wbuf[32];
+        if (p.weeklywage >= 1000)
+          snprintf(wbuf, sizeof(wbuf), "\xe2\x82\xac%d,%03d p/w",
+                   p.weeklywage/1000, p.weeklywage%1000);
+        else
+          snprintf(wbuf, sizeof(wbuf), "\xe2\x82\xac%d p/w", p.weeklywage);
+        ImGui::PushStyleColor(ImGuiCol_Text, kTextSec);
+        ImGui::TextUnformatted(wbuf);
+        ImGui::PopStyleColor();
+      } else {
+        ImGui::PushStyleColor(ImGuiCol_Text, kDimU);
+        ImGui::TextUnformatted("\xe2\x80\x94");
+        ImGui::PopStyleColor();
+      }
+
+      // Age (col 4)
+      ImGui::TableSetColumnIndex(4);
       ImGui::PushStyleColor(ImGuiCol_Text, kTextSec);
       ImGui::TextUnformatted(p.age.c_str());
       ImGui::PopStyleColor();
-      ImGui::TableSetColumnIndex(3);
-      DrawAbilityBar(p.ability, 60.0f);
+
+      // Foot (col 5) — "L" → left foot badge, "R" → right foot badge
+      ImGui::TableSetColumnIndex(5);
+      {
+        bool isLeft = (!p.foot.empty() && (p.foot[0] == 'L' || p.foot[0] == 'l'));
+        bool isRight = (!p.foot.empty() && (p.foot[0] == 'R' || p.foot[0] == 'r'));
+        if (isLeft || isRight) {
+          ImU32 footCol = isLeft ? IM_COL32(80, 160, 255, 200) : IM_COL32(80, 200, 120, 200);
+          ImVec2 cp = ImGui::GetCursorScreenPos();
+          ImDrawList *fdl = ImGui::GetWindowDrawList();
+          fdl->AddRectFilled(cp, ImVec2(cp.x + 22.0f, cp.y + 14.0f), footCol, 3.0f);
+          const char *fl = isLeft ? "L" : "R";
+          ImVec2 fts = ImGui::CalcTextSize(fl);
+          fdl->AddText(ImVec2(cp.x + (22.0f - fts.x) * 0.5f, cp.y + (14.0f - fts.y) * 0.5f),
+                       IM_COL32(255,255,255,230), fl);
+          ImGui::Dummy(ImVec2(22.0f, 14.0f));
+        } else {
+          ImGui::PushStyleColor(ImGuiCol_Text, kDimU);
+          ImGui::TextUnformatted("\xe2\x80\x94");
+          ImGui::PopStyleColor();
+        }
+      }
+
+      // Contract expiry (col 6) — format YYYY-MM-DD → D/M/YYYY
+      ImGui::TableSetColumnIndex(6);
+      {
+        std::string exp = p.contractExpiry;
+        if (exp.size() >= 10) {
+          int yr = atoi(exp.substr(0,4).c_str());
+          int mo = atoi(exp.substr(5,2).c_str());
+          int dy = atoi(exp.substr(8,2).c_str());
+          char ebuf[16]; snprintf(ebuf, sizeof(ebuf), "%d/%d/%d", dy, mo, yr);
+          exp = ebuf;
+        }
+        ImGui::PushStyleColor(ImGuiCol_Text, kTextSec);
+        ImGui::TextUnformatted(exp.empty() ? "\xe2\x80\x94" : exp.c_str());
+        ImGui::PopStyleColor();
+      }
+
+      // Ability stars (col 7)
+      ImGui::TableSetColumnIndex(7);
+      DrawStars(p.baseStat, 1.0f, kGoldU);
+
+      // Potential stars (col 8)
+      ImGui::TableSetColumnIndex(8);
+      DrawStars((float)p.potential, 200.0f, kBlueU);
+
+      // Placeholders
+      auto placeholder = [&](int col) {
+        ImGui::TableSetColumnIndex(col);
+        ImGui::PushStyleColor(ImGuiCol_Text, kDimU);
+        ImGui::TextUnformatted("\xe2\x80\x94");
+        ImGui::PopStyleColor();
+      };
+      placeholder(9);  // CON
+      placeholder(10); // SHP
+      placeholder(11); // Morale
+      placeholder(12); // Happiness
+      placeholder(13); // L5
+      placeholder(14); // Apps
     }
+
     if (g_CareerHub.players.empty()) {
       ImGui::TableNextRow(); ImGui::TableSetColumnIndex(0);
       ImGui::PushStyleColor(ImGuiCol_Text, kTextSec);
@@ -1693,24 +2039,514 @@ static void DrawSquadPage(float w, float h) {
   EndModernCard();
 }
 
+// ---- DrawCalendarPage ---------------------------------------------------
+// Shows only the user's club fixtures in a month-grid calendar.
+
+static int s_calYear  = 0;
+static int s_calMonth = 0; // 1-12
+
+static int DaysInMonth(int year, int month) {
+  // Use day-0 of next month trick
+  struct tm t = {};
+  t.tm_year = year - 1900;
+  t.tm_mon  = month;   // 0-based; month here is 1-based next month = 0-based current+1
+  t.tm_mday = 0;
+  mktime(&t);
+  return t.tm_mday;
+}
+
+static void DrawCalendarPage(float w, float h) {
+  // Always reset to current career month on entry (tracked via s_calInit cleared on page change)
+  if (!s_calInit) {
+    const std::string &cd = g_CareerHub.currentDate;
+    if (cd.size() >= 7) {
+      s_calYear  = atoi(cd.substr(0, 4).c_str());
+      s_calMonth = atoi(cd.substr(5, 2).c_str());
+    } else {
+      s_calYear = 2026; s_calMonth = 7;
+    }
+    s_calInit = true;
+  }
+
+  // Build user-fixture map: "YYYY-MM-DD" → index into g_CareerHub.fixtures
+  const std::string &myShort = g_CareerHub.club.shortName;
+  std::map<std::string, int> calFixIdx;
+  for (int i = 0; i < (int)g_CareerHub.fixtures.size(); i++) {
+    const auto &f = g_CareerHub.fixtures[i];
+    if (f.home == myShort || f.away == myShort)
+      calFixIdx[f.fixtureDate] = i;
+  }
+
+  static const char *kMonths[] = {
+    "January","February","March","April","May","June",
+    "July","August","September","October","November","December"
+  };
+  static const char *kDays[] = { "MON","TUE","WED","THU","FRI","SAT","SUN" };
+
+  const float kPad = 16.0f, kGap = 6.0f;
+  ImDrawList *wdl  = ImGui::GetWindowDrawList();
+
+  ImGui::SetCursorPos(ImVec2(kPad, 8.0f));
+  float usW = w - kPad * 2.0f;
+  float usH = h - 20.0f;
+
+  // ---- Month navigation header (custom-drawn, buttons vertically centred) --
+  const float kHdrH  = 52.0f;
+  const float kBtnW  = 90.0f, kBtnH = 32.0f;
+  const float kBtnML = 16.0f; // left margin for Prev button
+
+  ImVec2 hdrPos = ImGui::GetCursorScreenPos();
+  // Background + border
+  wdl->AddRectFilled(hdrPos, ImVec2(hdrPos.x+usW, hdrPos.y+kHdrH),
+                     C32(kBgCard), 8.0f);
+  wdl->AddRect(hdrPos, ImVec2(hdrPos.x+usW, hdrPos.y+kHdrH),
+               C32(kBorder), 8.0f, 0, 1.0f);
+
+  float btnY = hdrPos.y + (kHdrH - kBtnH) * 0.5f;
+
+  // Prev button
+  ImVec2 prevMin(hdrPos.x + kBtnML, btnY);
+  ImVec2 prevMax(prevMin.x + kBtnW, prevMin.y + kBtnH);
+  ImGui::SetCursorScreenPos(prevMin);
+  bool prevClicked = ImGui::InvisibleButton("##cal_prev", ImVec2(kBtnW, kBtnH));
+  bool prevHov     = ImGui::IsItemHovered();
+  if (prevHov)
+    wdl->AddRectFilled(prevMin, prevMax, IM_COL32(50,70,120,180), 6.0f);
+  else
+    wdl->AddRectFilled(prevMin, prevMax, IM_COL32(30,42,72,140), 6.0f);
+  wdl->AddRect(prevMin, prevMax, IM_COL32(60,80,130,160), 6.0f, 0, 1.0f);
+  {
+    PushMgrFont(g_ManagerFontSmall);
+    const char *lbl = "< Prev";
+    ImVec2 ts = ImGui::CalcTextSize(lbl);
+    wdl->AddText(ImVec2(prevMin.x + (kBtnW - ts.x)*0.5f,
+                        prevMin.y + (kBtnH - ts.y)*0.5f),
+                 prevHov ? IM_COL32(200,220,255,255) : IM_COL32(140,165,215,210), lbl);
+    PopMgrFont(g_ManagerFontSmall);
+  }
+  if (prevClicked) {
+    s_calMonth--;
+    if (s_calMonth < 1) { s_calMonth = 12; s_calYear--; }
+  }
+
+  // Month + Year label (centred)
+  {
+    char hdr[64];
+    snprintf(hdr, sizeof(hdr), "%s %d", kMonths[s_calMonth - 1], s_calYear);
+    PushMgrFont(g_ManagerFontBold);
+    ImVec2 ts = ImGui::CalcTextSize(hdr);
+    wdl->AddText(ImVec2(hdrPos.x + (usW - ts.x)*0.5f,
+                        hdrPos.y + (kHdrH - ts.y)*0.5f),
+                 C32(kBlue), hdr);
+    PopMgrFont(g_ManagerFontBold);
+  }
+
+  // Next button (right-aligned, mirrored margin)
+  ImVec2 nextMin(hdrPos.x + usW - kBtnML - kBtnW, btnY);
+  ImVec2 nextMax(nextMin.x + kBtnW, nextMin.y + kBtnH);
+  ImGui::SetCursorScreenPos(nextMin);
+  bool nextClicked = ImGui::InvisibleButton("##cal_next", ImVec2(kBtnW, kBtnH));
+  bool nextHov     = ImGui::IsItemHovered();
+  if (nextHov)
+    wdl->AddRectFilled(nextMin, nextMax, IM_COL32(50,70,120,180), 6.0f);
+  else
+    wdl->AddRectFilled(nextMin, nextMax, IM_COL32(30,42,72,140), 6.0f);
+  wdl->AddRect(nextMin, nextMax, IM_COL32(60,80,130,160), 6.0f, 0, 1.0f);
+  {
+    PushMgrFont(g_ManagerFontSmall);
+    const char *lbl = "Next >";
+    ImVec2 ts = ImGui::CalcTextSize(lbl);
+    wdl->AddText(ImVec2(nextMin.x + (kBtnW - ts.x)*0.5f,
+                        nextMin.y + (kBtnH - ts.y)*0.5f),
+                 nextHov ? IM_COL32(200,220,255,255) : IM_COL32(140,165,215,210), lbl);
+    PopMgrFont(g_ManagerFontSmall);
+  }
+  if (nextClicked) {
+    s_calMonth++;
+    if (s_calMonth > 12) { s_calMonth = 1; s_calYear++; }
+  }
+
+  // Advance cursor past header
+  ImGui::SetCursorScreenPos(ImVec2(hdrPos.x, hdrPos.y + kHdrH));
+  ImGui::Dummy(ImVec2(usW, kGap));
+
+  // ---- Calendar grid --------------------------------------------------
+  float gridH = usH - kHdrH - kGap * 2.0f;
+  if (gridH < 120.0f) gridH = 120.0f;
+
+  // Compute month layout
+  struct tm t0 = {};
+  t0.tm_year = s_calYear - 1900;
+  t0.tm_mon  = s_calMonth - 1;
+  t0.tm_mday = 1;
+  mktime(&t0);
+  int firstDow  = (t0.tm_wday + 6) % 7; // 0=Mon … 6=Sun
+  int daysInMon = DaysInMonth(s_calYear, s_calMonth);
+  int numWeeks  = (firstDow + daysInMon + 6) / 7;
+
+  const float kDayHdrH = 24.0f;
+  float cellW = usW / 7.0f;
+  float cellH = (gridH - kDayHdrH) / (float)numWeeks;
+  if (cellH < 100.0f) cellH = 100.0f;
+
+  ImVec2 gridOrigin = ImGui::GetCursorScreenPos();
+
+  // Day-of-week header row
+  PushMgrFont(g_ManagerFontSmall);
+  for (int d = 0; d < 7; d++) {
+    float dx = gridOrigin.x + d * cellW;
+    // Weekend columns slightly dimmer
+    ImU32 dhCol = (d >= 5) ? IM_COL32(110,125,170,160) : IM_COL32(130,150,195,200);
+    ImVec2 ts = ImGui::CalcTextSize(kDays[d]);
+    wdl->AddText(ImVec2(dx + (cellW - ts.x)*0.5f,
+                        gridOrigin.y + (kDayHdrH - ts.y)*0.5f),
+                 dhCol, kDays[d]);
+  }
+  PopMgrFont(g_ManagerFontSmall);
+
+  float rowY      = gridOrigin.y + kDayHdrH;
+  std::string todayStr = g_CareerHub.currentDate;
+
+  // Precompute small font line height once
+  PushMgrFont(g_ManagerFontSmall);
+  float smLineH = ImGui::CalcTextSize("X").y;
+  PopMgrFont(g_ManagerFontSmall);
+  PushMgrFont(g_ManagerFontBold);
+  float bdLineH = ImGui::CalcTextSize("X").y;
+  PopMgrFont(g_ManagerFontBold);
+
+  for (int week = 0; week < numWeeks; week++) {
+    for (int dow = 0; dow < 7; dow++) {
+      int cell = week * 7 + dow;
+      int day  = cell - firstDow + 1;
+      float cx = gridOrigin.x + dow * cellW;
+      float cy = rowY + week * cellH;
+      const float kCellPad = 3.0f;
+      ImVec2 cMin(cx + kCellPad, cy + kCellPad);
+      ImVec2 cMax(cx + cellW - kCellPad, cy + cellH - kCellPad);
+      float  cW = cMax.x - cMin.x;
+
+      if (day < 1 || day > daysInMon) {
+        wdl->AddRectFilled(cMin, cMax, IM_COL32(12,14,22,60), 7.0f);
+        continue;
+      }
+
+      char dateBuf[16];
+      snprintf(dateBuf, sizeof(dateBuf), "%04d-%02d-%02d", s_calYear, s_calMonth, day);
+      std::string dateStr(dateBuf);
+
+      bool isToday  = (dateStr == todayStr);
+      bool hasMatch = (calFixIdx.count(dateStr) > 0);
+
+      // Cell background
+      ImU32 bgCol = hasMatch ? IM_COL32(18, 30, 60, 240)
+                  : isToday  ? IM_COL32(24, 26, 50, 220)
+                             : IM_COL32(14, 18, 32, 190);
+      wdl->AddRectFilled(cMin, cMax, bgCol, 7.0f);
+
+      // Border
+      if (isToday)
+        wdl->AddRect(cMin, cMax, IM_COL32(90,140,255,200), 7.0f, 0, 1.5f);
+      else if (hasMatch)
+        wdl->AddRect(cMin, cMax, IM_COL32(55,80,140,120), 7.0f, 0, 1.0f);
+      else
+        wdl->AddRect(cMin, cMax, IM_COL32(30,38,60,80), 7.0f, 0, 1.0f);
+
+      // Day number (top-left)
+      char dayBuf[8];
+      snprintf(dayBuf, sizeof(dayBuf), "%d", day);
+      PushMgrFont(g_ManagerFontSmall);
+      ImU32 dayNumCol = isToday   ? IM_COL32(120,175,255,255)
+                      : hasMatch  ? IM_COL32(200,215,245,220)
+                                  : IM_COL32(100,115,155,180);
+      wdl->AddText(ImVec2(cMin.x + 7.0f, cMin.y + 5.0f), dayNumCol, dayBuf);
+      PopMgrFont(g_ManagerFontSmall);
+
+      if (!hasMatch) continue;
+
+      const auto &f  = g_CareerHub.fixtures[calFixIdx[dateStr]];
+      bool isHome    = (f.home == myShort);
+      bool played    = (f.status == "played");
+
+      // Matchday label (top-right)
+      if (!f.matchday.empty()) {
+        char mdBuf[16];
+        snprintf(mdBuf, sizeof(mdBuf), "MD %s", f.matchday.c_str());
+        PushMgrFont(g_ManagerFontSmall);
+        ImVec2 mds = ImGui::CalcTextSize(mdBuf);
+        wdl->AddText(ImVec2(cMax.x - mds.x - 6.0f, cMin.y + 5.0f),
+                     IM_COL32(80,100,150,160), mdBuf);
+        PopMgrFont(g_ManagerFontSmall);
+      }
+
+      // Thin separator below day number
+      float sepY = cMin.y + smLineH + 9.0f;
+      wdl->AddLine(ImVec2(cMin.x + 6.0f, sepY), ImVec2(cMax.x - 6.0f, sepY),
+                   IM_COL32(50,70,110,100), 1.0f);
+
+      // ── H/A pill — left-aligned, immediately below separator ────────────
+      float pillY;
+      {
+        PushMgrFont(g_ManagerFontSmall);
+        const char *haPill = isHome ? "HOME" : "AWAY";
+        ImU32 haColor = isHome ? IM_COL32(30,100,200,230) : IM_COL32(165,45,45,230);
+        ImVec2 haTs = ImGui::CalcTextSize(haPill);
+        float  haW  = haTs.x + 14.0f, haH = haTs.y + 5.0f;
+        float  pillX = cMin.x + 7.0f;
+        pillY = sepY + 7.0f;
+        wdl->AddRectFilled(ImVec2(pillX, pillY),
+                           ImVec2(pillX + haW, pillY + haH), haColor, 4.0f);
+        wdl->AddText(ImVec2(pillX + 7.0f, pillY + 2.5f),
+                     IM_COL32(255,255,255,240), haPill);
+        pillY += haH;
+        PopMgrFont(g_ManagerFontSmall);
+      }
+
+      // ── Badge + opponent name — centred horizontally ─────────────────────
+      const float kBadgeS = 28.0f;
+      float badgeY = pillY + 6.0f;
+
+      const std::string &oppFull = isHome
+        ? (f.awayFull.empty() ? f.away : f.awayFull)
+        : (f.homeFull.empty() ? f.home : f.homeFull);
+      const std::string &oppLogo = isHome ? f.awayLogo : f.homeLogo;
+      GLuint badge = LoadBadgeTex(oppLogo);
+
+      // Measure name to compute total block width for centering
+      PushMgrFont(g_ManagerFontSmall);
+      float nameMaxW = cW - kBadgeS - 10.0f - 8.0f; // badge + gap + padding
+
+      // Build display string (split to two lines if needed)
+      std::string nameLine1 = oppFull, nameLine2;
+      bool twoLine = false;
+      if (ImGui::CalcTextSize(nameLine1.c_str()).x > nameMaxW) {
+        size_t sp = oppFull.rfind(' ');
+        if (sp != std::string::npos) {
+          nameLine1 = oppFull.substr(0, sp);
+          nameLine2 = oppFull.substr(sp + 1);
+          twoLine   = true;
+          while (nameLine1.size() > 2 && ImGui::CalcTextSize(nameLine1.c_str()).x > nameMaxW)
+            nameLine1.pop_back();
+          while (nameLine2.size() > 2 && ImGui::CalcTextSize(nameLine2.c_str()).x > nameMaxW)
+            nameLine2.pop_back();
+        } else {
+          while (nameLine1.size() > 2 && ImGui::CalcTextSize(nameLine1.c_str()).x > nameMaxW)
+            nameLine1.pop_back();
+        }
+      }
+
+      float nameBlockH = twoLine ? smLineH * 2.0f + 2.0f : smLineH;
+      float blockH     = kBadgeS > nameBlockH ? kBadgeS : nameBlockH;
+
+      // Total block width: badge + gap + widest name line
+      float w1 = ImGui::CalcTextSize(nameLine1.c_str()).x;
+      float w2 = twoLine ? ImGui::CalcTextSize(nameLine2.c_str()).x : 0.0f;
+      float nameW  = w1 > w2 ? w1 : w2;
+      float blockW = kBadgeS + 8.0f + nameW;
+      if (blockW > cW - 8.0f) blockW = cW - 8.0f;
+
+      float blockX = cMin.x + (cW - blockW) * 0.5f;
+
+      // Badge
+      float bx = blockX;
+      float by = badgeY + (blockH - kBadgeS) * 0.5f;
+      if (badge) {
+        wdl->AddImage((ImTextureID)(intptr_t)badge,
+                      ImVec2(bx, by), ImVec2(bx + kBadgeS, by + kBadgeS));
+      } else {
+        wdl->AddCircleFilled(ImVec2(bx + kBadgeS*0.5f, by + kBadgeS*0.5f),
+                             kBadgeS * 0.47f, IM_COL32(40,55,95,200));
+        wdl->AddCircle(ImVec2(bx + kBadgeS*0.5f, by + kBadgeS*0.5f),
+                       kBadgeS * 0.47f, IM_COL32(60,80,130,180), 20, 1.0f);
+      }
+
+      // Name (right of badge, vertically centred to block)
+      float nx  = blockX + kBadgeS + 8.0f;
+      float ny1 = twoLine ? badgeY + (blockH - nameBlockH)*0.5f
+                          : badgeY + (blockH - smLineH)*0.5f;
+      wdl->AddText(ImVec2(nx, ny1), IM_COL32(220,230,255,230), nameLine1.c_str());
+      if (twoLine)
+        wdl->AddText(ImVec2(nx, ny1 + smLineH + 2.0f),
+                     IM_COL32(175,190,225,185), nameLine2.c_str());
+      PopMgrFont(g_ManagerFontSmall);
+
+      // Score or "vs" centred on row
+      float scorY = badgeY + blockH + 6.0f;
+      if (scorY + bdLineH < cMax.y - 18.0f) {
+        PushMgrFont(g_ManagerFontBold);
+        const char *scoreTxt = played ? f.score.c_str() : "vs";
+        ImVec2 sts = ImGui::CalcTextSize(scoreTxt);
+        ImU32  stCol = played ? IM_COL32(255,220,60,240) : IM_COL32(90,110,155,190);
+        wdl->AddText(ImVec2(cMin.x + (cW - sts.x)*0.5f, scorY), stCol, scoreTxt);
+        PopMgrFont(g_ManagerFontBold);
+      }
+
+      // Competition name (bottom, centred, dimmed)
+      if (!f.league.empty()) {
+        PushMgrFont(g_ManagerFontSmall);
+        std::string compDisp = f.league;
+        float compMaxW = cW - 10.0f;
+        while (compDisp.size() > 3 &&
+               ImGui::CalcTextSize(compDisp.c_str()).x > compMaxW)
+          compDisp.pop_back();
+        ImVec2 cs = ImGui::CalcTextSize(compDisp.c_str());
+        float compY = cMax.y - smLineH - 5.0f;
+        wdl->AddText(ImVec2(cMin.x + (cW - cs.x)*0.5f, compY),
+                     IM_COL32(70,90,135,150), compDisp.c_str());
+        PopMgrFont(g_ManagerFontSmall);
+      }
+    }
+  }
+
+  // Reserve layout space for the grid
+  ImGui::SetCursorScreenPos(ImVec2(gridOrigin.x, gridOrigin.y));
+  ImGui::Dummy(ImVec2(usW, kDayHdrH + numWeeks * cellH));
+}
+
 // ---- DrawSchedulePage ---------------------------------------------------
 
+static int  s_schedCountry = -1;
+static int  s_schedLeague  = -1;
+static int  s_schedClub    = -1;
+static bool s_schedInit    = false;
+
 static void DrawSchedulePage(float w, float h) {
-  const float kPad = 16.0f;
+  EnsureFilterCache();
+
+  // Auto-select user's country + league on first visit (club stays "All clubs")
+  if (!s_schedInit && !s_filterLeagues.empty()) {
+    const std::string &myLeague = g_CareerHub.club.leagueName;
+    if (!myLeague.empty()) {
+      for (int i = 0; i < (int)s_filterLeagues.size(); i++) {
+        if (s_filterLeagues[i].name == myLeague) {
+          s_schedLeague = i;
+          int cid = s_filterLeagues[i].countryId;
+          for (int j = 0; j < (int)s_filterCountries.size(); j++) {
+            if (s_filterCountries[j].id == cid) { s_schedCountry = j; break; }
+          }
+          break;
+        }
+      }
+    }
+    s_schedInit = true;
+  }
+
+  const float kPad = 16.0f, kGap = 8.0f;
   ImGui::SetCursorPos(ImVec2(kPad, 8.0f));
   float usW = w - kPad * 2.0f;
   float usH = h - 20.0f;
   const std::string &sn = g_CareerHub.club.shortName;
 
+  // Determine active league name filter
+  std::string filterLeagueName;
+  if (s_schedLeague >= 0) filterLeagueName = s_filterLeagues[s_schedLeague].name;
+
+  // Collect unique full team names for club dropdown
+  std::vector<std::string> clubNames;
+  for (const auto &f : g_CareerHub.fixtures) {
+    if (!filterLeagueName.empty() && f.league != filterLeagueName) continue;
+    auto addIfNew = [&](const std::string &n) {
+      if (n.empty()) return;
+      for (const auto &c : clubNames) if (c == n) return;
+      clubNames.push_back(n);
+    };
+    addIfNew(f.homeFull.empty() ? f.home : f.homeFull);
+    addIfNew(f.awayFull.empty() ? f.away : f.awayFull);
+  }
+  if (s_schedClub >= (int)clubNames.size()) s_schedClub = -1;
+
+  std::string filterClubName;
+  if (s_schedClub >= 0 && s_schedClub < (int)clubNames.size())
+    filterClubName = clubNames[s_schedClub];
+
+  // ---- Filter bar (centred vertically) ------------------------------------
+  const float fbarH    = 52.0f;
+  const float kWinPadY = 12.0f;
+  BeginModernCard("##sched_fbar", ImVec2(usW, fbarH));
+  ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 8.0f);
+  // Measure combo height in the correct font/style to compute exact centre offset
+  PushMgrFont(g_ManagerFontSmall);
+  ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 4.0f));
+  {
+    float comboH  = ImGui::GetFrameHeight();
+    float innerH  = fbarH - kWinPadY * 2.0f;
+    float centreY = (innerH - comboH) * 0.5f;
+    if (centreY > 0.0f) ImGui::SetCursorPosY(ImGui::GetCursorPosY() + centreY);
+  }
+  ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 0.0f));
+
+  // Country
+  ImGui::SetNextItemWidth(130.0f);
+  {
+    std::string lbl = (s_schedCountry < 0) ? "Country"
+                                           : s_filterCountries[s_schedCountry].name;
+    if (ImGui::BeginCombo("##sch_country", lbl.c_str())) {
+      if (ImGui::Selectable("All countries", s_schedCountry < 0))
+        s_schedCountry = s_schedLeague = s_schedClub = -1;
+      for (int i = 0; i < (int)s_filterCountries.size(); i++) {
+        bool sel = (s_schedCountry == i);
+        if (ImGui::Selectable(s_filterCountries[i].name.c_str(), sel))
+          { s_schedCountry = i; s_schedLeague = s_schedClub = -1; }
+      }
+      ImGui::EndCombo();
+    }
+  }
+  ImGui::SameLine();
+
+  // League
+  ImGui::SetNextItemWidth(180.0f);
+  {
+    bool hasCountry = (s_schedCountry >= 0);
+    int  filterCid  = hasCountry ? s_filterCountries[s_schedCountry].id : -1;
+    std::string lbl = (s_schedLeague < 0) ? "League"
+                                          : s_filterLeagues[s_schedLeague].name;
+    if (ImGui::BeginCombo("##sch_league", lbl.c_str())) {
+      if (ImGui::Selectable("All leagues", s_schedLeague < 0))
+        s_schedLeague = s_schedClub = -1;
+      for (int i = 0; i < (int)s_filterLeagues.size(); i++) {
+        if (hasCountry && s_filterLeagues[i].countryId != filterCid) continue;
+        bool sel = (s_schedLeague == i);
+        if (ImGui::Selectable(s_filterLeagues[i].name.c_str(), sel))
+          { s_schedLeague = i; s_schedClub = -1; }
+      }
+      ImGui::EndCombo();
+    }
+  }
+  ImGui::SameLine();
+
+  // Club (only shown once a league is selected; always starts at "All clubs")
+  if (s_schedLeague >= 0) {
+    ImGui::SetNextItemWidth(170.0f);
+    std::string lbl = (s_schedClub < 0) ? "All clubs" : filterClubName;
+    if (ImGui::BeginCombo("##sch_club", lbl.c_str())) {
+      if (ImGui::Selectable("All clubs", s_schedClub < 0)) s_schedClub = -1;
+      for (int i = 0; i < (int)clubNames.size(); i++) {
+        bool sel = (s_schedClub == i);
+        if (ImGui::Selectable(clubNames[i].c_str(), sel)) s_schedClub = i;
+      }
+      ImGui::EndCombo();
+    }
+  }
+
+  ImGui::PopStyleVar(2);
+  PopMgrFont(g_ManagerFontSmall);
+  EndModernCard();
+
+  ImGui::Dummy(ImVec2(0, kGap));
+
+  // Collect leagues to render (filtered)
   std::vector<std::string> leagues;
   for (const auto &f : g_CareerHub.fixtures) {
+    if (!filterLeagueName.empty() && f.league != filterLeagueName) continue;
     bool found = false;
     for (const auto &l : leagues) if (l == f.league) { found = true; break; }
     if (!found) leagues.push_back(f.league);
   }
 
-  BeginModernCard("##sched_outer", ImVec2(usW, usH), "FIXTURES");
-  ImGui::BeginChild("##sc_scroll", ImVec2(0, usH - 58.0f), false);
+  float schedH = usH - fbarH - kGap - 4.0f;
+  if (schedH < 60.0f) schedH = 60.0f;
+  BeginModernCard("##sched_outer", ImVec2(usW, schedH));
+  ImGui::BeginChild("##sc_scroll", ImVec2(0, schedH - 38.0f), false);
 
   if (g_CareerHub.fixtures.empty()) {
     PushMgrFont(g_ManagerFontSmall);
@@ -1724,9 +2560,20 @@ static void DrawSchedulePage(float w, float h) {
     const std::string &lg = leagues.at(li);
     if (li > 0) ImGui::Dummy(ImVec2(0, 10.0f));
 
+    // Count visible rows in this league
     int cnt = 0;
-    for (const auto &f : g_CareerHub.fixtures) if (f.league == lg) cnt++;
-    float rH   = 30.0f;
+    for (const auto &f : g_CareerHub.fixtures) {
+      if (f.league != lg) continue;
+      if (!filterClubName.empty()) {
+        const std::string &hf = f.homeFull.empty() ? f.home : f.homeFull;
+        const std::string &af = f.awayFull.empty() ? f.away : f.awayFull;
+        if (hf != filterClubName && af != filterClubName) continue;
+      }
+      cnt++;
+    }
+    if (cnt == 0) continue;
+
+    float rH    = 30.0f;
     float cardH = 34.0f + (float)cnt * rH + 32.0f + 24.0f;
 
     ImVec2 cp0 = ImGui::GetCursorScreenPos();
@@ -1754,39 +2601,50 @@ static void DrawSchedulePage(float w, float h) {
     std::string tid = "##sct_" + lg;
     if (ImGui::BeginTable(tid.c_str(), 6,
                           ImGuiTableFlags_RowBg | ImGuiTableFlags_PadOuterX)) {
-      ImGui::TableSetupColumn("MD",     ImGuiTableColumnFlags_WidthFixed,  32.0f);
-      ImGui::TableSetupColumn("Rd",     ImGuiTableColumnFlags_WidthFixed,  26.0f);
-      ImGui::TableSetupColumn("Home",   ImGuiTableColumnFlags_WidthStretch);
-      ImGui::TableSetupColumn("Away",   ImGuiTableColumnFlags_WidthStretch);
-      ImGui::TableSetupColumn("Date",   ImGuiTableColumnFlags_WidthFixed,  60.0f);
-      ImGui::TableSetupColumn("Score",  ImGuiTableColumnFlags_WidthFixed,  52.0f);
+      ImGui::TableSetupColumn("MD",    ImGuiTableColumnFlags_WidthFixed,  32.0f);
+      ImGui::TableSetupColumn("Rd",    ImGuiTableColumnFlags_WidthFixed,  26.0f);
+      ImGui::TableSetupColumn("Home",  ImGuiTableColumnFlags_WidthStretch);
+      ImGui::TableSetupColumn("Away",  ImGuiTableColumnFlags_WidthStretch);
+      ImGui::TableSetupColumn("Date",  ImGuiTableColumnFlags_WidthFixed,  60.0f);
+      ImGui::TableSetupColumn("Score", ImGuiTableColumnFlags_WidthFixed,  52.0f);
       PushMgrFont(g_ManagerFontSmall);
       ImGui::TableHeadersRow();
+
       for (const auto &f : g_CareerHub.fixtures) {
         if (f.league != lg) continue;
+        const std::string &hf = f.homeFull.empty() ? f.home : f.homeFull;
+        const std::string &af = f.awayFull.empty() ? f.away : f.awayFull;
+        if (!filterClubName.empty() && hf != filterClubName && af != filterClubName)
+          continue;
         bool myGame = (f.home == sn || f.away == sn);
         ImGui::TableNextRow(0, rH);
         if (myGame)
           ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, IM_COL32(75,18,140,42));
+
         ImGui::TableSetColumnIndex(0);
         ImGui::PushStyleColor(ImGuiCol_Text, kTextDim);
         ImGui::TextUnformatted(f.matchday.c_str());
         ImGui::PopStyleColor();
+
         ImGui::TableSetColumnIndex(1);
         ImGui::PushStyleColor(ImGuiCol_Text, kTextDim);
         ImGui::TextUnformatted(f.round.c_str());
         ImGui::PopStyleColor();
+
         ImGui::TableSetColumnIndex(2);
-        DrawTeamLabel(f.homeLogo, f.home, 20.0f);
+        DrawTeamLabel(f.homeLogo, hf, 20.0f);
+
         ImGui::TableSetColumnIndex(3);
-        DrawTeamLabel(f.awayLogo, f.away, 20.0f);
+        DrawTeamLabel(f.awayLogo, af, 20.0f);
+
         ImGui::TableSetColumnIndex(4);
         {
-          ImU32 dateCol = (f.status == "played") ? C32(kTextDim) : C32(kTextSec);
-          ImGui::PushStyleColor(ImGuiCol_Text, dateCol);
+          ImU32 dc = (f.status == "played") ? C32(kTextDim) : C32(kTextSec);
+          ImGui::PushStyleColor(ImGuiCol_Text, dc);
           ImGui::TextUnformatted(FormatFixtureDate(f.fixtureDate).c_str());
           ImGui::PopStyleColor();
         }
+
         ImGui::TableSetColumnIndex(5);
         if (!f.score.empty()) {
           ImGui::PushStyleColor(ImGuiCol_Text, kSuccess);
@@ -1812,21 +2670,104 @@ static void DrawSchedulePage(float w, float h) {
 // ---- DrawCompetitionsPage -----------------------------------------------
 
 static void DrawCompetitionsPage(float w, float h) {
-  const float kPad = 16.0f;
+  EnsureFilterCache();
+
+  // Auto-select user's league on first visit (or after career load)
+  if (!s_compInit && !s_filterLeagues.empty()) {
+    const std::string &myLeague = g_CareerHub.club.leagueName;
+    if (!myLeague.empty()) {
+      for (int i = 0; i < (int)s_filterLeagues.size(); i++) {
+        if (s_filterLeagues[i].name == myLeague) {
+          s_compLeague = i;
+          // Also pre-select the matching country
+          int cid = s_filterLeagues[i].countryId;
+          for (int j = 0; j < (int)s_filterCountries.size(); j++) {
+            if (s_filterCountries[j].id == cid) { s_compCountry = j; break; }
+          }
+          break;
+        }
+      }
+    }
+    s_compInit = true;
+  }
+
+  const float kPad = 16.0f, kGap = 8.0f;
   ImGui::SetCursorPos(ImVec2(kPad, 8.0f));
   float usW = w - kPad * 2.0f;
   float usH = h - 20.0f;
   const std::string &sn = g_CareerHub.club.shortName;
 
+  // ---- Filter bar ----
+  const float fbarH = 52.0f;
+  const float kWinPadY = 12.0f;
+  BeginModernCard("##comp_fbar", ImVec2(usW, fbarH));
+  ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 8.0f);
+  PushMgrFont(g_ManagerFontSmall);
+  ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 4.0f));
+  float comboH  = ImGui::GetFrameHeight();
+  float innerH  = fbarH - kWinPadY * 2.0f;
+  float centreY = (innerH - comboH) * 0.5f;
+  ImGui::PopStyleVar();
+  PopMgrFont(g_ManagerFontSmall);
+  if (centreY > 0.0f) ImGui::SetCursorPosY(ImGui::GetCursorPosY() + centreY);
+  PushMgrFont(g_ManagerFontSmall);
+  ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 4.0f));
+  ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,  ImVec2(8.0f, 0.0f));
+  ImGui::SetNextItemWidth(140.0f);
+  {
+    std::string cLabel = (s_compCountry < 0) ? "Country" : s_filterCountries[s_compCountry].name;
+    if (ImGui::BeginCombo("##comp_country", cLabel.c_str())) {
+      if (ImGui::Selectable("All countries", s_compCountry < 0))
+        { s_compCountry = -1; s_compLeague = -1; }
+      for (int i = 0; i < (int)s_filterCountries.size(); i++) {
+        bool sel = (s_compCountry == i);
+        if (ImGui::Selectable(s_filterCountries[i].name.c_str(), sel))
+          { s_compCountry = i; s_compLeague = -1; }
+      }
+      ImGui::EndCombo();
+    }
+  }
+  ImGui::SameLine();
+  ImGui::SetNextItemWidth(200.0f);
+  {
+    bool hasCountry = (s_compCountry >= 0);
+    int  filterCid  = hasCountry ? s_filterCountries[s_compCountry].id : -1;
+    std::string lLabel = (s_compLeague < 0) ? "League" : s_filterLeagues[s_compLeague].name;
+    if (ImGui::BeginCombo("##comp_league", lLabel.c_str())) {
+      if (ImGui::Selectable("All leagues", s_compLeague < 0))
+        s_compLeague = -1;
+      for (int i = 0; i < (int)s_filterLeagues.size(); i++) {
+        if (hasCountry && s_filterLeagues[i].countryId != filterCid) continue;
+        bool sel = (s_compLeague == i);
+        if (ImGui::Selectable(s_filterLeagues[i].name.c_str(), sel))
+          s_compLeague = i;
+      }
+      ImGui::EndCombo();
+    }
+  }
+  ImGui::PopStyleVar(2);
+  PopMgrFont(g_ManagerFontSmall);
+  EndModernCard();
+
+  ImGui::Dummy(ImVec2(0, kGap));
+
+  // Determine which league names pass the filter
+  std::string filterLeagueName;
+  if (s_compLeague >= 0) filterLeagueName = s_filterLeagues[s_compLeague].name;
+
+  // Collect visible leagues from career standings
   std::vector<std::string> leagues;
   for (const auto &s : g_CareerHub.standings) {
+    if (!filterLeagueName.empty() && s.league != filterLeagueName) continue;
     bool found = false;
     for (const auto &l : leagues) if (l == s.league) { found = true; break; }
     if (!found) leagues.push_back(s.league);
   }
 
-  BeginModernCard("##comp_outer", ImVec2(usW, usH), "LEAGUE STANDINGS");
-  ImGui::BeginChild("##cp_scroll", ImVec2(0, usH - 58.0f), false);
+  float standH = usH - fbarH - kGap - 4.0f;
+  if (standH < 60.0f) standH = 60.0f;
+  BeginModernCard("##comp_outer", ImVec2(usW, standH));
+  ImGui::BeginChild("##cp_scroll", ImVec2(0, standH - 38.0f), false);
 
   if (g_CareerHub.standings.empty()) {
     PushMgrFont(g_ManagerFontSmall);
@@ -1889,9 +2830,8 @@ static void DrawCompetitionsPage(float w, float h) {
         if (s.league != lg) continue;
         bool mine = (s.team == sn);
         ImGui::TableNextRow(0, rH);
-        if (mine) {
+        if (mine)
           ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, IM_COL32(75,18,140,42));
-        }
         ImGui::TableSetColumnIndex(0);
         {
           ImVec2 ps = ImGui::GetCursorScreenPos();
@@ -1907,7 +2847,9 @@ static void DrawCompetitionsPage(float w, float h) {
           ImGui::Dummy(ImVec2(cr*2, rH - 12.0f));
         }
         ImGui::TableSetColumnIndex(1);
-        DrawTeamLabel(s.teamLogo, s.team, 18.0f);
+        // Use full name when available, fall back to shortname
+        const std::string &displayName = s.teamFull.empty() ? s.team : s.teamFull;
+        DrawTeamLabel(s.teamLogo, displayName, 18.0f);
         auto stat = [](const std::string &v) {
           ImGui::PushStyleColor(ImGuiCol_Text, kTextSec);
           ImGui::TextUnformatted(v.c_str());
@@ -1937,6 +2879,610 @@ static void DrawCompetitionsPage(float w, float h) {
 
   ImGui::EndChild();
   EndModernCard();
+}
+
+// ---- DrawTacticsPage ----------------------------------------------------
+
+// Formation node layout for 4-3-3.
+// Each entry: {fo, normalized x [0,1], normalized y [0,1] (0=GK end, 1=attack end)}
+struct TacNode { int fo; float nx; float ny; };
+static const TacNode kTacNodes[] = {
+  {0,  0.50f, 0.08f},                                           // GK
+  {1,  0.12f, 0.28f}, {2, 0.35f, 0.28f}, {3, 0.65f, 0.28f}, {4, 0.88f, 0.28f}, // DEF
+  {5,  0.22f, 0.52f}, {6, 0.50f, 0.52f}, {7, 0.78f, 0.52f},   // MID
+  {8,  0.16f, 0.78f}, {10, 0.50f, 0.78f}, {9, 0.84f, 0.78f},  // ATT
+};
+static const int kNumTacNodes = 11;
+
+// Face texture loaded once from media/textures/faces/player.png (relative to cwd)
+static GLuint s_FaceTex = 0;
+static bool   s_FaceTexTried = false;
+
+static GLuint GetFaceTex() {
+  if (s_FaceTexTried) return s_FaceTex;
+  s_FaceTexTried = true;
+  const char *path = "media/textures/faces/player.png";
+  SDL_Surface *surf = IMG_Load(path);
+  if (!surf) return 0;
+  SDL_Surface *rgba = SDL_ConvertSurfaceFormat(surf, SDL_PIXELFORMAT_RGBA32, 0);
+  SDL_FreeSurface(surf);
+  if (!rgba) return 0;
+  glGenTextures(1, &s_FaceTex);
+  glBindTexture(GL_TEXTURE_2D, s_FaceTex);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, rgba->w, rgba->h, 0,
+               GL_RGBA, GL_UNSIGNED_BYTE, rgba->pixels);
+  SDL_FreeSurface(rgba);
+  glBindTexture(GL_TEXTURE_2D, 0);
+  return s_FaceTex;
+}
+
+// POS badge color per position type
+static ImU32 PosBadgeColor(int fo) {
+  if (fo == 0)                     return IM_COL32(220, 120, 20,  220); // GK  orange
+  if (fo >= 1 && fo <= 4)          return IM_COL32(30,  110, 200, 220); // DEF blue
+  if (fo >= 5 && fo <= 7)          return IM_COL32(30,  160, 80,  220); // MID green
+  if (fo >= 8 && fo <= 10)         return IM_COL32(190, 40,  40,  220); // ATT red
+  return                                  IM_COL32(80,  80,  80,  220); // bench
+}
+
+// Reuses s_swapPlayerA/FoA/FoB from FlushSquadSwap()
+
+// Drag-drop payload: the player being dragged
+struct TacDragPayload { int playerId; int fo; };
+
+static void DrawTacPlayerRow(ImDrawList *wdl, float rowW, float rowH,
+                             int playerId, int curFo,
+                             const std::string &name, bool isSub,
+                             GLuint faceTex, bool altRow, const char *rowId,
+                             float baseStat = 0.0f, const std::string &role = "")
+{
+  ImVec2 rp = ImGui::GetCursorScreenPos();
+
+  if (altRow)
+    wdl->AddRectFilled(rp, ImVec2(rp.x + rowW, rp.y + rowH),
+                       IM_COL32(255,255,255,6));
+
+  // Invisible button covers the whole row (needed for drag source activation)
+  ImGui::InvisibleButton(rowId, ImVec2(rowW, rowH));
+  bool hovered = ImGui::IsItemHovered();
+
+  if (hovered)
+    wdl->AddRectFilled(rp, ImVec2(rp.x + rowW, rp.y + rowH),
+                       IM_COL32(255,255,255,12));
+
+  // ---- Drag source (real players only) ------------------------------------
+  if (playerId >= 0 &&
+      ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
+    TacDragPayload payload{playerId, curFo};
+    ImGui::SetDragDropPayload("TACTIC_PLAYER", &payload, sizeof(payload));
+
+    // Drag tooltip
+    PushMgrFont(g_ManagerFontSmall);
+    ImGui::PushStyleColor(ImGuiCol_Text, kTextSec);
+    ImGui::Text("%s  ", PosLabel(curFo));
+    ImGui::PopStyleColor();
+    ImGui::SameLine(0.0f, 4.0f);
+    ImGui::PushStyleColor(ImGuiCol_Text, kTextPri);
+    ImGui::TextUnformatted(name.c_str());
+    ImGui::PopStyleColor();
+    PopMgrFont(g_ManagerFontSmall);
+
+    ImGui::EndDragDropSource();
+  }
+
+  // ---- Drop target (every row — including empty slots) -------------------
+  if (ImGui::BeginDragDropTarget()) {
+    // Highlight the drop zone
+    ImVec2 tl = ImGui::GetItemRectMin();
+    ImVec2 br = ImGui::GetItemRectMax();
+    wdl->AddRect(tl, br, C32(kAccent), 4.0f, 0, 2.0f);
+
+    if (const ImGuiPayload *payload =
+            ImGui::AcceptDragDropPayload("TACTIC_PLAYER")) {
+      auto *src = static_cast<const TacDragPayload*>(payload->Data);
+      if (src->fo != curFo) {          // don't drop onto itself
+        s_swapPlayerA = src->playerId;
+        s_swapFoA     = src->fo;
+        s_swapFoB     = curFo;
+      }
+    }
+    ImGui::EndDragDropTarget();
+  }
+
+  // ---- Visuals (drawn after interaction so they render on top) -----------
+  float faceS = rowH - 6.0f;
+  float faceX = rp.x + 6.0f;
+  float faceY = rp.y + 3.0f;
+
+  if (faceTex && playerId >= 0) {
+    wdl->AddRectFilled(ImVec2(faceX, faceY),
+                       ImVec2(faceX + faceS, faceY + faceS),
+                       IM_COL32(30, 40, 65, 255), 4.0f);
+    wdl->AddImage((ImTextureID)(intptr_t)faceTex,
+                  ImVec2(faceX, faceY),
+                  ImVec2(faceX + faceS, faceY + faceS));
+    float cr = faceS * 0.5f;
+    wdl->AddCircle(ImVec2(faceX + cr, faceY + cr), cr,
+                   IM_COL32(255,255,255,30), 32, 1.0f);
+  } else {
+    float cr = faceS * 0.5f;
+    wdl->AddCircleFilled(ImVec2(faceX + cr, faceY + cr), cr,
+                         IM_COL32(40, 50, 75, playerId >= 0 ? 200 : 80));
+    wdl->AddCircle(ImVec2(faceX + cr, faceY + cr), cr,
+                   IM_COL32(255,255,255,25), 32, 1.0f);
+  }
+
+  float badgeX = faceX + faceS + 6.0f;
+  float badgeY = rp.y + (rowH - 16.0f) * 0.5f;
+  float badgeW = 32.0f;
+  wdl->AddRectFilled(ImVec2(badgeX, badgeY),
+                     ImVec2(badgeX + badgeW, badgeY + 16.0f),
+                     PosBadgeColor(curFo), 3.0f);
+  {
+    const char *lbl = isSub ? "SUB" : PosLabel(curFo);
+    ImVec2 ts = ImGui::CalcTextSize(lbl);
+    wdl->AddText(ImVec2(badgeX + (badgeW - ts.x) * 0.5f,
+                        badgeY + (16.0f - ts.y) * 0.5f),
+                 IM_COL32(255,255,255,230), lbl);
+  }
+
+  float nameX = badgeX + badgeW + 7.0f;
+  float lineH = ImGui::GetTextLineHeight();
+  bool hasSecondLine = (playerId >= 0 && (!role.empty() || baseStat > 0.0f));
+  // Name: vertically centered if single line, offset up if two lines
+  float nameY = hasSecondLine ? rp.y + rowH * 0.5f - lineH - 1.0f
+                              : rp.y + (rowH - lineH) * 0.5f;
+  ImU32 nameCol = (playerId < 0) ? IM_COL32(100,105,120,160) : IM_COL32(220,230,248,230);
+  wdl->AddText(ImVec2(nameX, nameY), nameCol, name.c_str());
+
+  // Second line: role text + small ability bar
+  if (hasSecondLine) {
+    float line2Y = rp.y + rowH * 0.5f + 1.0f;
+    float curX   = nameX;
+
+    // Role text (truncated to ~10 chars)
+    if (!role.empty()) {
+      std::string roleDisp = role;
+      if (roleDisp.size() > 12) roleDisp = roleDisp.substr(0, 11) + ".";
+      wdl->AddText(ImVec2(curX, line2Y), IM_COL32(140,155,180,180), roleDisp.c_str());
+      ImVec2 rs = ImGui::CalcTextSize(roleDisp.c_str());
+      curX += rs.x + 6.0f;
+    }
+
+    // Ability stars (5 small pills, matches Squad table style)
+    if (baseStat > 0.0f && curX + 44.0f < rp.x + rowW - 20.0f) {
+      float stars = baseStat * 5.0f;
+      if (stars > 5.f) stars = 5.f;
+      const float kW = 7.f, kH = 5.f, kGp = 1.5f;
+      float sy = line2Y + (lineH - kH) * 0.5f;
+      ImU32 emptyCol = IM_COL32(30, 44, 72, 200);
+      ImU32 fillCol  = C32(kGold);
+      for (int si = 0; si < 5; si++) {
+        float x0   = curX + (float)si * (kW + kGp);
+        float fill = std::max(0.f, std::min(1.f, stars - (float)si));
+        wdl->AddRectFilled(ImVec2(x0, sy), ImVec2(x0+kW, sy+kH), emptyCol, 1.5f);
+        if (fill > 0.02f)
+          wdl->AddRectFilled(ImVec2(x0, sy), ImVec2(x0+kW*fill, sy+kH), fillCol, 1.5f);
+      }
+    }
+  }
+
+  // Drag handle icon on right edge (real players only)
+  if (playerId >= 0) {
+    float iconX  = rp.x + rowW - 13.0f;
+    float iconCY = rp.y + rowH * 0.5f;
+    ImU32 ic = hovered ? IM_COL32(190,210,255,180) : IM_COL32(80,110,160,80);
+    for (int li = -1; li <= 1; li++) {
+      float ly = iconCY + li * 4.0f;
+      wdl->AddLine(ImVec2(iconX - 5.0f, ly), ImVec2(iconX + 5.0f, ly), ic, 1.5f);
+    }
+  }
+}
+
+static void DrawTacticsPage(float w, float h) {
+  FlushSquadSwap();
+
+  GLuint faceTex = GetFaceTex();
+
+  const float kPad = 14.0f;
+  const float kGap = 10.0f;
+  ImGui::SetCursorPos(ImVec2(kPad, 6.0f));
+
+  float usW = w - kPad * 2.0f;
+  float usH = h - 12.0f;
+
+  float boardW = usW * 0.57f - kGap * 0.5f;
+  float listW  = usW * 0.43f - kGap * 0.5f;
+
+  // ===== Formation board ===================================================
+  ImGui::BeginGroup();
+
+  ImVec2 cardPos = ImGui::GetCursorScreenPos();
+  ImDrawList *dl = ImGui::GetWindowDrawList();
+
+  float pitchX = cardPos.x;
+  float pitchY = cardPos.y;
+  float pitchW = boardW;
+  float pitchH = usH;
+
+  // Pitch outer card shadow
+  dl->AddRectFilled(ImVec2(pitchX + 3, pitchY + 3),
+                    ImVec2(pitchX + pitchW + 3, pitchY + pitchH + 3),
+                    IM_COL32(0,0,0,60), 12.0f);
+
+  // Pitch base — two-tone vertical stripes
+  {
+    int ns = 10;
+    float sw = pitchW / ns;
+    for (int i = 0; i < ns; i++) {
+      ImU32 col = (i % 2 == 0) ? IM_COL32(20, 90, 38, 255)
+                                : IM_COL32(24, 102, 44, 255);
+      dl->AddRectFilled(ImVec2(pitchX + i * sw, pitchY),
+                        ImVec2(pitchX + (i+1) * sw, pitchY + pitchH), col);
+    }
+    // round corners by overdrawing with transparent rects at corners
+    dl->AddRectFilled(ImVec2(pitchX, pitchY),
+                      ImVec2(pitchX + pitchW, pitchY + pitchH),
+                      IM_COL32(0,0,0,0), 12.0f);
+  }
+
+  // Clip to rounded rect so stripes don't overflow
+  dl->PushClipRect(ImVec2(pitchX, pitchY),
+                   ImVec2(pitchX + pitchW, pitchY + pitchH), true);
+
+  // Re-draw stripes inside clip
+  {
+    int ns = 10;
+    float sw = pitchW / ns;
+    for (int i = 0; i < ns; i++) {
+      ImU32 col = (i % 2 == 0) ? IM_COL32(20, 90, 38, 255)
+                                : IM_COL32(24, 102, 44, 255);
+      dl->AddRectFilled(ImVec2(pitchX + i * sw, pitchY),
+                        ImVec2(pitchX + (i+1) * sw, pitchY + pitchH), col);
+    }
+  }
+
+  // Pitch markings
+  ImU32 lc = IM_COL32(255, 255, 255, 60);
+  float ml  = pitchX + pitchW * 0.07f;
+  float mr  = pitchX + pitchW * 0.93f;
+  float mt  = pitchY + pitchH * 0.05f;
+  float mb  = pitchY + pitchH * 0.95f;
+  float midY = pitchY + pitchH * 0.5f;
+
+  dl->AddRect(ImVec2(ml, mt), ImVec2(mr, mb), lc, 0.0f, 0, 1.5f);
+  dl->AddLine(ImVec2(ml, midY), ImVec2(mr, midY), lc, 1.5f);
+  dl->AddCircle(ImVec2(pitchX + pitchW * 0.5f, midY), pitchH * 0.095f, lc, 48, 1.5f);
+  dl->AddCircleFilled(ImVec2(pitchX + pitchW * 0.5f, midY), 3.0f, lc);
+
+  // Top penalty area
+  { float bw=pitchW*0.48f, bh=pitchH*0.13f, bx=pitchX+(pitchW-bw)*0.5f;
+    dl->AddRect(ImVec2(bx, mb-bh), ImVec2(bx+bw, mb), lc, 0.0f, 0, 1.5f);
+    float gw=pitchW*0.22f, gh=pitchH*0.055f, gx=pitchX+(pitchW-gw)*0.5f;
+    dl->AddRect(ImVec2(gx, mb-gh), ImVec2(gx+gw, mb), lc, 0.0f, 0, 1.5f); }
+  // Bottom penalty area
+  { float bw=pitchW*0.48f, bh=pitchH*0.13f, bx=pitchX+(pitchW-bw)*0.5f;
+    dl->AddRect(ImVec2(bx, mt), ImVec2(bx+bw, mt+bh), lc, 0.0f, 0, 1.5f);
+    float gw=pitchW*0.22f, gh=pitchH*0.055f, gx=pitchX+(pitchW-gw)*0.5f;
+    dl->AddRect(ImVec2(gx, mt), ImVec2(gx+gw, mt+gh), lc, 0.0f, 0, 1.5f); }
+
+  // Build node data — include all fields needed for display and tooltip
+  struct NodeInfo {
+    std::string name;
+    bool    filled    = false;
+    float   baseStat  = 0.0f;
+    int     potential = 0;
+    int     stamina   = 0;
+    std::string foot;
+  };
+  NodeInfo nodes[kNumTacNodes];
+  for (const auto &p : g_CareerHub.players) {
+    for (int ni = 0; ni < kNumTacNodes; ni++) {
+      if (kTacNodes[ni].fo == p.formationOrder) {
+        std::string ln = p.lastName.empty() ? p.firstName : p.lastName;
+        if (ln.size() > 9) ln = ln.substr(0, 8) + ".";
+        nodes[ni].name      = ln;
+        nodes[ni].filled    = true;
+        nodes[ni].baseStat  = p.baseStat;
+        nodes[ni].potential = p.potential;
+        nodes[ni].stamina   = p.stamina;
+        nodes[ni].foot      = p.foot;
+        break;
+      }
+    }
+  }
+
+  // Node card dimensions
+  const float kHdrH = 18.0f;
+  float cardW = pitchW * 0.175f;
+  if (cardW > 80.0f) cardW = 80.0f;
+  if (cardW < 58.0f) cardW = 58.0f;
+  float faceS = cardW - 8.0f;
+  float cardH = kHdrH + faceS + 22.0f; // extra bottom margin so name doesn't overflow
+
+  // Flip animation state — 0=front(face), 1=back(stats). Persists across frames.
+  static float s_cardFlipT[kNumTacNodes] = {};
+  const  float kFlipSpd = 4.0f;
+
+  for (int ni = 0; ni < kNumTacNodes; ni++) {
+    const TacNode &tn = kTacNodes[ni];
+    float cx  = pitchX + tn.nx * pitchW;
+    float cy  = pitchY + (1.0f - tn.ny) * pitchH;
+    float cx0 = cx - cardW * 0.5f;
+    float cy0 = cy - cardH * 0.5f;
+
+    bool  has       = nodes[ni].filled;
+    ImU32 posCol    = PosBadgeColor(tn.fo);
+    ImU32 cardBg    = has ? IM_COL32(16, 24, 52, 230) : IM_COL32(18, 20, 30, 160);
+    ImU32 borderCol = has ? IM_COL32(80, 120, 200, 140) : IM_COL32(55, 60, 80, 100);
+
+    // Hover → drive flip
+    bool hovered = has && !ImGui::IsMouseDragging(ImGuiMouseButton_Left) &&
+                   ImGui::IsMouseHoveringRect(ImVec2(cx0, cy0),
+                                              ImVec2(cx0+cardW, cy0+cardH), false);
+    float &ft = s_cardFlipT[ni];
+    if (hovered) ft = fminf(ft + ImGui::GetIO().DeltaTime * kFlipSpd, 1.0f);
+    else         ft = fmaxf(ft - ImGui::GetIO().DeltaTime * kFlipSpd, 0.0f);
+
+    // X-scale: cosine over [0,π] gives 1→-1; absScX goes 1→0→1
+    float cosV   = cosf(ft * 3.14159f);
+    float absScX = fabsf(cosV);
+    bool  showBack = (ft >= 0.5f);
+
+    // Scaled left/right edges (symmetric around cx)
+    float lx = cx - cardW * 0.5f * absScX;
+    float rx = cx + cardW * 0.5f * absScX;
+
+    // Card background — single rounded rect, no double-background
+    dl->AddRectFilled(ImVec2(lx, cy0), ImVec2(rx, cy0+cardH),
+                      cardBg, 6.0f * absScX);
+
+    // Header — RoundCornersTop so bottom edge is flush with card body
+    dl->AddRectFilled(ImVec2(lx, cy0), ImVec2(rx, cy0+kHdrH),
+                      posCol, 6.0f * absScX, ImDrawFlags_RoundCornersTop);
+
+    // POS label in header
+    if (absScX > 0.18f) {
+      const char *lbl = PosLabel(tn.fo);
+      ImVec2 ts = ImGui::CalcTextSize(lbl);
+      dl->AddText(ImVec2(cx - ts.x * 0.5f, cy0 + (kHdrH - ts.y) * 0.5f),
+                  IM_COL32(255,255,255,240), lbl);
+    }
+
+    // Card border
+    dl->AddRect(ImVec2(lx, cy0), ImVec2(rx, cy0+cardH),
+                borderCol, 6.0f * absScX, 0, 1.5f);
+
+    if (absScX > 0.05f) {
+      if (!showBack) {
+        // ── FRONT: face image + player name ──────────────────────────────
+        float fw = faceS * absScX;
+        float fx = cx - fw * 0.5f;
+        float fy = cy0 + kHdrH + 1.0f;
+        if (faceTex && has) {
+          dl->AddRectFilled(ImVec2(fx, fy), ImVec2(fx+fw, fy+faceS),
+                            IM_COL32(30,40,65,255), 3.0f * absScX);
+          dl->AddImage((ImTextureID)(intptr_t)faceTex,
+                       ImVec2(fx, fy), ImVec2(fx+fw, fy+faceS));
+        } else {
+          dl->AddRectFilled(ImVec2(fx, fy), ImVec2(fx+fw, fy+faceS),
+                            IM_COL32(28, 36, 58, has ? 190 : 80), 3.0f * absScX);
+          if (has && absScX > 0.3f) {
+            float cr = fw * 0.27f;
+            dl->AddCircleFilled(ImVec2(fx+fw*0.5f, fy+faceS*0.36f), cr,
+                                IM_COL32(55,65,95,210));
+            dl->AddRectFilled(ImVec2(fx+fw*0.14f, fy+faceS*0.65f),
+                              ImVec2(fx+fw*0.86f, fy+faceS),
+                              IM_COL32(55,65,95,210), 3.0f);
+          }
+        }
+        // Player name — with bottom margin (5px from face bottom to text top)
+        if (absScX > 0.28f) {
+          const char *nameLbl = has ? nodes[ni].name.c_str() : "TBD";
+          ImVec2 ns2 = ImGui::CalcTextSize(nameLbl);
+          float  ny2 = cy0 + kHdrH + faceS + 5.0f;
+          ImU32  nc  = has ? IM_COL32(220,235,255,220) : IM_COL32(90,95,115,150);
+          dl->AddText(ImVec2(cx - ns2.x * 0.5f, ny2), nc, nameLbl);
+        }
+      } else {
+        // ── BACK: ability stars + potential stars + foot ──────────────────
+        // Content uses fixed full-width coords; fade alpha hides the sliding artefact
+        float backAlpha = (absScX - 0.35f) / 0.65f;
+        if (backAlpha < 0.f) backAlpha = 0.f;
+        if (backAlpha > 1.f) backAlpha = 1.f;
+
+        if (backAlpha > 0.01f) {
+          // Fixed position — never slides as card expands
+          float bx = cx0 + 4.0f;
+          float by = cy0 + kHdrH + 5.0f;
+
+          // Star renderer: 5 small pill segments, drawn directly to dl
+          auto DrawStarsDL = [&](float sx, float sy,
+                                 float value, float maxVal, ImU32 filledCol) {
+            float stars = (maxVal > 0.f) ? (value / maxVal) * 5.f : 0.f;
+            if (stars < 0.f) stars = 0.f;
+            if (stars > 5.f) stars = 5.f;
+            const float kW = 8.f, kH = 6.f, kGp = 2.f;
+            ImU32 emptyA = IM_COL32(30, 44, 72, (int)(160.f * backAlpha));
+            int   origA  = (int)((filledCol >> 24) & 0xFF);
+            ImU32 fillA  = (filledCol & 0x00FFFFFF) |
+                           ((ImU32)((int)((float)origA * backAlpha)) << 24);
+            for (int si2 = 0; si2 < 5; si2++) {
+              float x0  = sx + (float)si2 * (kW + kGp);
+              float fill = std::max(0.f, std::min(1.f, stars - (float)si2));
+              dl->AddRectFilled(ImVec2(x0, sy), ImVec2(x0+kW, sy+kH), emptyA, 2.f);
+              if (fill > 0.02f)
+                dl->AddRectFilled(ImVec2(x0, sy),
+                                  ImVec2(x0+kW*fill, sy+kH), fillA, 2.f);
+            }
+          };
+
+          PushMgrFont(g_ManagerFontSmall);
+          float lineH = ImGui::CalcTextSize("X").y;
+          const float kStarH = 6.f;
+          ImU32 lblCol = IM_COL32(180,190,220, (int)(200.f * backAlpha));
+
+          // Ability label + stars
+          dl->AddText(ImVec2(bx, by), lblCol, "Ability");
+          by += lineH + 2.f;
+          DrawStarsDL(bx, by + (kStarH == 0 ? 0 : 0), nodes[ni].baseStat, 1.0f, C32(kGold));
+          by += kStarH + 7.f;
+
+          // Potential label + stars
+          dl->AddText(ImVec2(bx, by), lblCol, "Potential");
+          by += lineH + 2.f;
+          DrawStarsDL(bx, by, (float)nodes[ni].potential, 200.0f,
+                      IM_COL32(100,160,220,220));
+          by += kStarH + 8.f;
+
+          // Foot
+          bool isLeft  = (!nodes[ni].foot.empty() &&
+                          (nodes[ni].foot[0]=='L' || nodes[ni].foot[0]=='l'));
+          bool isRight = (!nodes[ni].foot.empty() &&
+                          (nodes[ni].foot[0]=='R' || nodes[ni].foot[0]=='r'));
+          const char *footStr = isLeft  ? "Left Footed"
+                              : isRight ? "Right Footed" : "-";
+          int fBaseA = isLeft ? 230 : isRight ? 230 : 180;
+          ImU32 footCol = isLeft
+            ? IM_COL32(100,170,255, (int)(fBaseA * backAlpha))
+            : isRight
+            ? IM_COL32(100,220,130, (int)(fBaseA * backAlpha))
+            : IM_COL32(120,120,140, (int)(fBaseA * backAlpha));
+          dl->AddText(ImVec2(bx, by), footCol, footStr);
+
+          PopMgrFont(g_ManagerFontSmall);
+        }
+      }
+    }
+
+    // Stamina bar — below the card, always full width
+    if (has) {
+      float stVal = (float)nodes[ni].stamina;
+      if (stVal < 0.0f) stVal = 0.0f;
+      if (stVal > 100.0f) stVal = 100.0f;
+      float ratio = stVal / 100.0f;
+      ImU32 stCol = (stVal >= 70.0f) ? IM_COL32(60, 200, 80, 220)
+                  : (stVal >= 40.0f) ? IM_COL32(220, 180, 40, 220)
+                                     : IM_COL32(210, 60, 60, 220);
+      float by = cy0 + cardH + 4.0f;
+      dl->AddRectFilled(ImVec2(cx0, by), ImVec2(cx0+cardW, by+5.0f),
+                        IM_COL32(0,0,0,100), 2.0f);
+      if (ratio > 0.0f)
+        dl->AddRectFilled(ImVec2(cx0, by), ImVec2(cx0+cardW*ratio, by+5.0f),
+                          stCol, 2.0f);
+    }
+  }
+
+  dl->PopClipRect();
+
+  // Pitch border on top
+  dl->AddRect(ImVec2(pitchX, pitchY),
+              ImVec2(pitchX + pitchW, pitchY + pitchH),
+              IM_COL32(255, 255, 255, 30), 12.0f, 0, 1.5f);
+
+  ImGui::Dummy(ImVec2(boardW, usH));
+
+  ImGui::SetCursorScreenPos(ImVec2(pitchX, pitchY + pitchH));
+  ImGui::EndGroup();
+
+  // ===== Player list =======================================================
+  ImGui::SameLine(0.0f, kGap);
+  ImGui::BeginGroup();
+
+  // Collect and sort XI
+  std::vector<const CareerHubState::Player*> xi, subs;
+  for (const auto &p : g_CareerHub.players) {
+    if (p.formationOrder >= 0 && p.formationOrder <= 10)       xi.push_back(&p);
+    else if (p.formationOrder >= 11 && p.formationOrder <= 19) subs.push_back(&p);
+  }
+  std::sort(xi.begin(), xi.end(),
+    [](const CareerHubState::Player *a, const CareerHubState::Player *b){
+      return a->formationOrder < b->formationOrder; });
+  std::sort(subs.begin(), subs.end(),
+    [](const CareerHubState::Player *a, const CareerHubState::Player *b){
+      return a->formationOrder < b->formationOrder; });
+
+  // Player list card
+  BeginModernCard("##taclist", ImVec2(listW, usH));
+  ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0,0,0,0));
+  ImGui::BeginChild("##tacscroll", ImVec2(listW - 14.0f, usH - 14.0f), false);
+
+  float rowW  = listW - 14.0f;
+  float rowH  = 48.0f;
+  float innerW = rowW - 2.0f;
+
+  ImDrawList *wdl = ImGui::GetWindowDrawList();
+
+  // Section header helper
+  auto DrawSectionHeader = [&](const char *label, int count) {
+    ImVec2 hp = ImGui::GetCursorScreenPos();
+    wdl->AddRectFilled(hp, ImVec2(hp.x + innerW, hp.y + 22.0f),
+                       IM_COL32(12, 20, 45, 200));
+    wdl->AddRectFilled(hp, ImVec2(hp.x + 3.0f, hp.y + 22.0f),
+                       C32(kAccent));
+    PushMgrFont(g_ManagerFontSmall);
+    ImGui::PushStyleColor(ImGuiCol_Text, kTextSec);
+    char buf[64]; snprintf(buf, sizeof(buf), "  %s  (%d)", label, count);
+    ImGui::TextUnformatted(buf);
+    ImGui::PopStyleColor();
+    PopMgrFont(g_ManagerFontSmall);
+  };
+
+  // ---- Starting XI ----
+  DrawSectionHeader("Starting XI", (int)xi.size());
+
+  bool slotFilled[11] = {};
+  for (const auto *p : xi) slotFilled[p->formationOrder] = true;
+
+  bool alt = false;
+  for (const auto *p : xi) {
+    alt = !alt;
+    std::string dispName = p->firstName.empty() ? p->lastName :
+                           (p->lastName.empty() ? p->firstName :
+                            p->firstName.substr(0,1) + ". " + p->lastName);
+    char popId[32]; snprintf(popId, sizeof(popId), "##tlrow_%d", p->id);
+    DrawTacPlayerRow(wdl, innerW, rowH, p->id, p->formationOrder,
+                     dispName, false, faceTex, alt, popId, p->baseStat, p->role);
+  }
+  // Empty XI slots
+  for (int fo = 0; fo <= 10; fo++) {
+    if (slotFilled[fo]) continue;
+    alt = !alt;
+    char dId[32]; snprintf(dId, sizeof(dId), "##tlempty_%d", fo);
+    DrawTacPlayerRow(wdl, innerW, rowH, -1, fo, "TBD", false, 0, alt, dId);
+  }
+
+  ImGui::Spacing();
+
+  // ---- Substitutes ----
+  DrawSectionHeader("Substitutes", (int)subs.size());
+
+  alt = false;
+  for (const auto *p : subs) {
+    alt = !alt;
+    std::string dispName = p->firstName.empty() ? p->lastName :
+                           (p->lastName.empty() ? p->firstName :
+                            p->firstName.substr(0,1) + ". " + p->lastName);
+    char popId[32]; snprintf(popId, sizeof(popId), "##tlsub_%d", p->id);
+    DrawTacPlayerRow(wdl, innerW, rowH, p->id, p->formationOrder,
+                     dispName, true, faceTex, alt, popId, p->baseStat, p->role);
+  }
+  if (subs.empty()) {
+    ImVec2 ep = ImGui::GetCursorScreenPos();
+    wdl->AddText(ImVec2(ep.x + 8.0f, ep.y + 6.0f),
+                 C32(kTextDim), "No substitutes assigned");
+    ImGui::Dummy(ImVec2(innerW, 22.0f));
+  }
+
+  ImGui::EndChild();
+  ImGui::PopStyleColor();
+  EndModernCard();
+
+  ImGui::EndGroup();
 }
 
 // ---- DrawComingSoonPage -------------------------------------------------
@@ -1975,9 +3521,17 @@ static void DrawWorkspace(float contentW, float workH) {
   ImGui::PopStyleVar();
   ImGui::PopStyleColor();
 
+  // Reset calendar init state whenever the user navigates away from it
+  static e_ManagerPage s_prevPage = PAGE_HOME;
+  if (s_prevPage != g_activePage && s_prevPage == PAGE_CALENDAR)
+    s_calInit = false;
+  s_prevPage = g_activePage;
+
   switch (g_activePage) {
     case PAGE_HOME:         DrawHomePage(contentW, workH);         break;
     case PAGE_SQUAD:        DrawSquadPage(contentW, workH);        break;
+    case PAGE_TACTICS:      DrawTacticsPage(contentW, workH);      break;
+    case PAGE_CALENDAR:     DrawCalendarPage(contentW, workH);     break;
     case PAGE_SCHEDULE:     DrawSchedulePage(contentW, workH);     break;
     case PAGE_COMPETITIONS: DrawCompetitionsPage(contentW, workH); break;
     default:
