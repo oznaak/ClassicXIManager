@@ -101,11 +101,19 @@ void Referee::Process() {
           buffer.teamID = 0;
         }
 
+        bool allowExtraTime = GetConfiguration()->GetReal("match_allow_extra_time", 0.0f) > 0.5f;
         e_MatchPhase nextPhase;
-        if (match->GetMatchPhase() == e_MatchPhase_1stHalf) nextPhase = e_MatchPhase_2ndHalf;
-        if (match->GetMatchPhase() == e_MatchPhase_2ndHalf) nextPhase = e_MatchPhase_1stExtraTime;
-        if (match->GetMatchPhase() == e_MatchPhase_1stExtraTime) nextPhase = e_MatchPhase_2ndExtraTime;
-        if (match->GetMatchPhase() == e_MatchPhase_2ndExtraTime) nextPhase = e_MatchPhase_Penalties;
+        if (match->GetMatchPhase() == e_MatchPhase_1stHalf) {
+          nextPhase = e_MatchPhase_2ndHalf;
+        } else if (match->GetMatchPhase() == e_MatchPhase_2ndHalf) {
+          // For league fixtures, end at 90 min regardless of score (draws allowed).
+          // For knockout fixtures, go to extra time.
+          nextPhase = allowExtraTime ? e_MatchPhase_1stExtraTime : e_MatchPhase_Penalties;
+        } else if (match->GetMatchPhase() == e_MatchPhase_1stExtraTime) {
+          nextPhase = e_MatchPhase_2ndExtraTime;
+        } else {
+          nextPhase = e_MatchPhase_Penalties;
+        }
         match->SetMatchPhase(nextPhase);
       }
     }

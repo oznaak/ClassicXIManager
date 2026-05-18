@@ -42,6 +42,7 @@ struct CareerHubState {
     std::string homeShort;
     std::string awayShort;
     std::string fixtureDate;
+    std::string type; // "league" or "ko"
   };
   bool         hasTodayFixture  = false;
   TodayFixture todayFixture;

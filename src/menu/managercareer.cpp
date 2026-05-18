@@ -51,6 +51,7 @@ static void EnsureCareerTables() {
     "home_team_id INTEGER NOT NULL,"
     "away_team_id INTEGER NOT NULL,"
     "fixture_date TEXT,"
+    "type VARCHAR(16) DEFAULT 'league',"
     "status VARCHAR(32) DEFAULT 'scheduled',"
     "home_score INTEGER,"
     "away_score INTEGER,"
@@ -145,14 +146,20 @@ static void EnsureCareerTables() {
   }
   {
     DatabaseResult *info = GetDB()->Query("PRAGMA table_info(fixtures);");
-    bool hasFixtureDate = false;
+    bool hasFixtureDate = false, hasType = false;
     for (unsigned int i = 0; i < info->data.size(); i++) {
-      if (info->data.at(i).size() > 1 && info->data.at(i).at(1) == "fixture_date")
-        hasFixtureDate = true;
+      if (info->data.at(i).size() > 1) {
+        if (info->data.at(i).at(1) == "fixture_date") hasFixtureDate = true;
+        if (info->data.at(i).at(1) == "type")         hasType        = true;
+      }
     }
     delete info;
     if (!hasFixtureDate) {
       DatabaseResult *a = GetDB()->Query("ALTER TABLE fixtures ADD COLUMN fixture_date TEXT;");
+      delete a;
+    }
+    if (!hasType) {
+      DatabaseResult *a = GetDB()->Query("ALTER TABLE fixtures ADD COLUMN type VARCHAR(16) DEFAULT 'league';");
       delete a;
     }
   }
@@ -252,19 +259,21 @@ static std::vector<int> GetLeagueTeamIds(int leagueId) {
 static void InsertFixture(int managerId, int leagueId, int seasonYear,
                           int round, int matchday,
                           int homeTeamId, int awayTeamId,
-                          const std::string &fixtureDate) {
+                          const std::string &fixtureDate,
+                          const std::string &type = "league") {
   std::stringstream q;
   q << "INSERT INTO fixtures"
-    << "(manager_id,league_id,season_year,round,matchday,home_team_id,away_team_id,fixture_date)"
+    << "(manager_id,league_id,season_year,round,matchday,home_team_id,away_team_id,fixture_date,type)"
     << " VALUES("
     << managerId << "," << leagueId << "," << seasonYear << ","
     << round << "," << matchday << "," << homeTeamId << "," << awayTeamId << ","
-    << "'" << fixtureDate << "'"
+    << "'" << fixtureDate << "',"
+    << "'" << type << "'"
     << ");";
   DatabaseResult *r = GetDB()->Query(q.str());
   delete r;
-  printf("[FIXTURES] manager=%d league=%d matchday=%d date=%s home=%d away=%d\n",
-         managerId, leagueId, matchday, fixtureDate.c_str(), homeTeamId, awayTeamId);
+  printf("[FIXTURES] manager=%d league=%d matchday=%d date=%s home=%d away=%d type=%s\n",
+         managerId, leagueId, matchday, fixtureDate.c_str(), homeTeamId, awayTeamId, type.c_str());
 }
 
 static void GenerateFixturesForLeague(int managerId, int leagueId,
@@ -896,10 +905,11 @@ void ManagerMainScreenPage::PlayMatch() {
   printf("[IMGUI MANAGER] Setting teams: %s vs %s\n", team1.c_str(), team2.c_str());
   GetMenuTask()->SetTeamIDs(team1, team2);
 
-  GetConfiguration()->Set("manager_mode",        1.0f);
-  GetConfiguration()->Set("manager_ai_difficulty", 1.0f);
-  GetConfiguration()->Set("match_difficulty",    1.0f);
-  GetConfiguration()->Set("match_duration",      0.0f); // shortest: 5-minute halves
+  GetConfiguration()->Set("manager_mode",           1.0f);
+  GetConfiguration()->Set("manager_ai_difficulty",  1.0f);
+  GetConfiguration()->Set("match_difficulty",       1.0f);
+  GetConfiguration()->Set("match_duration",         0.0f); // shortest: 5-minute halves
+  GetConfiguration()->Set("match_allow_extra_time", 0.0f); // test engine: no extra time
   printf("[MANAGER MODE] Match duration forced to shortest: match_duration=0.0 (5 min halves)\n");
 
   // Do NOT call CreatePage(LoadingMatch) here — this runs from the GL thread.
@@ -1261,7 +1271,12 @@ void ManagerMainScreenPage::PlayFixture() {
   GetConfiguration()->Set("manager_ai_difficulty", 1.0f);
   GetConfiguration()->Set("match_difficulty",      1.0f);
   GetConfiguration()->Set("match_duration",        0.0f); // shortest: 5-minute halves
+  // Allow extra time only for knockout fixtures; league games end at 90 min.
+  float allowExtraTime = (g_CareerHub.todayFixture.type == "ko") ? 1.0f : 0.0f;
+  GetConfiguration()->Set("match_allow_extra_time", allowExtraTime);
   printf("[MANAGER MODE] Match duration forced to shortest: match_duration=0.0 (5 min halves)\n");
+  printf("[CAREER MATCH] Fixture type=%s allow_extra_time=%.0f\n",
+         g_CareerHub.todayFixture.type.c_str(), allowExtraTime);
 
   // Cover the stadium immediately so there's no flash before PreMatchLineupPage renders.
   g_SilentMatchLoadingOverlayLogged = false;
