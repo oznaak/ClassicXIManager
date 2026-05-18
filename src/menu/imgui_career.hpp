@@ -125,6 +125,7 @@ struct PreMatchLineupState {
   bool hasBench = false;
 
   bool continueRequested = false;
+  int  matchSpeed = 1; // 1, 2, 4, or 8
 
   void Clear() { *this = PreMatchLineupState(); }
 };

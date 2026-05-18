@@ -16,6 +16,9 @@ GameOverPage::GameOverPage(Gui2WindowManager *windowManager, const Gui2PageData 
   match = GetGameTask()->GetMatch();
   match->Pause(true);
 
+  // Reset speed multiplier so the next match starts at normal speed.
+  GetConfiguration()->Set("match_speed_multiplier", 1.0f);
+
   int homeScore = match->GetMatchData()->GetGoalCount(0);
   int awayScore = match->GetMatchData()->GetGoalCount(1);
 

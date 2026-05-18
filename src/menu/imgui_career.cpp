@@ -2377,6 +2377,60 @@ void RenderImGuiPreMatchLineup() {
   }
 
 
+  // ---- Speed selector ----------------------------------------------------
+  // Rendered as small toggle buttons; click does NOT trigger match start.
+  static bool s_speedClickConsumed = false;
+  s_speedClickConsumed = false;
+  if (!g_PreMatchLineup.continueRequested) {
+    const int speeds[]      = { 1, 2, 4, 8 };
+    const char *labels[]    = { "x1", "x2", "x4", "x8" };
+    const float btnW        = 52.0f;
+    const float btnH        = 28.0f;
+    const float gap         = 8.0f;
+    const float rowW        = 4 * btnW + 3 * gap;
+    float bx = (cardW - rowW) * 0.5f;
+    float by = cardH - 80.0f;
+
+    ImDrawList *sdl = ImGui::GetWindowDrawList();
+    ImVec2 wpos = ImGui::GetWindowPos();
+
+    for (int i = 0; i < 4; i++) {
+      bool active = (g_PreMatchLineup.matchSpeed == speeds[i]);
+      ImU32 bgCol  = active ? IM_COL32(255, 200, 40, 255)  : IM_COL32(30, 42, 70, 220);
+      ImU32 txtCol = active ? IM_COL32(15,  15,  15, 255)  : IM_COL32(180, 200, 240, 220);
+
+      ImGui::SetCursorPos(ImVec2(bx, by));
+      ImGui::PushID(i + 9000);
+      if (ImGui::InvisibleButton("##spd", ImVec2(btnW, btnH))) {
+        g_PreMatchLineup.matchSpeed = speeds[i];
+        s_speedClickConsumed = true;
+      }
+      ImGui::PopID();
+
+      ImVec2 bmin = ImVec2(wpos.x + bx, wpos.y + by);
+      ImVec2 bmax = ImVec2(bmin.x + btnW, bmin.y + btnH);
+      sdl->AddRectFilled(bmin, bmax, bgCol, 5.0f);
+      sdl->AddRect(bmin, bmax, IM_COL32(80, 110, 180, 160), 5.0f, 0, 1.0f);
+      {
+        ImVec2 tsz = g_ManagerFontBold
+            ? g_ManagerFontBold->CalcTextSizeA(15.0f, FLT_MAX, 0.f, labels[i])
+            : ImGui::CalcTextSize(labels[i]);
+        sdl->AddText(g_ManagerFontBold, 15.0f,
+                     ImVec2(bmin.x + (btnW - tsz.x) * 0.5f,
+                            bmin.y + (btnH - tsz.y) * 0.5f),
+                     txtCol, labels[i]);
+      }
+
+      bx += btnW + gap;
+    }
+
+    // "Speed" label above buttons
+    ImVec2 labelPos = ImVec2(wpos.x + (cardW - rowW) * 0.5f,
+                             wpos.y + cardH - 80.0f - 20.0f);
+    sdl->AddText(nullptr, 12.0f, labelPos,
+                 IM_COL32(120, 140, 180, 180), "Match Speed");
+  }
+
   // ---- Footer ------------------------------------------------------------
   {
     float footerY = cardH - 42.0f;
@@ -2397,13 +2451,13 @@ void RenderImGuiPreMatchLineup() {
   if (!g_PreMatchLineup.continueRequested) {
     bool doContinue = false;
     if (elapsed >= 3.0) doContinue = true;
-    if (ImGui::IsMouseClicked(0)) doContinue = true;
+    if (!s_speedClickConsumed && ImGui::IsMouseClicked(0)) doContinue = true;
     if (ImGui::IsKeyPressed(ImGuiKey_Enter)  ||
         ImGui::IsKeyPressed(ImGuiKey_Space)  ||
         ImGui::IsKeyPressed(ImGuiKey_Escape))   doContinue = true;
 
     if (doContinue) {
-      printf("[PREMATCH] Continue requested\n");
+      printf("[PREMATCH] Continue requested (speed x%d)\n", g_PreMatchLineup.matchSpeed);
       g_PreMatchLineup.continueRequested = true;
     }
   }

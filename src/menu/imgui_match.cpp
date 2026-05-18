@@ -612,7 +612,7 @@ void RenderImGuiMatchPauseOverlay() {
   ImGui::EndChild();
   ImGui::PopStyleColor();
 
-  // ---- MIDDLE PANEL: 2x2 option tiles --------------------------------------
+  // ---- MIDDLE PANEL: 2x2 option tiles + speed selector ---------------------
   ImGui::SameLine(0, 0);
   ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(12, 18, 32, 255));
   ImGui::BeginChild("##pause_mid", ImVec2(midW, popH), false,
@@ -629,9 +629,13 @@ void RenderImGuiMatchPauseOverlay() {
                 ImVec2(mOrigin.x + midW - 1, mOrigin.y + popH - 16),
                 IM_COL32(50, 65, 110, 160), 1.0f);
 
+    // Reserve bottom strip for speed selector
+    const float speedStripH = 54.0f;
+    const float tileAreaH   = popH - speedStripH;
+
     const float tilePad = 14.0f;
     const float tileW   = (midW - tilePad * 3.0f) * 0.5f;
-    const float tileH   = (popH - tilePad * 3.0f) * 0.5f;
+    const float tileH   = (tileAreaH - tilePad * 3.0f) * 0.5f;
 
     ImVec2 t00 = ImVec2(mOrigin.x + tilePad,             mOrigin.y + tilePad);
     ImVec2 t10 = ImVec2(mOrigin.x + tilePad * 2 + tileW, mOrigin.y + tilePad);
@@ -643,6 +647,46 @@ void RenderImGuiMatchPauseOverlay() {
     if (PauseTile(md, "##matchfacts", t10, tsz, "Match Facts"))  g_ImGuiPausePendingAction = 3;
     if (PauseTile(md, "##settings",   t01, tsz, "Settings"))     g_ImGuiPausePendingAction = 4;
     if (PauseTile(md, "##leave",      t11, tsz, "Leave Match"))  g_ImGuiPausePendingAction = 5;
+
+    // ---- Speed selector strip -----------------------------------------------
+    const int   speeds[]  = { 1, 2, 4, 8 };
+    const char *sLabels[] = { "x1", "x2", "x4", "x8" };
+    int curSpeed = GetConfiguration()->GetInt("match_speed_multiplier", 1);
+    const float btnW   = 44.0f;
+    const float btnH   = 26.0f;
+    const float sGap   = 8.0f;
+    const float rowW   = 4 * btnW + 3 * sGap;
+    float sbx = mOrigin.x + (midW - rowW) * 0.5f;
+    float sby = mOrigin.y + tileAreaH + (speedStripH - btnH) * 0.5f;
+
+    // "Speed" label
+    const char *sLabel = "Speed";
+    ImVec2 slsz = ImGui::GetFont()
+        ? ImVec2(ImGui::GetFont()->CalcTextSizeA(12.0f, FLT_MAX, 0, sLabel).x, 12.0f)
+        : ImVec2(36.0f, 12.0f);
+    md->AddText(nullptr, 12.0f,
+                ImVec2(sbx - slsz.x - 8.0f, sby + (btnH - slsz.y) * 0.5f),
+                IM_COL32(140, 160, 200, 180), sLabel);
+
+    for (int i = 0; i < 4; i++) {
+      bool active  = (curSpeed == speeds[i]);
+      ImU32 bgCol  = active ? IM_COL32(255, 200, 40, 255)  : IM_COL32(30, 42, 70, 220);
+      ImU32 txtCol = active ? IM_COL32(15,  15,  15, 255)  : IM_COL32(180, 200, 240, 220);
+
+      ImVec2 bmin = ImVec2(sbx, sby);
+      ImVec2 bmax = ImVec2(sbx + btnW, sby + btnH);
+      ImGui::SetCursorScreenPos(bmin);
+      ImGui::PushID(i + 8000);
+      if (ImGui::InvisibleButton("##spd", ImVec2(btnW, btnH))) {
+        GetConfiguration()->Set("match_speed_multiplier", (float)speeds[i]);
+        printf("[PAUSE] Match speed set to x%d\n", speeds[i]);
+      }
+      ImGui::PopID();
+      md->AddRectFilled(bmin, bmax, bgCol, 5.0f);
+      md->AddRect(bmin, bmax, IM_COL32(80, 110, 180, 160), 5.0f, 0, 1.0f);
+      AddTextCentered(md, g_ManagerFontBold, 14.0f, bmin, bmax, txtCol, sLabels[i]);
+      sbx += btnW + sGap;
+    }
   }
   ImGui::EndChild();
   ImGui::PopStyleColor();

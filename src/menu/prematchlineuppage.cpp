@@ -215,6 +215,7 @@ void PreMatchLineupPage::Process() {
 
   if (m_fallback) {
     // Presentation could not be built — go straight to LoadingMatchPage.
+    GetConfiguration()->Set("match_speed_multiplier", (float)g_PreMatchLineup.matchSpeed);
     GetMenuTask()->RequestManagerMatchStart();
     this->Exit();
     delete this;
@@ -225,7 +226,9 @@ void PreMatchLineupPage::Process() {
 
   // Keep g_PreMatchLineup.active = true — the card keeps rendering and covers the stadium
   // background while Match::Match() constructs. GamePage clears it when ready.
-  printf("[PREMATCH] Starting match load; lineup stays visible as loading cover\n");
+  printf("[PREMATCH] Starting match load; lineup stays visible as loading cover (speed x%d)\n",
+         g_PreMatchLineup.matchSpeed);
+  GetConfiguration()->Set("match_speed_multiplier", (float)g_PreMatchLineup.matchSpeed);
   GetMenuTask()->RequestManagerMatchStart(/*skipLoadingVisual=*/true);
   this->Exit();
   delete this;
