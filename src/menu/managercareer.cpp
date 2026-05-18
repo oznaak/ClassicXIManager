@@ -304,7 +304,7 @@ static void GenerateFixturesForLeague(int managerId, int leagueId,
   int rounds = M - 1;
   int half   = M / 2;
 
-  // Collect pairings for each round before modifying the rotation vector.
+  // Collect unordered pairings for each round via the circle algorithm.
   struct Pair { int home, away; };
   std::vector<std::vector<Pair>> roundPairs(rounds);
   {
@@ -322,19 +322,43 @@ static void GenerateFixturesForLeague(int managerId, int leagueId,
     }
   }
 
+  // ── Home/Away balancing ─────────────────────────────────────────────────
+  // homeBias[team] > 0 means team has played more home than away recently.
+  // Within each pair, give the home slot to whichever team has lower bias,
+  // so teams naturally alternate H/A across rounds.
+  std::map<int, int> homeBias;
+  for (int id : teamIds) homeBias[id] = 0;
+
+  std::vector<std::vector<Pair>> finalPairs(rounds);
+  for (int r = 0; r < rounds; r++) {
+    for (const auto &pr : roundPairs[r]) {
+      int t1 = pr.home, t2 = pr.away;
+      // Give home to the team with lower cumulative home bias.
+      if (homeBias[t1] <= homeBias[t2]) {
+        finalPairs[r].push_back({t1, t2});
+        homeBias[t1]++; homeBias[t2]--;
+      } else {
+        finalPairs[r].push_back({t2, t1});
+        homeBias[t2]++; homeBias[t1]--;
+      }
+    }
+  }
+
   // ── First half: all first-leg matchdays 1 .. rounds ──────────────────────
   for (int r = 0; r < rounds; r++) {
     int         md   = r + 1;
     std::string date = MakeFixtureDate(seasonYear, startMonth, startDay, r);
-    for (const auto &pr : roundPairs[r])
+    for (const auto &pr : finalPairs[r])
       InsertFixture(managerId, leagueId, seasonYear, 1, md, pr.home, pr.away, date);
   }
 
   // ── Second half: return legs matchdays rounds+1 .. 2*rounds, H/A swapped ─
+  // Swapping automatically balances the full season: if T was home in round R,
+  // they are away in the mirrored return round.
   for (int r = 0; r < rounds; r++) {
     int         md   = rounds + r + 1;
     std::string date = MakeFixtureDate(seasonYear, startMonth, startDay, rounds + r);
-    for (const auto &pr : roundPairs[r])
+    for (const auto &pr : finalPairs[r])
       InsertFixture(managerId, leagueId, seasonYear, 2, md, pr.away, pr.home, date);
   }
 }

@@ -2460,20 +2460,17 @@ static void DrawSchedulePage(float w, float h) {
     filterClubName = clubNames[s_schedClub];
 
   // ---- Filter bar (centred vertically) ------------------------------------
-  const float fbarH    = 52.0f;
-  const float kWinPadY = 12.0f;
+  const float fbarH = 56.0f;
+  ImVec2 sfbarTop = ImGui::GetCursorScreenPos(); // capture before BeginChild
   BeginModernCard("##sched_fbar", ImVec2(usW, fbarH));
-  ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 8.0f);
-  // Measure combo height in the correct font/style to compute exact centre offset
   PushMgrFont(g_ManagerFontSmall);
   ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 4.0f));
-  {
-    float comboH  = ImGui::GetFrameHeight();
-    float innerH  = fbarH - kWinPadY * 2.0f;
-    float centreY = (innerH - comboH) * 0.5f;
-    if (centreY > 0.0f) ImGui::SetCursorPosY(ImGui::GetCursorPosY() + centreY);
-  }
   ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 0.0f));
+  {
+    float comboH = ImGui::GetFrameHeight();
+    ImGui::SetCursorScreenPos(ImVec2(sfbarTop.x + 22.0f,
+                                     sfbarTop.y + (fbarH - comboH) * 0.5f));
+  }
 
   // Country
   ImGui::SetNextItemWidth(130.0f);
@@ -2698,21 +2695,17 @@ static void DrawCompetitionsPage(float w, float h) {
   const std::string &sn = g_CareerHub.club.shortName;
 
   // ---- Filter bar ----
-  const float fbarH = 52.0f;
-  const float kWinPadY = 12.0f;
+  const float fbarH = 56.0f;
+  ImVec2 cfbarTop = ImGui::GetCursorScreenPos(); // capture before BeginChild
   BeginModernCard("##comp_fbar", ImVec2(usW, fbarH));
-  ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 8.0f);
-  PushMgrFont(g_ManagerFontSmall);
-  ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 4.0f));
-  float comboH  = ImGui::GetFrameHeight();
-  float innerH  = fbarH - kWinPadY * 2.0f;
-  float centreY = (innerH - comboH) * 0.5f;
-  ImGui::PopStyleVar();
-  PopMgrFont(g_ManagerFontSmall);
-  if (centreY > 0.0f) ImGui::SetCursorPosY(ImGui::GetCursorPosY() + centreY);
   PushMgrFont(g_ManagerFontSmall);
   ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 4.0f));
   ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,  ImVec2(8.0f, 0.0f));
+  {
+    float comboH = ImGui::GetFrameHeight();
+    ImGui::SetCursorScreenPos(ImVec2(cfbarTop.x + 22.0f,
+                                     cfbarTop.y + (fbarH - comboH) * 0.5f));
+  }
   ImGui::SetNextItemWidth(140.0f);
   {
     std::string cLabel = (s_compCountry < 0) ? "Country" : s_filterCountries[s_compCountry].name;
