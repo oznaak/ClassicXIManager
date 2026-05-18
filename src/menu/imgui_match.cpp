@@ -21,6 +21,7 @@
 #include "../onthepitch/match.hpp"
 #include "../gametask.hpp"
 #include "../data/playerdata.hpp"
+#include "careermatchcontext.hpp"
 
 // Shared badge loader defined in imgui_career.cpp.
 GLuint LoadBadgeTex(const std::string &logoRelPath);
@@ -148,17 +149,19 @@ static void ResetPerMatch(Match *match) {
   s_homeColor     = IM_COL32(210, 0, 0, 255);
   s_awayColor     = IM_COL32(0, 40, 220, 255);
   s_awayPrimary   = s_awayColor;
-  s_homeTextColor = IM_COL32(255, 255, 255, 255); // home text always white
-  s_awayTextColor = IM_COL32(255, 255, 255, 255); // away text white by default
+  s_homeTextColor = IM_COL32(255, 255, 255, 255);
+  s_awayTextColor = IM_COL32(255, 255, 255, 255);
 
   if (match->GetTeam(0) && match->GetTeam(0)->GetTeamData()) {
     Vector3 c = match->GetTeam(0)->GetTeamData()->GetColor1();
-    s_homeColor = Vec3ToCol32(c.coords[0], c.coords[1], c.coords[2]);
+    s_homeColor     = Vec3ToCol32(c.coords[0], c.coords[1], c.coords[2]);
+    s_homeTextColor = TextColorForBg(s_homeColor);
   }
   if (match->GetTeam(1) && match->GetTeam(1)->GetTeamData()) {
     Vector3 c1 = match->GetTeam(1)->GetTeamData()->GetColor1();
     s_awayPrimary = Vec3ToCol32(c1.coords[0], c1.coords[1], c1.coords[2]);
     s_awayColor   = s_awayPrimary; // default: primary as row background
+    s_awayTextColor = TextColorForBg(s_awayColor);
 
     if (ColorDistance(s_homeColor, s_awayPrimary) < 80.0f) {
       // Clash: use secondary color as away row background, primary as text
@@ -504,7 +507,9 @@ void RenderImGuiMatchPauseOverlay() {
       gt->matchRenderMutex.lock();
       Match *match = gt->GetMatch();
       if (match) {
-        int userClubId = g_CareerHub.clubId;
+        // Use g_CareerMatchContext.userClubId — g_CareerHub is cleared when the
+        // career page exits before the match starts, so clubId would be 0 there.
+        int userClubId = g_CareerMatchContext.userClubId;
         int teamIdx = 0;
         if (userClubId > 0 &&
             match->GetTeam(1) && match->GetTeam(1)->GetTeamData() &&

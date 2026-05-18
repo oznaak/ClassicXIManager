@@ -14,6 +14,7 @@
 
 #include "../../onthepitch/match.hpp"
 #include "../imgui_career.hpp"
+#include "../careermatchcontext.hpp"
 
 using namespace blunted;
 
@@ -150,6 +151,13 @@ void GamePage::ProcessKeyboardEvent(KeyboardEvent *event) {
         break;
       }
     }
+    // Manager mode: no human controllers — derive team index from career context.
+    if (sides.empty() && g_CareerMatchContext.userClubId > 0) {
+      Match *m = GetGameTask()->GetMatch();
+      if (m && m->GetTeam(1) && m->GetTeam(1)->GetTeamData() &&
+          m->GetTeam(1)->GetTeamData()->GetDatabaseID() == g_CareerMatchContext.userClubId)
+        teamID = 1;
+    }
 
     if (Verbose()) printf ("team belonging to this controller seems to be %i\n", teamID);
 
@@ -187,6 +195,13 @@ void GamePage::ProcessJoystickEvent(JoystickEvent *event) {
             teamID = int(round(sides.at(s).side * 0.5 + 0.5));
             break;
           }
+        }
+        // Manager mode: no human controllers — derive team index from career context.
+        if (sides.empty() && g_CareerMatchContext.userClubId > 0) {
+          Match *m = GetGameTask()->GetMatch();
+          if (m && m->GetTeam(1) && m->GetTeam(1)->GetTeamData() &&
+              m->GetTeam(1)->GetTeamData()->GetDatabaseID() == g_CareerMatchContext.userClubId)
+            teamID = 1;
         }
 
         if (Verbose()) printf ("team belonging to this controller seems to be %i\n", teamID);

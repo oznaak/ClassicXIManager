@@ -1255,8 +1255,9 @@ void ManagerMainScreenPage::PlayFixture() {
   g_CareerMatchContext.leagueId   = leagueId;
   g_CareerMatchContext.homeTeamId = homeId;
   g_CareerMatchContext.awayTeamId = awayId;
-  printf("[CAREER MATCH] Context set fixture=%d manager=%d league=%d home=%d away=%d\n",
-         fixtureId, managerId, leagueId, homeId, awayId);
+  g_CareerMatchContext.userClubId = clubId;
+  printf("[CAREER MATCH] Context set fixture=%d manager=%d league=%d home=%d away=%d userClub=%d\n",
+         fixtureId, managerId, leagueId, homeId, awayId, clubId);
 
   printf("[CAREER MATCH] Playing scheduled fixture id=%d date=%s home=%d away=%d\n",
          fixtureId,

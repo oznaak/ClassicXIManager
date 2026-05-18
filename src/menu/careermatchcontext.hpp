@@ -13,6 +13,7 @@ struct CareerMatchContext {
   int leagueId   = 0;
   int homeTeamId = 0;
   int awayTeamId = 0;
+  int userClubId = 0; // persists after g_CareerHub is cleared when page exits
 
   void Clear() { *this = CareerMatchContext(); }
 };
