@@ -83,6 +83,7 @@ struct GLfunctions {
       RenderImGuiCareerHub();
       RenderImGuiPreCareer();
       RenderImGuiMatchOverlay();               // in-match scoreboard (only when Match* active)
+      RenderImGuiMatchPauseOverlay();          // in-match pause menu (only when IngamePage active)
       RenderImGuiSilentMatchLoadingOverlay();
       RenderImGuiPreMatchLineup(); // must be last — covers MenuScene during match load
 

@@ -17,11 +17,19 @@
 #include <cstdio>
 
 #include "main.hpp"
+#include "../gamedefines.hpp"
 #include "../onthepitch/match.hpp"
 #include "../gametask.hpp"
+#include "../data/playerdata.hpp"
 
 // Shared badge loader defined in imgui_career.cpp.
 GLuint LoadBadgeTex(const std::string &logoRelPath);
+
+// ---- Pause menu globals -------------------------------------------------
+// Written by IngamePage (main thread), read by GL render thread.
+bool g_ImGuiIngamePauseMenuActive = false;
+// Written by GL render thread on button click, read+cleared by IngamePage::Process() on main thread.
+int  g_ImGuiPausePendingAction    = 0;
 
 // ---------------------------------------------------------------------------
 // Per-match cached state
@@ -78,6 +86,7 @@ static void AddTextLeftCY(ImDrawList *dl, ImFont *font, float sz,
 }
 
 // ---------------------------------------------------------------------------
+static void ResetPauseCache(); // forward declaration
 
 static void ResetPerMatch(Match *match) {
   s_lastMatch        = match;
@@ -108,6 +117,9 @@ static void ResetPerMatch(Match *match) {
 
   printf("[IMGUI MATCH] league='%s' logoPath='%s'\n",
          s_leagueName.c_str(), s_leagueLogoPath.c_str());
+
+  // Reset pause cache so it re-captures on the next pause
+  ResetPauseCache();
 
   // Capture team kit colors
   s_homeColor = IM_COL32(210, 0, 0, 255);
@@ -255,6 +267,10 @@ void RenderImGuiMatchOverlay() {
                   ImVec2(scoreX, awayY), ImVec2(scoreX + scoreW, botY),
                   scoreTxt, awayBuf);
 
+  // Separator between home and away rows — spans team names + score columns
+  dl->AddLine(ImVec2(teamX, awayY), ImVec2(stripX, awayY),
+              IM_COL32(255, 255, 255, 160), 1.5f);
+
   // Thin divider between home/away score cells
   dl->AddLine(ImVec2(scoreX + 6, awayY),
               ImVec2(scoreX + scoreW - 6, awayY),
@@ -270,4 +286,335 @@ void RenderImGuiMatchOverlay() {
   const float totalW = leagueW + teamW + scoreW + stripW;
   dl->AddRect(ImVec2(x0, y0), ImVec2(x0 + totalW, botY),
               IM_COL32(50, 55, 80, 180), 2.0f, 0, 1.0f);
+}
+
+// ---------------------------------------------------------------------------
+// Pause menu overlay
+// ---------------------------------------------------------------------------
+
+struct PausePlayer {
+  std::string lastName;
+  std::string role;  // "GK", "CB", "LB", etc.
+  float nx = 0.f;   // [0,1] screen x pre-mapped with engine formula
+  float ny = 0.f;   // [0,1] screen y — 0=top(attack), 1=bottom(GK)
+};
+
+static bool                      s_pauseInitialized   = false;
+static std::string               s_pauseTeamName;
+static std::vector<PausePlayer>  s_pausePlayers;
+static ImU32                     s_pauseUserColor      = IM_COL32(210, 0, 0, 255);
+static ImU32                     s_pauseUserTextColor  = IM_COL32(255, 255, 255, 255);
+static std::string               s_pauseAwayTeamName;
+static std::vector<PausePlayer>  s_pauseAwayPlayers;
+static ImU32                     s_pauseOppColor       = IM_COL32(0, 40, 220, 255);
+static ImU32                     s_pauseOppTextColor   = IM_COL32(255, 255, 255, 255);
+
+static void ResetPauseCache() {
+  s_pauseInitialized = false;
+  s_pauseTeamName.clear();
+  s_pausePlayers.clear();
+  s_pauseAwayTeamName.clear();
+  s_pauseAwayPlayers.clear();
+}
+
+static float Clamp01(float v) { return v < 0.f ? 0.f : (v > 1.f ? 1.f : v); }
+
+// Build a PausePlayer using the same formula as planmap.cpp.
+static PausePlayer MakePausePlayer(TeamData *td, int i) {
+  PausePlayer pp;
+  pp.lastName = td->GetPlayerData(i)->GetLastName();
+  FormationEntry fe = td->GetFormationEntry(i);
+  pp.role = GetRoleName(fe.role);
+  Vector3 pos = fe.databasePosition;
+  if (fe.role != e_PlayerRole_GK) {
+    pos.coords[0] *= 0.8f;
+    pos.coords[0] += 0.1f;
+  }
+  // coords[0] = depth (GK ~-1, attackers ~+1) → portrait Y (negated so GK at bottom)
+  // coords[1] = lateral (left=-1, right=+1)   → portrait X
+  pp.nx = Clamp01(pos.coords[1] *  0.44f + 0.5f);
+  pp.ny = Clamp01(pos.coords[0] * -0.44f + 0.5f);
+  return pp;
+}
+
+static bool PauseTile(ImDrawList *dl, const char *id,
+                      ImVec2 pos, ImVec2 sz, const char *label) {
+  ImGui::SetCursorScreenPos(pos);
+  ImGui::InvisibleButton(id, sz);
+  bool hovered = ImGui::IsItemHovered();
+  bool clicked = ImGui::IsItemClicked();
+
+  ImU32 bg   = hovered ? IM_COL32(255, 255, 255, 240) : IM_COL32(25, 35, 60, 230);
+  ImU32 txtC = hovered ? IM_COL32(12, 12, 12, 255)    : IM_COL32(255, 255, 255, 255);
+
+  dl->AddRectFilled(pos, ImVec2(pos.x + sz.x, pos.y + sz.y), bg, 6.0f);
+  dl->AddRect(pos, ImVec2(pos.x + sz.x, pos.y + sz.y),
+              IM_COL32(60, 80, 130, 120), 6.0f, 0, 1.0f);
+  AddTextCentered(dl, g_ManagerFontTitle, 22.0f,
+                  pos, ImVec2(pos.x + sz.x, pos.y + sz.y), txtC, label);
+  return clicked;
+}
+
+static void DrawMiniPitch(ImDrawList *dl, ImVec2 min, ImVec2 max) {
+  const ImU32 grassDark  = IM_COL32(28,  90,  40, 255);
+  const ImU32 grassLight = IM_COL32(32, 105,  46, 255);
+  const ImU32 lineCol    = IM_COL32(255, 255, 255, 180);
+  float w = max.x - min.x;
+  float h = max.y - min.y;
+
+  int stripes = 8;
+  for (int i = 0; i < stripes; i++) {
+    float sx = min.x + w * i / stripes;
+    float ex = min.x + w * (i + 1) / stripes;
+    dl->AddRectFilled(ImVec2(sx, min.y), ImVec2(ex, max.y),
+                      (i & 1) ? grassDark : grassLight);
+  }
+
+  dl->AddRect(min, max, lineCol, 0.0f, 0, 1.5f);
+
+  float midY = min.y + h * 0.5f;
+  dl->AddLine(ImVec2(min.x, midY), ImVec2(max.x, midY), lineCol, 1.5f);
+
+  float cx = min.x + w * 0.5f;
+  float cr = h * 0.14f;
+  dl->AddCircle(ImVec2(cx, midY), cr, lineCol, 24, 1.5f);
+
+  float gw = w * 0.35f;
+  float gh = h * 0.10f;
+  float gx = min.x + (w - gw) * 0.5f;
+  dl->AddRect(ImVec2(gx, min.y),      ImVec2(gx + gw, min.y + gh), lineCol, 0.0f, 0, 1.2f);
+  dl->AddRect(ImVec2(gx, max.y - gh), ImVec2(gx + gw, max.y),      lineCol, 0.0f, 0, 1.2f);
+}
+
+// Draw a formation panel (header + mini pitch + dots) into a draw list.
+// panelH: height used for the panel — caller reserves footer space separately.
+static void DrawFormationPanel(
+    ImDrawList *dl,
+    ImVec2 origin, float w, float panelH,
+    const std::string &teamName,
+    ImU32 teamColor, ImU32 teamTextColor,
+    const std::vector<PausePlayer> &players)
+{
+  const float headerH   = 46.0f;
+  const float pitchPadX = 12.0f;
+  const float pitchPadY = 10.0f;
+
+  // Header strip
+  dl->AddRectFilled(origin, ImVec2(origin.x + w, origin.y + headerH), teamColor);
+  AddTextCentered(dl, g_ManagerFontBold, 17.0f,
+                  origin, ImVec2(origin.x + w, origin.y + headerH),
+                  teamTextColor, teamName.c_str());
+
+  // Pitch
+  ImVec2 pitchMin = ImVec2(origin.x + pitchPadX, origin.y + headerH + pitchPadY);
+  ImVec2 pitchMax = ImVec2(origin.x + w - pitchPadX, origin.y + panelH - pitchPadY);
+  DrawMiniPitch(dl, pitchMin, pitchMax);
+
+  float pW = pitchMax.x - pitchMin.x;
+  float pH = pitchMax.y - pitchMin.y;
+  const float dotR    = 7.5f;
+  const float roleSz  = 12.5f;
+  const float nameSz  = 13.5f;
+
+  for (size_t i = 0; i < players.size() && i < 11; i++) {
+    const PausePlayer &pp = players[i];
+    float dotX = pitchMin.x + pp.nx * pW;
+    float dotY = pitchMin.y + pp.ny * pH;
+
+    dl->AddCircleFilled(ImVec2(dotX, dotY), dotR, teamColor);
+    dl->AddCircle(ImVec2(dotX, dotY), dotR, IM_COL32(255, 255, 255, 200), 12, 1.0f);
+
+    // Role abbreviation above dot (bold, white)
+    if (!pp.role.empty()) {
+      ImVec2 rs = g_ManagerFontBold
+          ? g_ManagerFontBold->CalcTextSizeA(roleSz, FLT_MAX, 0.f, pp.role.c_str())
+          : ImGui::CalcTextSize(pp.role.c_str());
+      dl->AddText(g_ManagerFontBold, roleSz,
+                  ImVec2(dotX - rs.x * 0.5f, dotY - dotR - rs.y - 1.f),
+                  IM_COL32(255, 255, 255, 255), pp.role.c_str());
+    }
+
+    // Surname below dot (bold, slightly larger, up to 8 chars)
+    std::string abbr = pp.lastName.size() > 8 ? pp.lastName.substr(0, 8) : pp.lastName;
+    ImVec2 ns = g_ManagerFontBold
+        ? g_ManagerFontBold->CalcTextSizeA(nameSz, FLT_MAX, 0.f, abbr.c_str())
+        : ImGui::CalcTextSize(abbr.c_str());
+    dl->AddText(g_ManagerFontBold, nameSz,
+                ImVec2(dotX - ns.x * 0.5f, dotY + dotR + 2.f),
+                IM_COL32(255, 255, 255, 220), abbr.c_str());
+  }
+  if (players.empty()) {
+    dl->AddText(nullptr, 11.0f, ImVec2(pitchMin.x + 4, pitchMin.y + 4),
+                IM_COL32(200, 220, 255, 150), "No data");
+  }
+}
+
+void RenderImGuiMatchPauseOverlay() {
+  if (!g_ImGuiIngamePauseMenuActive) return;
+  if (g_ImGuiPausePendingAction != 0) return;
+
+  // Populate cache on first frame of pause (GL thread — TeamData read-only during match)
+  if (!s_pauseInitialized) {
+    auto gt = GetGameTask();
+    if (gt) {
+      gt->matchLifetimeMutex.lock();
+      Match *match = gt->GetMatch();
+      if (match) {
+        int userClubId = g_CareerHub.clubId;
+        int teamIdx = 0;
+        if (userClubId > 0 &&
+            match->GetTeam(1) && match->GetTeam(1)->GetTeamData() &&
+            match->GetTeam(1)->GetTeamData()->GetDatabaseID() == userClubId)
+          teamIdx = 1;
+        int oppIdx = 1 - teamIdx;
+
+        // User team
+        TeamData *td = match->GetTeam(teamIdx) ? match->GetTeam(teamIdx)->GetTeamData() : nullptr;
+        if (td) {
+          s_pauseTeamName = td->GetName();
+          Vector3 c = td->GetColor1();
+          s_pauseUserColor     = Vec3ToCol32(c.coords[0], c.coords[1], c.coords[2]);
+          s_pauseUserTextColor = TextColorForBg(s_pauseUserColor);
+          int n = std::min(td->GetPlayerNum(), 11);
+          for (int i = 0; i < n; i++)
+            s_pausePlayers.push_back(MakePausePlayer(td, i));
+        }
+
+        // Opponent team
+        TeamData *tdOpp = match->GetTeam(oppIdx) ? match->GetTeam(oppIdx)->GetTeamData() : nullptr;
+        if (tdOpp) {
+          s_pauseAwayTeamName = tdOpp->GetName();
+          Vector3 c = tdOpp->GetColor1();
+          s_pauseOppColor     = Vec3ToCol32(c.coords[0], c.coords[1], c.coords[2]);
+          s_pauseOppTextColor = TextColorForBg(s_pauseOppColor);
+          int n = std::min(tdOpp->GetPlayerNum(), 11);
+          for (int i = 0; i < n; i++)
+            s_pauseAwayPlayers.push_back(MakePausePlayer(tdOpp, i));
+        }
+      }
+      gt->matchLifetimeMutex.unlock();
+    }
+    if (s_pauseTeamName.empty())     s_pauseTeamName     = g_CareerHub.club.name;
+    if (s_pauseTeamName.empty())     s_pauseTeamName     = "Your Team";
+    if (s_pauseAwayTeamName.empty()) s_pauseAwayTeamName = "Opponents";
+    s_pauseInitialized = true;
+    printf("[IMGUI PAUSE] Cache: %zu user / %zu opp players\n",
+           s_pausePlayers.size(), s_pauseAwayPlayers.size());
+  }
+
+  ImGuiIO &io = ImGui::GetIO();
+
+  // Dim overlay behind all ImGui windows
+  ImGui::GetBackgroundDrawList()->AddRectFilled(
+      ImVec2(0, 0), io.DisplaySize, IM_COL32(0, 0, 0, 145));
+
+  // Popup dimensions
+  const float popW = std::min(1280.0f, io.DisplaySize.x - 40.0f);
+  const float popH = std::min(620.0f,  io.DisplaySize.y - 60.0f);
+  const float popX = (io.DisplaySize.x - popW) * 0.5f;
+  const float popY = (io.DisplaySize.y - popH) * 0.5f;
+
+  // Three-panel widths: left (user formation) | mid (tiles) | right (opp formation)
+  const float leftW  = std::floor(popW * 0.265f);
+  const float rightW = leftW;
+  const float midW   = popW - leftW - rightW;
+  const float footerH = 40.0f;
+
+  ImGui::SetNextWindowPos(ImVec2(popX, popY), ImGuiCond_Always);
+  ImGui::SetNextWindowSize(ImVec2(popW, popH), ImGuiCond_Always);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,  ImVec2(0, 0));
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,    ImVec2(0, 0));
+  ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(14, 20, 38, 250));
+
+  ImGui::Begin("##pause_overlay", nullptr,
+    ImGuiWindowFlags_NoTitleBar        |
+    ImGuiWindowFlags_NoResize          |
+    ImGuiWindowFlags_NoMove            |
+    ImGuiWindowFlags_NoScrollbar       |
+    ImGuiWindowFlags_NoSavedSettings   |
+    ImGuiWindowFlags_NoFocusOnAppearing|
+    ImGuiWindowFlags_NoNav);
+
+  // ---- LEFT PANEL: user formation + Game Plan footer -----------------------
+  ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(18, 28, 52, 255));
+  ImGui::BeginChild("##pause_left", ImVec2(leftW, popH), false,
+                    ImGuiWindowFlags_NoScrollbar);
+  {
+    ImDrawList *ld      = ImGui::GetWindowDrawList();
+    ImVec2      lOrigin = ImGui::GetWindowPos();
+
+    DrawFormationPanel(ld, lOrigin, leftW, popH - footerH,
+                       s_pauseTeamName, s_pauseUserColor, s_pauseUserTextColor,
+                       s_pausePlayers);
+
+    // Game Plan footer
+    ImVec2 btnMin = ImVec2(lOrigin.x, lOrigin.y + popH - footerH);
+    ImVec2 btnMax = ImVec2(lOrigin.x + leftW, lOrigin.y + popH);
+    ImGui::SetCursorScreenPos(btnMin);
+    ImGui::InvisibleButton("##gameplan_btn", ImVec2(leftW, footerH));
+    bool gpHov = ImGui::IsItemHovered();
+    ld->AddRectFilled(btnMin, btnMax,
+                      gpHov ? IM_COL32(255, 255, 255, 200) : IM_COL32(30, 44, 80, 220));
+    ImU32 gpTxt = gpHov ? IM_COL32(15, 15, 15, 255) : IM_COL32(180, 200, 240, 255);
+    AddTextCentered(ld, g_ManagerFontBold, 14.0f, btnMin, btnMax, gpTxt, "GAME PLAN");
+    if (ImGui::IsItemClicked()) g_ImGuiPausePendingAction = 2;
+  }
+  ImGui::EndChild();
+  ImGui::PopStyleColor();
+
+  // ---- MIDDLE PANEL: 2x2 option tiles --------------------------------------
+  ImGui::SameLine(0, 0);
+  ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(12, 18, 32, 255));
+  ImGui::BeginChild("##pause_mid", ImVec2(midW, popH), false,
+                    ImGuiWindowFlags_NoScrollbar);
+  {
+    ImDrawList *md      = ImGui::GetWindowDrawList();
+    ImVec2      mOrigin = ImGui::GetWindowPos();
+
+    // Separator lines on both sides
+    md->AddLine(ImVec2(mOrigin.x,          mOrigin.y + 16),
+                ImVec2(mOrigin.x,          mOrigin.y + popH - 16),
+                IM_COL32(50, 65, 110, 160), 1.0f);
+    md->AddLine(ImVec2(mOrigin.x + midW - 1, mOrigin.y + 16),
+                ImVec2(mOrigin.x + midW - 1, mOrigin.y + popH - 16),
+                IM_COL32(50, 65, 110, 160), 1.0f);
+
+    const float tilePad = 14.0f;
+    const float tileW   = (midW - tilePad * 3.0f) * 0.5f;
+    const float tileH   = (popH - tilePad * 3.0f) * 0.5f;
+
+    ImVec2 t00 = ImVec2(mOrigin.x + tilePad,             mOrigin.y + tilePad);
+    ImVec2 t10 = ImVec2(mOrigin.x + tilePad * 2 + tileW, mOrigin.y + tilePad);
+    ImVec2 t01 = ImVec2(mOrigin.x + tilePad,             mOrigin.y + tilePad * 2 + tileH);
+    ImVec2 t11 = ImVec2(mOrigin.x + tilePad * 2 + tileW, mOrigin.y + tilePad * 2 + tileH);
+    ImVec2 tsz = ImVec2(tileW, tileH);
+
+    if (PauseTile(md, "##resume",     t00, tsz, "Resume Match")) g_ImGuiPausePendingAction = 1;
+    if (PauseTile(md, "##matchfacts", t10, tsz, "Match Facts"))  g_ImGuiPausePendingAction = 3;
+    if (PauseTile(md, "##settings",   t01, tsz, "Settings"))     g_ImGuiPausePendingAction = 4;
+    if (PauseTile(md, "##leave",      t11, tsz, "Leave Match"))  g_ImGuiPausePendingAction = 5;
+  }
+  ImGui::EndChild();
+  ImGui::PopStyleColor();
+
+  // ---- RIGHT PANEL: opponent formation (no footer) -------------------------
+  ImGui::SameLine(0, 0);
+  ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(18, 28, 52, 255));
+  ImGui::BeginChild("##pause_right", ImVec2(rightW, popH), false,
+                    ImGuiWindowFlags_NoScrollbar);
+  {
+    ImDrawList *rd      = ImGui::GetWindowDrawList();
+    ImVec2      rOrigin = ImGui::GetWindowPos();
+
+    DrawFormationPanel(rd, rOrigin, rightW, popH,
+                       s_pauseAwayTeamName, s_pauseOppColor, s_pauseOppTextColor,
+                       s_pauseAwayPlayers);
+  }
+  ImGui::EndChild();
+  ImGui::PopStyleColor();
+
+  ImGui::End();
+  ImGui::PopStyleColor();
+  ImGui::PopStyleVar(3);
 }

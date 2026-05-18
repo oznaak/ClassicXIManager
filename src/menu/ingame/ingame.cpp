@@ -12,8 +12,11 @@
 #include "replaymenu.hpp"
 
 #include "../settings.hpp"
+#include "../imgui_match.hpp"
 
 using namespace blunted;
+
+static const bool kUseImGuiPauseMenu = true;
 
 IngamePage::IngamePage(Gui2WindowManager *windowManager, const Gui2PageData &pageData) : Gui2Page(windowManager, pageData) {
 
@@ -21,6 +24,15 @@ IngamePage::IngamePage(Gui2WindowManager *windowManager, const Gui2PageData &pag
 
   GetGameTask()->GetMatch()->Pause(true);
 
+  if (kUseImGuiPauseMenu) {
+    // Just set the flag — Process() (main thread) will consume g_ImGuiPausePendingAction.
+    g_ImGuiPausePendingAction    = 0;
+    g_ImGuiIngamePauseMenuActive = true;
+    this->Show();
+    return;
+  }
+
+  // ---- Old Gui2 pause menu (kept as fallback) ------------------------------
   Gui2Root *root = windowManager->GetRoot();
 
   Gui2Button *buttonGamePlan = new Gui2Button(windowManager, "button_gameplan", 0, 0, 30, 3, "game plan");
@@ -38,7 +50,6 @@ IngamePage::IngamePage(Gui2WindowManager *windowManager, const Gui2PageData &pag
   buttonSystemSettings->sig_OnClick.connect(boost::bind(&IngamePage::GoSystemSettings, this));
   buttonReplay->sig_OnClick.connect(boost::bind(&IngamePage::GoReplay, this));
   buttonPreQuit->sig_OnClick.connect(boost::bind(&IngamePage::GoPreQuit, this));
-
 
   Gui2Grid *grid = new Gui2Grid(windowManager, "grid", 10, 10, 80, 80);
 
@@ -61,6 +72,8 @@ IngamePage::IngamePage(Gui2WindowManager *windowManager, const Gui2PageData &pag
 }
 
 IngamePage::~IngamePage() {
+  g_ImGuiIngamePauseMenuActive = false;
+  g_ImGuiPausePendingAction    = 0;
 }
 
 void IngamePage::GoGamePlan() {
@@ -96,10 +109,52 @@ void IngamePage::GoPreQuit() {
 }
 
 
+void IngamePage::Process() {
+  // Consume ImGui pause action on the main thread — safe for page transitions.
+  if (g_ImGuiPausePendingAction != 0) {
+    int action = g_ImGuiPausePendingAction;
+    g_ImGuiPausePendingAction = 0;
+
+    switch (action) {
+      case 1:
+        printf("[IMGUI PAUSE] Resume selected\n");
+        GetMenuTask()->ReleaseAllButtons();
+        GetGameTask()->GetMatch()->Pause(false);
+        GoBack(); // → delete this (destructor clears g_ImGuiIngamePauseMenuActive)
+        return;   // 'this' is deleted; do not touch members after this point
+
+      case 2:
+        printf("[IMGUI PAUSE] Game Plan selected\n");
+        GoGamePlan();
+        return;
+
+      case 3:
+        printf("[IMGUI PAUSE] Match Facts selected\n");
+        // Placeholder — do nothing yet
+        break;
+
+      case 4:
+        printf("[IMGUI PAUSE] Settings selected\n");
+        GoSystemSettings();
+        return;
+
+      case 5:
+        printf("[IMGUI PAUSE] Leave Match selected\n");
+        GoPreQuit();
+        return;
+    }
+  }
+
+  Gui2Page::Process();
+}
+
 void IngamePage::ProcessWindowingEvent(WindowingEvent *event) {
   if (event->IsEscape()) {
+    printf("[IMGUI PAUSE] Resume selected\n");
     GetMenuTask()->ReleaseAllButtons();
     GetGameTask()->GetMatch()->Pause(false);
+    g_ImGuiPausePendingAction = 0; // cancel any pending action
+    // GoBack() triggered by Gui2Page::ProcessWindowingEvent below.
   }
   Gui2Page::ProcessWindowingEvent(event);
 }

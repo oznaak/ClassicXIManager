@@ -32,6 +32,7 @@ class IngamePage : public Gui2Page {
     void GoReplay();
     void GoPreQuit();
 
+    virtual void Process();
     virtual void ProcessWindowingEvent(WindowingEvent *event);
 
   protected:
