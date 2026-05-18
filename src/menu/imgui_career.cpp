@@ -1525,6 +1525,7 @@ static void DrawHomePage(float w, float h) {
       PushMgrFont(g_ManagerFontSmall);
       for (const auto &f : g_CareerHub.fixtures) {
         if (shown >= 5) break;
+        if (f.status != "scheduled") continue;
         if (f.home != snA && f.away != snA) continue;
         bool ih = (f.home == snA);
         const std::string &oppFull = ih ? f.awayFull : f.homeFull;

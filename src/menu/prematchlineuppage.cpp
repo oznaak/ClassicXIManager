@@ -47,7 +47,7 @@ static std::map<int, std::string> ParseFormationRoles(const std::string &xml) {
     rs += 6; // strlen("<role>")
     size_t re = block.find("</role>", rs);
     if (re == std::string::npos) continue;
-    roles[i] = block.substr(rs, re - rs);
+    roles[i - 1] = block.substr(rs, re - rs); // fo is 0-10; XML uses <p1>-<p11>
   }
   return roles;
 }
@@ -73,7 +73,7 @@ PreMatchLineupPage::LoadXI(int teamId, int limit, int offset) {
   q << "SELECT firstname, lastname, role, formationorder"
     << " FROM players WHERE team_id = " << teamId
     << " ORDER BY"
-    << "  CASE WHEN formationorder IS NULL OR formationorder <= 0 THEN 999"
+    << "  CASE WHEN formationorder IS NULL OR formationorder < 0 THEN 999"
     << "       ELSE formationorder END ASC,"
     << "  CASE WHEN role LIKE '%GK%' THEN 1"
     << "       WHEN role LIKE '%DM%' THEN 3"
@@ -98,12 +98,12 @@ PreMatchLineupPage::LoadXI(int teamId, int limit, int offset) {
       p.name = "Player";
 
     int fo = atoi(DBCell(r, i, 3).c_str());
-    p.number = (fo >= 1 && fo <= 99) ? fo : (offset + (int)i + 1);
+    p.number = (fo >= 0 && fo <= 99) ? fo : (offset + (int)i);
 
     // Bench players always show "SUB"; starters use formation XML role
     if (offset > 0)
       p.role = "SUB";
-    else if (fo >= 1 && fo <= 11 && formationRoles.count(fo))
+    else if (fo >= 0 && fo <= 10 && formationRoles.count(fo))
       p.role = formationRoles[fo];
     else
       p.role = DBCell(r, i, 2);
@@ -116,7 +116,7 @@ PreMatchLineupPage::LoadXI(int teamId, int limit, int offset) {
   if (offset == 0) {
     while ((int)out.size() < limit) {
       PreMatchLineupPlayer tbd;
-      tbd.number = (int)out.size() + 1;
+      tbd.number = (int)out.size();
       tbd.name   = "TBD";
       out.push_back(tbd);
     }
