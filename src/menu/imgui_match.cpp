@@ -170,16 +170,26 @@ static void ResetPerMatch(Match *match) {
   }
 }
 
+void ResetMatchOverlayState() {
+  s_lastMatch     = nullptr;
+  s_overlayLogged = false;
+  s_scoreboardHidden = false;
+}
+
 // ---------------------------------------------------------------------------
 
 void RenderImGuiMatchOverlay() {
   auto gameTask = GetGameTask();
   if (!gameTask) return;
 
-  gameTask->matchLifetimeMutex.lock();
+  // Use matchRenderMutex (not matchLifetimeMutex) to avoid deadlock with PutPhase.
+  // PutPhase holds matchLifetimeMutex while waiting for OpenGL vertex-buffer uploads;
+  // those uploads block on the OpenGL thread, which is this thread. Using the same
+  // mutex would cause a circular deadlock. matchRenderMutex is independent of PutPhase.
+  gameTask->matchRenderMutex.lock();
   Match *match = gameTask->GetMatch();
   if (!match) {
-    gameTask->matchLifetimeMutex.unlock();
+    gameTask->matchRenderMutex.unlock();
     return;
   }
 
@@ -201,7 +211,7 @@ void RenderImGuiMatchOverlay() {
   std::string homeName = match->GetTeam(0)->GetTeamData()->GetName();
   std::string awayName = match->GetTeam(1)->GetTeamData()->GetName();
 
-  gameTask->matchLifetimeMutex.unlock();
+  gameTask->matchRenderMutex.unlock();
 
   if (homeName.empty()) homeName = "Home";
   if (awayName.empty()) awayName = "Away";
@@ -491,7 +501,7 @@ void RenderImGuiMatchPauseOverlay() {
   if (!s_pauseInitialized) {
     auto gt = GetGameTask();
     if (gt) {
-      gt->matchLifetimeMutex.lock();
+      gt->matchRenderMutex.lock();
       Match *match = gt->GetMatch();
       if (match) {
         int userClubId = g_CareerHub.clubId;
@@ -526,7 +536,7 @@ void RenderImGuiMatchPauseOverlay() {
             s_pauseAwayPlayers.push_back(MakePausePlayer(tdOpp, i));
         }
       }
-      gt->matchLifetimeMutex.unlock();
+      gt->matchRenderMutex.unlock();
     }
     if (s_pauseTeamName.empty())     s_pauseTeamName     = g_CareerHub.club.name;
     if (s_pauseTeamName.empty())     s_pauseTeamName     = "Your Team";

@@ -193,6 +193,14 @@ PreQuitPage::~PreQuitPage() {
 }
 
 void PreQuitPage::GoMenu() {
+  // Stop the GL thread rendering the pause overlay before StopMatch tears down the match.
+  g_ImGuiIngamePauseMenuActive = false;
+  g_ImGuiPausePendingAction    = 0;
+
+  // Unpause so StopMatch doesn't deadlock on a frozen match thread.
+  Match *m = GetGameTask()->GetMatch();
+  if (m) m->Pause(false);
+
   this->Exit();
   GetMenuTask()->SetMenuAction(e_MenuAction_Menu);
   delete this;

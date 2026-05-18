@@ -13,3 +13,6 @@ extern bool g_ImGuiIngamePauseMenuActive;
 extern int g_ImGuiPausePendingAction;
 
 void RenderImGuiMatchPauseOverlay();
+
+// Called by StopMatch (under matchRenderMutex) to clear stale match pointer cache.
+void ResetMatchOverlayState();

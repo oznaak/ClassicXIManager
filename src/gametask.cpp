@@ -12,6 +12,8 @@
 
 #include "blunted.hpp"
 
+#include "menu/imgui_match.hpp"
+
 void UploadFullbodyModel::Update() {
   for (unsigned int i = 0; i < geometryToUpload.size(); i++) {
     geometryToUpload.at(i)->OnUpdateGeometryData(false);
@@ -73,11 +75,20 @@ void GameTask::Action(e_GameTaskMessage message) {
       GetGraphicsSystem()->getPhaseMutex.lock();
       matchLifetimeMutex.lock();
       matchPutBufferMutex.lock();
-      //assert(match);
-      if (match) {
-        match->Exit();
-        delete match;
+      {
+        // Null the match pointer under matchRenderMutex so the OpenGL render
+        // thread sees null and skips match access on its next SwapBuffers.
+        // We release matchRenderMutex BEFORE Exit()/delete so that OpenGL calls
+        // inside Exit() don't deadlock with the render thread trying to lock it.
+        Match *m = match;
+        matchRenderMutex.lock();
         match = 0;
+        ResetMatchOverlayState(); // clear stale match pointer before renderer sees it
+        matchRenderMutex.unlock();
+        if (m) {
+          m->Exit();
+          delete m;
+        }
       }
       matchPutBufferMutex.unlock();
       matchLifetimeMutex.unlock();

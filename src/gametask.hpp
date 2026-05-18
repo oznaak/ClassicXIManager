@@ -89,6 +89,10 @@ class GameTask : public IUserTask {
     virtual std::string GetName() const { return "game"; }
 
     boost::mutex matchLifetimeMutex;
+    // Held by ImGui render thread when accessing match data for display.
+    // StopMatch acquires this (after matchLifetimeMutex) before destroying
+    // the match, preventing use-after-free without causing a deadlock with PutPhase.
+    boost::mutex matchRenderMutex;
 
   protected:
     Match *match;
