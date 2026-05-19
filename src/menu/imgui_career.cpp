@@ -523,6 +523,30 @@ static const char *kPageNames[PAGE_COUNT] = {
 };
 
 static e_ManagerPage g_activePage = PAGE_HOME;
+static std::vector<e_ManagerPage> s_navBack;
+static std::vector<e_ManagerPage> s_navFwd;
+static bool s_escMenuOpen       = false;
+static bool s_escMenuJustOpened = false; // suppress ESC-close on the frame it was opened
+
+// Navigate to a new page — pushes current to back stack, clears forward stack.
+static void NavPush(e_ManagerPage page) {
+  if (page == g_activePage) return;
+  s_navBack.push_back(g_activePage);
+  s_navFwd.clear();
+  g_activePage = page;
+}
+static void NavBack() {
+  if (s_navBack.empty()) return;
+  s_navFwd.push_back(g_activePage);
+  g_activePage = s_navBack.back();
+  s_navBack.pop_back();
+}
+static void NavForward() {
+  if (s_navFwd.empty()) return;
+  s_navBack.push_back(g_activePage);
+  g_activePage = s_navFwd.back();
+  s_navFwd.pop_back();
+}
 static bool          s_calInit    = false;
 static bool          s_compInit   = false;
 static int           s_compCountry = -1;
@@ -535,6 +559,9 @@ static int           s_schedClub     = -1;
 
 static void ResetNavState() {
   g_activePage    = PAGE_HOME;
+  s_navBack.clear();
+  s_navFwd.clear();
+  s_escMenuOpen = false;
   s_calInit       = false;
   s_compInit      = false;
   s_compCountry   = -1;
@@ -841,7 +868,7 @@ static void DrawNavItem(const char *label, e_ManagerPage page, int badge = 0) {
   ImFont *font = active ? g_ManagerFontBold : g_ManagerFontRegular;
   if (font) ImGui::PushFont(font);
   float lh = ImGui::GetTextLineHeight();
-  ImVec2 tp(p0.x + 14.0f, p0.y + (kH - lh) * 0.5f);
+  ImVec2 tp(p0.x + 16.0f, p0.y + (kH - lh) * 0.5f);
   dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(), tp,
               active ? C32(kTextPri) : C32(kTextSec), label);
   if (font) ImGui::PopFont();
@@ -858,7 +885,7 @@ static void DrawNavItem(const char *label, e_ManagerPage page, int badge = 0) {
                 IM_COL32(255, 255, 255, 230), buf);
   }
 
-  if (clicked) g_activePage = page;
+  if (clicked) NavPush(page);
 }
 
 // ---- Action flags (deferred, consumed after Handle()) -------------------
@@ -949,13 +976,13 @@ static void DrawSidebar(float sideW, float winH) {
   }
 
   // ---- Nav (scrollable) -----------------------------------------------
-  // Reserve space for bottom section: settings + main menu + separators
-  const float kBottomH = 34.0f + 34.0f + 1.0f + 10.0f + 8.0f;
+  // Reserve space for bottom section: separator + version text
+  const float kBottomH = 1.0f + 8.0f + 20.0f + 8.0f;
   float navH = ImGui::GetContentRegionAvail().y - kBottomH;
   if (navH < 40.0f) navH = 40.0f;
 
   ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0,0,0,0));
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 0.0f));
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
   ImGui::BeginChild("##nav_area", ImVec2(0, navH), false);
   ImGui::PopStyleVar();
   ImGui::PopStyleColor();
@@ -993,22 +1020,27 @@ static void DrawSidebar(float sideW, float winH) {
   }
 
   ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0,0,0,0));
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 0.0f));
-  ImGui::BeginChild("##nav_bottom", ImVec2(0, kBottomH - 10.0f), false,
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+  ImGui::BeginChild("##nav_bottom", ImVec2(0, kBottomH - 8.0f), false,
                     ImGuiWindowFlags_NoScrollbar);
   ImGui::PopStyleVar();
   ImGui::PopStyleColor();
 
-  DrawNavItem("Settings", PAGE_SETTINGS);
-
-  ImGui::SetCursorPosX(0.0f);
-  ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.10f,0.06f,0.06f,1.0f));
-  ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.16f,0.09f,0.09f,1.0f));
-  ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.22f,0.12f,0.12f,1.0f));
-  ImGui::PushStyleColor(ImGuiCol_Text,          kDanger);
-  float btnW = ImGui::GetContentRegionAvail().x;
-  if (ImGui::Button("Main Menu", ImVec2(btnW, 34.0f))) s_menuClicked = true;
-  ImGui::PopStyleColor(4);
+  // Centered version text
+  {
+    ImDrawList *bdl = ImGui::GetWindowDrawList();
+    ImVec2 bp = ImGui::GetCursorScreenPos();
+    static const char *kVerText = "Classic XI Manager - Alpha v0.0.01";
+    PushMgrFont(g_ManagerFontSmall);
+    ImVec2 tsz = ImGui::CalcTextSize(kVerText);
+    float childH = kBottomH - 8.0f;
+    float tx = bp.x + (sideW - tsz.x) * 0.5f;
+    float ty = bp.y + (childH - tsz.y) * 0.5f;
+    bdl->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
+                 ImVec2(tx, ty), IM_COL32(120, 130, 160, 180), kVerText);
+    PopMgrFont(g_ManagerFontSmall);
+    ImGui::Dummy(ImVec2(0, childH));
+  }
 
   ImGui::EndChild(); // nav_bottom
   ImGui::EndChild(); // sidebar
@@ -1025,6 +1057,56 @@ static void DrawTopHeader(float contentX, float contentW) {
   ImGui::PopStyleColor();
 
   ImDrawList *dl = ImGui::GetWindowDrawList();
+
+  // ---- Left: back / forward navigation arrows ----------------------------
+  {
+    const float kArrowSz = 28.0f;
+    const float kArrowGap = 4.0f;
+    const float kLeftMar = 16.0f;
+    float ay = (kTopHdrH - kArrowSz) * 0.5f;
+
+    bool canBack = !s_navBack.empty();
+    bool canFwd  = !s_navFwd.empty();
+
+    auto DrawNavArrow = [&](const char *id, const char *symbol, float ax, bool enabled) {
+      ImGui::SetCursorPos(ImVec2(ax, ay));
+      ImVec2 p0 = ImGui::GetCursorScreenPos();
+      ImVec2 p1 = ImVec2(p0.x + kArrowSz, p0.y + kArrowSz);
+
+      bool clicked = false;
+      if (enabled) {
+        clicked = ImGui::InvisibleButton(id, ImVec2(kArrowSz, kArrowSz));
+        bool hov = ImGui::IsItemHovered();
+        int ar = (int)(kAccent.x*255), ag = (int)(kAccent.y*255), ab = (int)(kAccent.z*255);
+        ImU32 bg = hov ? IM_COL32(ar, ag, ab, 80) : IM_COL32(ar, ag, ab, 40);
+        dl->AddRectFilled(p0, p1, bg, 6.0f);
+        dl->AddRect(p0, p1, IM_COL32(ar, ag, ab, 180), 6.0f, 0, 1.0f);
+        PushMgrFont(g_ManagerFontBold);
+        ImVec2 tsz = ImGui::CalcTextSize(symbol);
+        dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
+                    ImVec2(p0.x + (kArrowSz - tsz.x) * 0.5f,
+                           p0.y + (kArrowSz - tsz.y) * 0.5f),
+                    IM_COL32(ar, ag, ab, 255), symbol);
+        PopMgrFont(g_ManagerFontBold);
+        if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+      } else {
+        ImGui::InvisibleButton(id, ImVec2(kArrowSz, kArrowSz)); // consume space
+        dl->AddRectFilled(p0, p1, IM_COL32(15, 22, 48, 120), 6.0f);
+        dl->AddRect(p0, p1, IM_COL32(40, 55, 90, 80), 6.0f, 0, 1.0f);
+        PushMgrFont(g_ManagerFontBold);
+        ImVec2 tsz = ImGui::CalcTextSize(symbol);
+        dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
+                    ImVec2(p0.x + (kArrowSz - tsz.x) * 0.5f,
+                           p0.y + (kArrowSz - tsz.y) * 0.5f),
+                    IM_COL32(80, 90, 120, 140), symbol);
+        PopMgrFont(g_ManagerFontBold);
+      }
+      return clicked;
+    };
+
+    if (DrawNavArrow("##nav_back", "<", kLeftMar, canBack)) NavBack();
+    if (DrawNavArrow("##nav_fwd",  ">", kLeftMar + kArrowSz + kArrowGap, canFwd)) NavForward();
+  }
 
   // ---- Right: search + date + Advance/PlayMatch + Test Engine CTAs -------
   const float kBtnW    = 112.0f;  // each button width
@@ -1242,6 +1324,11 @@ static void DrawFixtureTeamBox(const char *childId, const char *label,
                                 float badgeSz, bool highlight, const std::string &userSn) {
   ImVec2 p0 = ImGui::GetCursorScreenPos();
   ImGui::GetWindowDrawList()->AddRectFilled(p0, ImVec2(p0.x+teamW, p0.y+boxH), C32(kBgCardAlt), 8.0f);
+  if (highlight) {
+    int ar = (int)(kAccent.x*255), ag = (int)(kAccent.y*255), ab = (int)(kAccent.z*255);
+    ImGui::GetWindowDrawList()->AddRect(p0, ImVec2(p0.x+teamW, p0.y+boxH),
+                                        IM_COL32(ar, ag, ab, 200), 8.0f, 0, 1.5f);
+  }
   ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0,0,0,0));
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4.0f, 8.0f));
   ImGui::BeginChild(childId, ImVec2(teamW, boxH), false);
@@ -1273,7 +1360,7 @@ static void DrawFixtureTeamBox(const char *childId, const char *label,
     else   DrawFallbackBadge(shortName, badgeSz); }
 
   // Team name — centred, clipped to box width
-  ImGui::PushStyleColor(ImGuiCol_Text, highlight ? kAccent : kTextPri);
+  ImGui::PushStyleColor(ImGuiCol_Text, highlight ? ImVec4(1,1,1,1) : kTextPri);
   { float tw = ImGui::CalcTextSize(dispName.c_str()).x;
     float cx = (teamW - std::min(tw, teamW - 8.0f)) * 0.5f;
     ImGui::SetCursorPosX(cx > 0 ? cx : 0.0f); }
@@ -1444,9 +1531,15 @@ static void DrawFixtureScheduleCard(ImVec2 sz) {
       bool isUserAway = (f.away == sn);
       const std::string &hDisp = f.homeFull.empty() ? f.home : f.homeFull;
       const std::string &aDisp = f.awayFull.empty() ? f.away : f.awayFull;
+      bool isUserRow = (isUserHome || isUserAway);
       ImGui::TableNextRow();
+      if (isUserRow) {
+        int ar = (int)(kAccent.x * 255), ag = (int)(kAccent.y * 255), ab = (int)(kAccent.z * 255);
+        ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, IM_COL32(ar, ag, ab, 45));
+        ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, IM_COL32(ar, ag, ab, 45));
+      }
       ImGui::TableSetColumnIndex(0);
-      if (isUserHome) ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
+      if (isUserHome) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1,1,1,1));
       DrawTeamLabel(f.homeLogo, hDisp, 20.0f);
       if (isUserHome) ImGui::PopStyleColor();
       ImGui::TableSetColumnIndex(1);
@@ -1455,12 +1548,12 @@ static void DrawFixtureScheduleCard(ImVec2 sz) {
         ImGui::TextUnformatted(f.score.c_str());
         ImGui::PopStyleColor();
       } else {
-        ImGui::PushStyleColor(ImGuiCol_Text, kTextDim);
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1,1,1,1));
         ImGui::TextUnformatted("vs");
         ImGui::PopStyleColor();
       }
       ImGui::TableSetColumnIndex(2);
-      if (isUserAway) ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
+      if (isUserAway) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1,1,1,1));
       DrawTeamLabel(f.awayLogo, aDisp, 20.0f);
       if (isUserAway) ImGui::PopStyleColor();
       shown++;
@@ -2157,6 +2250,7 @@ static void DrawSquadSnapshotCard(ImVec2 sz) {
 // Layout: Left 28% (Messages + Training + Board Objectives) | Center 42% (Story + Fixture + Agenda + Tactics) | Right 30% (Schedule + Snapshot + Medical)
 
 static void DrawHomePage(float w, float h) {
+  const bool kCanClick = !s_escMenuOpen; // block panel clicks while ESC menu is open
   const float kPad = 16.0f, kGap = 10.0f;
   float usW    = w - 2.0f*kPad - 2.0f*kGap;
   float leftW  = usW * 0.28f;
@@ -2211,13 +2305,31 @@ static void DrawHomePage(float w, float h) {
   ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0,0,0,0));
   ImGui::BeginChild("##ov_l", ImVec2(leftW, colH), false, ImGuiWindowFlags_NoScrollbar);
   ImGui::PopStyleColor();
-  DrawMessagesCard(ImVec2(leftW, kMsgH));
+  { ImVec2 p = ImGui::GetCursorScreenPos();
+    DrawMessagesCard(ImVec2(leftW, kMsgH));
+    if (kCanClick && ImGui::IsMouseHoveringRect(p, ImVec2(p.x+leftW, p.y+kMsgH), false)) {
+      ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+      if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) NavPush(PAGE_INBOX);
+    }
+  }
   ImGui::Dummy(ImVec2(0, kGap));
-  DrawTrainingScheduleCard(ImVec2(leftW, kTrainH));
+  { ImVec2 p = ImGui::GetCursorScreenPos();
+    DrawTrainingScheduleCard(ImVec2(leftW, kTrainH));
+    if (kCanClick && ImGui::IsMouseHoveringRect(p, ImVec2(p.x+leftW, p.y+kTrainH), false)) {
+      ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+      if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) NavPush(PAGE_TRAINING);
+    }
+  }
   ImGui::Dummy(ImVec2(0, kGap));
   DrawBoardObjectivesCard(ImVec2(leftW, kBoardH));
   ImGui::Dummy(ImVec2(0, kGap));
-  DrawSquadSnapshotCard(ImVec2(leftW, kSquadH));
+  { ImVec2 p = ImGui::GetCursorScreenPos();
+    DrawSquadSnapshotCard(ImVec2(leftW, kSquadH));
+    if (kCanClick && ImGui::IsMouseHoveringRect(p, ImVec2(p.x+leftW, p.y+kSquadH), false)) {
+      ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+      if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) NavPush(PAGE_SQUAD);
+    }
+  }
   ImGui::EndChild();
 
   ImGui::SameLine(0, kGap);
@@ -2226,7 +2338,13 @@ static void DrawHomePage(float w, float h) {
   ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0,0,0,0));
   ImGui::BeginChild("##ov_c", ImVec2(centerW, colH), false, ImGuiWindowFlags_NoScrollbar);
   ImGui::PopStyleColor();
-  DrawTopStoryCard(ImVec2(centerW, kStoryH));
+  { ImVec2 p = ImGui::GetCursorScreenPos();
+    DrawTopStoryCard(ImVec2(centerW, kStoryH));
+    if (kCanClick && ImGui::IsMouseHoveringRect(p, ImVec2(p.x+centerW, p.y+kStoryH), false)) {
+      ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+      if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) NavPush(PAGE_NEWS);
+    }
+  }
   ImGui::Dummy(ImVec2(0, kGap));
   DrawNextFixtureCard(ImVec2(centerW, kFixtH));
   ImGui::Dummy(ImVec2(0, kGap));
@@ -2271,7 +2389,13 @@ static void DrawHomePage(float w, float h) {
     EndModernCard();
   }
   ImGui::Dummy(ImVec2(0, kGap));
-  DrawTacticsOverviewCard(ImVec2(centerW, kTacH));
+  { ImVec2 p = ImGui::GetCursorScreenPos();
+    DrawTacticsOverviewCard(ImVec2(centerW, kTacH));
+    if (kCanClick && ImGui::IsMouseHoveringRect(p, ImVec2(p.x+centerW, p.y+kTacH), false)) {
+      ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+      if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) NavPush(PAGE_TACTICS);
+    }
+  }
   ImGui::EndChild();
 
   ImGui::SameLine(0, kGap);
@@ -2280,17 +2404,27 @@ static void DrawHomePage(float w, float h) {
   ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0,0,0,0));
   ImGui::BeginChild("##ov_r", ImVec2(rightW, colH), false, ImGuiWindowFlags_NoScrollbar);
   ImGui::PopStyleColor();
-  DrawFixtureScheduleCard(ImVec2(rightW, schedH));
+  { ImVec2 p = ImGui::GetCursorScreenPos();
+    DrawFixtureScheduleCard(ImVec2(rightW, schedH));
+    if (kCanClick && ImGui::IsMouseHoveringRect(p, ImVec2(p.x+rightW, p.y+schedH), false)) {
+      ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+      if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        s_schedInit = false;
+        s_schedClubInit = true;
+        s_schedClub = -1;
+        NavPush(PAGE_SCHEDULE);
+      }
+    }
+  }
   ImGui::Dummy(ImVec2(0, kGap));
   {
     ImVec2 snapPos = ImGui::GetCursorScreenPos();
     DrawLeagueSnapshotCard(ImVec2(rightW, kSnapH));
-    // Click anywhere on the League Snapshot card → go to Competitions
     ImVec2 snapMax(snapPos.x + rightW, snapPos.y + kSnapH);
-    if (ImGui::IsMouseHoveringRect(snapPos, snapMax, false)) {
+    if (kCanClick && ImGui::IsMouseHoveringRect(snapPos, snapMax, false)) {
       ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
       if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
-        g_activePage = PAGE_COMPETITIONS;
+        NavPush(PAGE_COMPETITIONS);
     }
   }
   ImGui::Dummy(ImVec2(0, kGap));
@@ -4590,6 +4724,37 @@ static void DrawTacticsPage(float w, float h) {
 
   dl->PopClipRect();
 
+  // Formation dropdown — top-left corner of pitch
+  {
+    static int s_formationIdx = 0;
+    static const char *kFormations[] = { "4-3-3" };
+    const float fddW = 80.0f, fddH = 24.0f;
+    const float fddX = pitchX + 8.0f;
+    const float fddY = pitchY + 8.0f;
+    ImGui::SetCursorScreenPos(ImVec2(fddX, fddY));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.0f, 3.0f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBg,        IM_COL32(10, 18, 42, 200));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, IM_COL32(20, 32, 72, 220));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive,  IM_COL32(30, 48, 100, 240));
+    ImGui::PushStyleColor(ImGuiCol_Text,           IM_COL32(220, 225, 240, 255));
+    ImGui::PushStyleColor(ImGuiCol_Button,         IM_COL32(10, 18, 42, 200));
+    PushMgrFont(g_ManagerFontSmall);
+    ImGui::SetNextItemWidth(fddW);
+    if (ImGui::BeginCombo("##formation", kFormations[s_formationIdx],
+                          ImGuiComboFlags_HeightSmall)) {
+      for (int i = 0; i < 1; i++) {
+        bool sel = (s_formationIdx == i);
+        if (ImGui::Selectable(kFormations[i], sel)) s_formationIdx = i;
+        if (sel) ImGui::SetItemDefaultFocus();
+      }
+      ImGui::EndCombo();
+    }
+    PopMgrFont(g_ManagerFontSmall);
+    ImGui::PopStyleColor(5);
+    ImGui::PopStyleVar(2);
+  }
+
   // Pitch border on top
   dl->AddRect(ImVec2(pitchX, pitchY),
               ImVec2(pitchX + pitchW, pitchY + pitchH),
@@ -4806,6 +4971,12 @@ static void DrawAdvancingModalOverlay() {
               ImVec2(subX, subY), IM_COL32(61, 74, 99, 255), subtitle);
 }
 
+// ---- DrawEscMenu --------------------------------------------------------
+// Full-screen pause menu triggered by ESC. Drawn as a floating ImGui window
+// with a dimmed foreground backdrop so it sits above everything.
+
+// (ESC menu is rendered as a BeginPopupModal inside ##mgr_root — see RenderImGuiCareerHub)
+
 // ---- DrawManagerShell ---------------------------------------------------
 
 static void DrawManagerShell(float winW, float winH) {
@@ -4863,13 +5034,103 @@ void RenderImGuiCareerHub() {
   s_startSeasonClicked = false;
   s_menuClicked        = false;
 
+  // ESC: open pause menu (only when not advancing and not already open)
+  // Closing is handled by BeginPopupModal via &s_escMenuOpen (p_open).
+  if (!g_CareerHub.isAdvancing && !s_escMenuOpen &&
+      ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+    s_escMenuOpen = true;
+    s_escMenuJustOpened = true;
+    ImGui::OpenPopup("##esc_modal");
+  }
+  if (g_CareerHub.isAdvancing) {
+    s_escMenuOpen = false;
+  }
+
   // Always draw the normal hub behind any overlay.
   DrawAppBackground(winW, winH);
   DrawManagerShell(winW, winH);
 
+  // ---- ESC pause menu (BeginPopupModal blocks background clicks and dims) ----
+  if (s_escMenuOpen) {
+    int ar = (int)(kAccent.x*255), ag = (int)(kAccent.y*255), ab = (int)(kAccent.z*255);
+    const float kBtnH = 40.0f, kBtnGap = 8.0f, kPad = 24.0f;
+    const float kCardW = 300.0f;
+
+    ImGui::SetNextWindowPos(ImVec2(winW * 0.5f, winH * 0.5f),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(kCardW, 0), ImGuiCond_Always); // 0 height = auto
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,  ImVec2(kPad, kPad));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,    ImVec2(0.0f, kBtnGap));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,  6.0f);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg,        IM_COL32(12, 18, 38, 252));
+    ImGui::PushStyleColor(ImGuiCol_Border,          IM_COL32(ar, ag, ab, 160));
+    ImGui::PushStyleColor(ImGuiCol_BorderShadow,    IM_COL32(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_ModalWindowDimBg,IM_COL32(0, 0, 0, 165));
+
+    if (ImGui::BeginPopupModal("##esc_modal", &s_escMenuOpen,
+          ImGuiWindowFlags_NoTitleBar  | ImGuiWindowFlags_NoResize  |
+          ImGuiWindowFlags_NoMove      | ImGuiWindowFlags_NoScrollbar)) {
+      // Close on ESC — skip the frame it was opened (same ESC press would re-close it)
+      if (!s_escMenuJustOpened && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+        s_escMenuOpen = false;
+        ImGui::CloseCurrentPopup();
+      }
+      s_escMenuJustOpened = false;
+      float btnW = kCardW - kPad * 2.0f;
+
+      // Main Screen — accent fill
+      ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(ar, ag, ab, 180));
+      ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(ar, ag, ab, 230));
+      ImGui::PushStyleColor(ImGuiCol_ButtonActive,  IM_COL32(ar, ag, ab, 255));
+      ImGui::PushStyleColor(ImGuiCol_Text,          IM_COL32(255, 255, 255, 255));
+      PushMgrFont(g_ManagerFontRegular);
+      if (ImGui::Button("Main Screen", ImVec2(btnW, kBtnH))) {
+        s_menuClicked = true;
+        s_escMenuOpen = false;
+        ImGui::CloseCurrentPopup();
+      }
+      PopMgrFont(g_ManagerFontRegular);
+      ImGui::PopStyleColor(4);
+
+      // Settings — subtle tint
+      ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(ar, ag, ab, 30));
+      ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(ar, ag, ab, 70));
+      ImGui::PushStyleColor(ImGuiCol_ButtonActive,  IM_COL32(ar, ag, ab, 100));
+      ImGui::PushStyleColor(ImGuiCol_Text,          IM_COL32(200, 210, 230, 255));
+      PushMgrFont(g_ManagerFontRegular);
+      if (ImGui::Button("Settings", ImVec2(btnW, kBtnH))) {
+        NavPush(PAGE_SETTINGS);
+        s_escMenuOpen = false;
+        ImGui::CloseCurrentPopup();
+      }
+      PopMgrFont(g_ManagerFontRegular);
+      ImGui::PopStyleColor(4);
+
+      // Quit — danger red
+      ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(140, 28, 28, 180));
+      ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(180, 40, 40, 220));
+      ImGui::PushStyleColor(ImGuiCol_ButtonActive,  IM_COL32(210, 55, 55, 255));
+      ImGui::PushStyleColor(ImGuiCol_Text,          IM_COL32(255, 255, 255, 255));
+      PushMgrFont(g_ManagerFontRegular);
+      if (ImGui::Button("Quit", ImVec2(btnW, kBtnH))) exit(0);
+      PopMgrFont(g_ManagerFontRegular);
+      ImGui::PopStyleColor(4);
+
+      ImGui::EndPopup();
+    } else {
+      // Closed by ImGui (ESC key or click outside)
+      s_escMenuOpen = false;
+    }
+
+    ImGui::PopStyleColor(4);
+    ImGui::PopStyleVar(4);
+  }
+
   ImGui::End();
 
-  // Modal overlay drawn via foreground drawlist — sits above all ImGui windows.
+  // Advancing overlay sits above everything via foreground drawlist.
   if (g_CareerHub.isAdvancing) {
     DrawAdvancingModalOverlay();
   }
