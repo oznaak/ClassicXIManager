@@ -2937,6 +2937,18 @@ static void DrawCompetitionsPage(float w, float h) {
   EndModernCard();
 }
 
+// ---- Formation layout (shared by tactics board and mini pitch) ----------
+
+// Portrait coords: nx=horizontal [0=left,1=right], ny=depth [0=GK end,1=attack end]
+struct TacNode { int fo; float nx; float ny; };
+static const TacNode kTacNodes[] = {
+  {0,  0.50f, 0.08f},
+  {1,  0.12f, 0.28f}, {2, 0.35f, 0.28f}, {3, 0.65f, 0.28f}, {4, 0.88f, 0.28f},
+  {5,  0.22f, 0.52f}, {6, 0.50f, 0.52f}, {7, 0.78f, 0.52f},
+  {8,  0.16f, 0.78f}, {10, 0.50f, 0.78f}, {9, 0.84f, 0.78f},
+};
+static const int kNumTacNodes = 11;
+
 // ---- Team Instructions helpers ------------------------------------------
 
 static void SaveTacticsToDb(int clubId, const std::map<std::string, float> &tactics) {
@@ -3209,10 +3221,13 @@ static void DrawTeamInstructionsPanel(float px, float py, float pw, float ph) {
   // Defensive width — shaded bands at top and bottom in our half
   if (defWidth > 0.3f) {
     float alpha = (defWidth - 0.3f) / 0.7f * 90.0f;
-    float bandH = mpH * defWidth * 0.14f;
+    float fieldH = mpH * (0.94f - 0.06f);
+    float bandH  = fieldH * defWidth * 0.30f;
+    if (bandH > fieldH * 0.46f) bandH = fieldH * 0.46f; // never overlap in center
     ImU32 bandCol = IM_COL32(50, 110, 210, (int)alpha);
-    wdl->AddRectFilled(ImVec2(PX(0.05f), PY(0.0f)), ImVec2(PX(defLineNX), PY(0.0f)+bandH), bandCol);
-    wdl->AddRectFilled(ImVec2(PX(0.05f), PY(1.0f)-bandH), ImVec2(PX(defLineNX), PY(1.0f)), bandCol);
+    float ftop = PY(0.06f), fbot = PY(0.94f);
+    wdl->AddRectFilled(ImVec2(PX(0.06f), ftop),          ImVec2(PX(defLineNX), ftop + bandH), bandCol);
+    wdl->AddRectFilled(ImVec2(PX(0.06f), fbot - bandH),  ImVec2(PX(defLineNX), fbot),         bandCol);
   }
 
   // Defensive flank coverage — arrows running along top/bottom wings toward our goal
@@ -3317,6 +3332,59 @@ static void DrawTeamInstructionsPanel(float px, float py, float pw, float ph) {
     }
   }
 
+  // ---- Player dots (positions react to tactic values) --------------------
+  // Landscape mapping: portrait ny (depth) → landscape x, portrait nx (width) → landscape y
+  for (int ni = 0; ni < kNumTacNodes; ni++) {
+    const TacNode &tn = kTacNodes[ni];
+    bool isGK  = (tn.fo == 0);
+    bool isDef = (tn.fo >= 1 && tn.fo <= 4);
+    bool isMid = (tn.fo >= 5 && tn.fo <= 7);
+    // isAtt = everything else (fo 8,9,10)
+
+    float adjX, adjY;
+
+    if (isGK) {
+      adjX = 0.06f;
+      adjY = 0.50f;
+    } else if (isDef) {
+      // Line up just behind the defensive line; width scaled by defWidth
+      adjX = defLineNX - 0.025f;
+      float ws = 0.50f + defWidth * 0.70f;
+      adjY = 0.5f + (tn.nx - 0.5f) * ws;
+    } else if (isMid) {
+      // Base midfield depth shifts forward with offMid
+      float fwd = (offMid - 0.5f) * 0.10f;
+      adjX = 0.50f + fwd;
+      float ws = 0.45f + offWidth * 0.65f;
+      adjY = 0.5f + (tn.nx - 0.5f) * ws;
+    } else {
+      // Attackers: depth driven by offDepth
+      adjX = 0.52f + offDepth * 0.34f;
+      float ws = 0.45f + offWidth * 0.65f;
+      adjY = 0.5f + (tn.nx - 0.5f) * ws;
+    }
+
+    // Clamp inside pitch bounds
+    if (adjX < 0.06f) adjX = 0.06f;
+    if (adjX > 0.94f) adjX = 0.94f;
+    if (adjY < 0.07f) adjY = 0.07f;
+    if (adjY > 0.93f) adjY = 0.93f;
+
+    float sx = PX(adjX), sy = PY(adjY);
+    float r = 4.0f;
+
+    // Role colours: GK=gold, DEF=blue, MID=green, ATT=red-orange
+    ImU32 fill;
+    if      (isGK)  fill = IM_COL32(255, 200,  30, 245);
+    else if (isDef) fill = IM_COL32( 80, 150, 255, 245);
+    else if (isMid) fill = IM_COL32( 80, 210, 110, 245);
+    else            fill = IM_COL32(255,  90,  70, 245);
+
+    wdl->AddCircleFilled(ImVec2(sx+1.0f, sy+1.0f), r, IM_COL32(0,0,0,120)); // drop shadow
+    wdl->AddCircleFilled(ImVec2(sx, sy), r, fill);
+    wdl->AddCircle(ImVec2(sx, sy), r, IM_COL32(255,255,255,170), 14, 1.0f);
+  }
+
   wdl->PopClipRect();
 
   // Pitch border
@@ -3364,17 +3432,6 @@ static void DrawTeamInstructionsPanel(float px, float py, float pw, float ph) {
 }
 
 // ---- DrawTacticsPage ----------------------------------------------------
-
-// Formation node layout for 4-3-3.
-// Each entry: {fo, normalized x [0,1], normalized y [0,1] (0=GK end, 1=attack end)}
-struct TacNode { int fo; float nx; float ny; };
-static const TacNode kTacNodes[] = {
-  {0,  0.50f, 0.08f},                                           // GK
-  {1,  0.12f, 0.28f}, {2, 0.35f, 0.28f}, {3, 0.65f, 0.28f}, {4, 0.88f, 0.28f}, // DEF
-  {5,  0.22f, 0.52f}, {6, 0.50f, 0.52f}, {7, 0.78f, 0.52f},   // MID
-  {8,  0.16f, 0.78f}, {10, 0.50f, 0.78f}, {9, 0.84f, 0.78f},  // ATT
-};
-static const int kNumTacNodes = 11;
 
 // Face texture loaded once from media/textures/faces/player.png (relative to cwd)
 static GLuint s_FaceTex = 0;
