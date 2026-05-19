@@ -462,17 +462,27 @@ static const char *kPageNames[PAGE_COUNT] = {
 };
 
 static e_ManagerPage g_activePage = PAGE_HOME;
-static bool          s_calInit    = false; // forward: reset when career loads
-static bool          s_compInit   = false; // forward: reset when career loads
+static bool          s_calInit    = false;
+static bool          s_compInit   = false;
 static int           s_compCountry = -1;
 static int           s_compLeague  = -1;
+static bool          s_schedInit     = false;
+static bool          s_schedClubInit = false;
+static int           s_schedCountry  = -1;
+static int           s_schedLeague   = -1;
+static int           s_schedClub     = -1;
 
 static void ResetNavState() {
-  g_activePage = PAGE_HOME;
-  s_calInit    = false;
-  s_compInit   = false;
-  s_compCountry = -1;
-  s_compLeague  = -1;
+  g_activePage    = PAGE_HOME;
+  s_calInit       = false;
+  s_compInit      = false;
+  s_compCountry   = -1;
+  s_compLeague    = -1;
+  s_schedInit     = false;
+  s_schedClubInit = false;
+  s_schedCountry  = -1;
+  s_schedLeague   = -1;
+  s_schedClub     = -1;
 }
 
 // ---- Color palette ------------------------------------------------------
@@ -1614,9 +1624,11 @@ static void DrawHomePage(float w, float h) {
     DrawLeagueSnapshotCard(ImVec2(rightW, kSnapH));
     // Click anywhere on the League Snapshot card → go to Competitions
     ImVec2 snapMax(snapPos.x + rightW, snapPos.y + kSnapH);
-    if (ImGui::IsMouseHoveringRect(snapPos, snapMax) &&
-        ImGui::IsMouseClicked(ImGuiMouseButton_Left))
-      g_activePage = PAGE_COMPETITIONS;
+    if (ImGui::IsMouseHoveringRect(snapPos, snapMax, false)) {
+      ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+      if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+        g_activePage = PAGE_COMPETITIONS;
+    }
   }
   ImGui::EndChild();
 }
@@ -1738,27 +1750,25 @@ static void DrawSquadPage(float w, float h) {
   float usH = h - 14.0f;
 
   // Header
-  float hdrH = 64.0f;
-  BeginModernCard("##sqhdr", ImVec2(usW, hdrH));
+  const float hdrH   = 80.0f;
+  const float badgeS = 44.0f;
   const auto &cl = g_CareerHub.club;
-  // Vertically center the badge + text group inside the card
-  // Card inner height = hdrH - 2*WindowPadding.y = 64-24 = 40px; badge = 40px → fits exactly
-  ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 4.0f); // left margin
-  ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 0.0f); // already centred at 40px height
-  DrawTeamBadge(cl.logoPath, cl.shortName, 40.0f);
-  ImGui::SameLine(0, 14.0f);
-  // Vertically centre the two text lines relative to the badge height
-  {
-    PushMgrFont(g_ManagerFontTitle);
-    float titleH = ImGui::GetTextLineHeight();
-    PopMgrFont(g_ManagerFontTitle);
-    PushMgrFont(g_ManagerFontSmall);
-    float subH = ImGui::GetTextLineHeight();
-    PopMgrFont(g_ManagerFontSmall);
-    float totalTextH = titleH + 2.0f + subH;
-    float offsetY = (40.0f - totalTextH) * 0.5f;
-    if (offsetY > 0.0f) ImGui::SetCursorPosY(ImGui::GetCursorPosY() + offsetY);
-  }
+  ImVec2 hdrTop = ImGui::GetCursorScreenPos();
+  BeginModernCard("##sqhdr", ImVec2(usW, hdrH));
+  // Badge — vertically centred using screen coords
+  ImGui::SetCursorScreenPos(ImVec2(hdrTop.x + 18.0f,
+                                   hdrTop.y + (hdrH - badgeS) * 0.5f));
+  DrawTeamBadge(cl.logoPath, cl.shortName, badgeS);
+  // Text block — measure total height then centre the group
+  PushMgrFont(g_ManagerFontTitle);
+  float titleH = ImGui::GetTextLineHeight();
+  PopMgrFont(g_ManagerFontTitle);
+  PushMgrFont(g_ManagerFontSmall);
+  float subH = ImGui::GetTextLineHeight();
+  PopMgrFont(g_ManagerFontSmall);
+  float textBlockH = titleH + 4.0f + subH;
+  ImGui::SetCursorScreenPos(ImVec2(hdrTop.x + 18.0f + badgeS + 14.0f,
+                                   hdrTop.y + (hdrH - textBlockH) * 0.5f));
   ImGui::BeginGroup();
   PushMgrFont(g_ManagerFontTitle);
   ImGui::PushStyleColor(ImGuiCol_Text, kTextPri);
@@ -2405,16 +2415,12 @@ static void DrawCalendarPage(float w, float h) {
 
 // ---- DrawSchedulePage ---------------------------------------------------
 
-static int  s_schedCountry = -1;
-static int  s_schedLeague  = -1;
-static int  s_schedClub    = -1;
-static bool s_schedInit    = false;
-
 static void DrawSchedulePage(float w, float h) {
   EnsureFilterCache();
 
-  // Auto-select user's country + league on first visit (club stays "All clubs")
+  // Auto-select user's country + league on every fresh visit (reset by prevPage logic)
   if (!s_schedInit && !s_filterLeagues.empty()) {
+    s_schedCountry = -1; s_schedLeague = -1; s_schedClub = -1;
     const std::string &myLeague = g_CareerHub.club.leagueName;
     if (!myLeague.empty()) {
       for (int i = 0; i < (int)s_filterLeagues.size(); i++) {
@@ -2454,6 +2460,17 @@ static void DrawSchedulePage(float w, float h) {
     addIfNew(f.awayFull.empty() ? f.away : f.awayFull);
   }
   if (s_schedClub >= (int)clubNames.size()) s_schedClub = -1;
+
+  // Auto-select user's club now that clubNames is available for this league
+  if (!s_schedClubInit && !clubNames.empty()) {
+    const std::string &myClub = g_CareerHub.club.name;
+    if (!myClub.empty()) {
+      for (int i = 0; i < (int)clubNames.size(); i++) {
+        if (clubNames[i] == myClub) { s_schedClub = i; break; }
+      }
+    }
+    s_schedClubInit = true;
+  }
 
   std::string filterClubName;
   if (s_schedClub >= 0 && s_schedClub < (int)clubNames.size())
@@ -3514,10 +3531,18 @@ static void DrawWorkspace(float contentW, float workH) {
   ImGui::PopStyleVar();
   ImGui::PopStyleColor();
 
-  // Reset calendar init state whenever the user navigates away from it
+  // Reset page-specific init flags whenever the user navigates away
   static e_ManagerPage s_prevPage = PAGE_HOME;
-  if (s_prevPage != g_activePage && s_prevPage == PAGE_CALENDAR)
-    s_calInit = false;
+  if (s_prevPage != g_activePage) {
+    if (s_prevPage == PAGE_CALENDAR)
+      s_calInit = false;
+    if (s_prevPage == PAGE_SCHEDULE) {
+      s_schedInit     = false;
+      s_schedClubInit = false;
+    }
+    if (s_prevPage == PAGE_COMPETITIONS)
+      s_compInit = false;
+  }
   s_prevPage = g_activePage;
 
   switch (g_activePage) {
