@@ -183,6 +183,7 @@ void CareerHubState::Clear() {
   players.clear();
   fixtures.clear();
   standings.clear();
+  tactics.clear();
   ClearBadgeCache();
   ResetNavState();
 }
@@ -430,6 +431,51 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
   isAdvancing          = false;
   pendingAdvanceAction = ADVANCE_NONE;
   advanceFramesWaited  = 0;
+
+  // Load tactics from teams.tactics_xml
+  {
+    tactics.clear();
+    // Seed factory defaults first
+    tactics["position_offense_depth_factor"]      = 0.9f;
+    tactics["position_defense_depth_factor"]      = 0.75f;
+    tactics["position_offense_width_factor"]      = 0.9f;
+    tactics["position_defense_width_factor"]      = 0.8f;
+    tactics["position_offense_midfieldfocus"]     = 0.6f;
+    tactics["position_defense_midfieldfocus"]     = 0.5f;
+    tactics["position_offense_sidefocus_strength"]  = 0.1f;
+    tactics["position_defense_sidefocus_strength"]  = 0.4f;
+    tactics["position_offense_microfocus_strength"] = 0.7f;
+    tactics["position_defense_microfocus_strength"] = 0.8f;
+    tactics["dribble_offensiveness"]              = 0.5f;
+    tactics["dribble_centermagnet"]               = 0.5f;
+
+    std::stringstream tq;
+    tq << "SELECT tactics_xml FROM teams WHERE id=" << cId << " LIMIT 1;";
+    DatabaseResult *tr = GetDB()->Query(tq.str());
+    if (tr->data.size() > 0 && !tr->data.at(0).at(0).empty()) {
+      std::string xml = tr->data.at(0).at(0);
+      size_t pos = 0;
+      while (pos < xml.size()) {
+        size_t os = xml.find('<', pos);
+        if (os == std::string::npos) break;
+        size_t oe = xml.find('>', os);
+        if (oe == std::string::npos) break;
+        std::string key = xml.substr(os + 1, oe - os - 1);
+        if (!key.empty() && key[0] != '/') {
+          size_t vs = oe + 1;
+          std::string closeTag = "</" + key + ">";
+          size_t ve = xml.find(closeTag, vs);
+          if (ve != std::string::npos) {
+            float val = (float)atof(xml.substr(vs, ve - vs).c_str());
+            tactics[key] = val;
+            pos = ve + closeTag.size();
+          } else { pos = oe + 1; }
+        } else { pos = oe + 1; }
+      }
+    }
+    delete tr;
+  }
+
   active = true;
 }
 
@@ -2891,6 +2937,432 @@ static void DrawCompetitionsPage(float w, float h) {
   EndModernCard();
 }
 
+// ---- Team Instructions helpers ------------------------------------------
+
+static void SaveTacticsToDb(int clubId, const std::map<std::string, float> &tactics) {
+  std::stringstream xml;
+  for (const auto &kv : tactics)
+    xml << "<" << kv.first << ">" << kv.second << "</" << kv.first << ">\n";
+  // Escape single-quotes in the XML just in case values are ever strings
+  std::string xmlStr = xml.str();
+  std::string escaped;
+  escaped.reserve(xmlStr.size());
+  for (char c : xmlStr) {
+    if (c == '\'') escaped += "''";
+    else escaped += c;
+  }
+  std::stringstream q;
+  q << "UPDATE teams SET tactics_xml='" << escaped << "' WHERE id=" << clubId << ";";
+  DatabaseResult *r = GetDB()->Query(q.str());
+  delete r;
+}
+
+struct TacInstruction {
+  const char *key;
+  const char *name;
+  const char *category; // "Attacking" | "Defending" | "On the Ball"
+  struct Preset { const char *label; float value; } presets[4];
+};
+
+static const TacInstruction kTacInstructions[] = {
+  { "position_offense_depth_factor", "Attacking Depth", "Attacking",
+    {{"Compact",0.25f},{"Balanced",0.5f},{"Expansive",0.75f},{"Total Attack",1.0f}} },
+  { "position_offense_width_factor", "Attacking Width", "Attacking",
+    {{"Narrow",0.3f},{"Balanced",0.6f},{"Wide",0.8f},{"Full Width",1.0f}} },
+  { "position_offense_midfieldfocus", "Midfield in Attack", "Attacking",
+    {{"Hold Shape",0.2f},{"Balanced",0.45f},{"Join Attack",0.7f},{"All Forward",0.9f}} },
+  { "position_offense_sidefocus_strength", "Flank Play", "Attacking",
+    {{"Central",0.1f},{"Mixed",0.35f},{"Wide Threat",0.6f},{"Wing Overloads",0.9f}} },
+  { "position_offense_microfocus_strength", "Attacking Pressing", "Attacking",
+    {{"Loose",0.2f},{"Balanced",0.5f},{"Tight",0.75f},{"Swarm",0.95f}} },
+  { "position_defense_depth_factor", "Defensive Line", "Defending",
+    {{"Deep Block",0.3f},{"Mid Block",0.55f},{"High Line",0.75f},{"Ultra High",0.95f}} },
+  { "position_defense_width_factor", "Defensive Shape", "Defending",
+    {{"Narrow Block",0.3f},{"Balanced",0.55f},{"Wide",0.8f},{"Spread",1.0f}} },
+  { "position_defense_midfieldfocus", "Midfield Pressure", "Defending",
+    {{"Drop Deep",0.2f},{"Compact",0.45f},{"Press High",0.7f},{"Extreme Press",0.9f}} },
+  { "position_defense_sidefocus_strength", "Flank Coverage", "Defending",
+    {{"Narrow",0.1f},{"Balanced",0.4f},{"Cover Wings",0.65f},{"Full Width",0.9f}} },
+  { "position_defense_microfocus_strength", "Defensive Compactness", "Defending",
+    {{"Loose",0.2f},{"Solid",0.5f},{"Compact",0.75f},{"Ultra Compact",0.95f}} },
+  { "dribble_offensiveness", "Dribble Rate", "On the Ball",
+    {{"Cautious",0.2f},{"Balanced",0.5f},{"Direct",0.7f},{"Expressive",0.9f}} },
+  { "dribble_centermagnet", "Dribble Direction", "On the Ball",
+    {{"Hug Flanks",0.1f},{"Mixed",0.4f},{"Through Middle",0.7f},{"Central Drive",0.9f}} },
+};
+static const int kNumTacInstructions = 12;
+
+static void DrawTeamInstructionsPanel(float px, float py, float pw, float ph) {
+  ImDrawList *dl = ImGui::GetWindowDrawList();
+  // Dark overlay on top of the pitch
+  dl->AddRectFilled(ImVec2(px, py), ImVec2(px + pw, py + ph),
+                    IM_COL32(8, 14, 32, 230), 10.0f);
+
+  // Category colours (bg tint for section headers)
+  const ImU32 kCatAttack  = IM_COL32(18, 100, 42, 200);
+  const ImU32 kCatDefend  = IM_COL32(16, 56, 130, 200);
+  const ImU32 kCatBall    = IM_COL32(140, 80, 10, 200);
+  const ImU32 kCatAttackT = IM_COL32(50, 200, 90, 255);
+  const ImU32 kCatDefendT = IM_COL32(80, 160, 255, 255);
+  const ImU32 kCatBallT   = IM_COL32(255, 190, 60, 255);
+
+  const float kRowH    = 36.0f;
+  const float kHdrH    = 22.0f;
+  const float kPadX    = 10.0f;
+  const float kPadTop  = 8.0f;
+  const float kBtnGap  = 3.0f;
+
+  // Scrollable child so long lists don't overflow the pitch area
+  ImGui::SetCursorScreenPos(ImVec2(px + kPadX, py + kPadTop));
+  ImGui::BeginChild("##tacInstr", ImVec2(pw - kPadX * 2.0f, ph - kPadTop * 2.0f),
+                    false, ImGuiWindowFlags_None);
+  ImDrawList *wdl = ImGui::GetWindowDrawList();
+
+  const char *lastCat = nullptr;
+  float innerW = pw - kPadX * 2.0f - 12.0f;
+
+  for (int ti = 0; ti < kNumTacInstructions; ti++) {
+    const TacInstruction &ins = kTacInstructions[ti];
+
+    // Category header
+    if (!lastCat || strcmp(lastCat, ins.category) != 0) {
+      lastCat = ins.category;
+      ImU32 catBg  = kCatAttack;
+      ImU32 catTxt = kCatAttackT;
+      if (strcmp(ins.category, "Defending") == 0)    { catBg = kCatDefend; catTxt = kCatDefendT; }
+      else if (strcmp(ins.category, "On the Ball") == 0) { catBg = kCatBall; catTxt = kCatBallT; }
+
+      ImVec2 hp = ImGui::GetCursorScreenPos();
+      wdl->AddRectFilled(hp, ImVec2(hp.x + innerW, hp.y + kHdrH), catBg, 4.0f);
+      wdl->AddRectFilled(hp, ImVec2(hp.x + 3.0f, hp.y + kHdrH), catTxt);
+      PushMgrFont(g_ManagerFontSmall);
+      ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(catTxt));
+      char catBuf[48]; snprintf(catBuf, sizeof(catBuf), "  %s", ins.category);
+      ImGui::TextUnformatted(catBuf);
+      ImGui::PopStyleColor();
+      PopMgrFont(g_ManagerFontSmall);
+    }
+
+    // Row background
+    ImVec2 rp = ImGui::GetCursorScreenPos();
+    wdl->AddRectFilled(rp, ImVec2(rp.x + innerW, rp.y + kRowH),
+                       IM_COL32(12, 20, 48, 180), 3.0f);
+
+    // Tactic name (left 38%)
+    float nameW = innerW * 0.38f;
+    PushMgrFont(g_ManagerFontSmall);
+    ImGui::SetCursorScreenPos(ImVec2(rp.x + 8.0f, rp.y + (kRowH - ImGui::GetTextLineHeight()) * 0.5f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.88f, 0.95f, 1.0f));
+    ImGui::TextUnformatted(ins.name);
+    ImGui::PopStyleColor();
+    PopMgrFont(g_ManagerFontSmall);
+
+    // Preset buttons (right 62%)
+    float btnAreaX = rp.x + nameW;
+    float btnAreaW = innerW - nameW - kBtnGap;
+    float btnW = (btnAreaW - kBtnGap * 3.0f) / 4.0f;
+    float btnH = kRowH - 8.0f;
+    float btnY = rp.y + 4.0f;
+
+    // Find current value to determine selected preset
+    float curVal = 0.5f;
+    auto it = g_CareerHub.tactics.find(ins.key);
+    if (it != g_CareerHub.tactics.end()) curVal = it->second;
+
+    int selPreset = 0;
+    float bestDist = 9999.0f;
+    for (int pi = 0; pi < 4; pi++) {
+      float d = fabsf(ins.presets[pi].value - curVal);
+      if (d < bestDist) { bestDist = d; selPreset = pi; }
+    }
+
+    ImGui::PushID(ins.key);
+    for (int pi = 0; pi < 4; pi++) {
+      float bx = btnAreaX + pi * (btnW + kBtnGap);
+      bool selected = (pi == selPreset);
+
+      ImGui::SetCursorScreenPos(ImVec2(bx, btnY));
+      ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
+      ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2.0f, 2.0f));
+      if (selected) {
+        ImGui::PushStyleColor(ImGuiCol_Button,        C32(kAccent));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, C32(kAccentH));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  C32(kAccentA));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1,1,1,1));
+      } else {
+        ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(20, 30, 60, 200));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(40, 55, 110, 220));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  IM_COL32(60, 80, 150, 255));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.65f, 0.75f, 1.0f));
+      }
+
+      PushMgrFont(g_ManagerFontSmall);
+      char btnId[64]; snprintf(btnId, sizeof(btnId), "%s##p%d", ins.presets[pi].label, pi);
+      if (ImGui::Button(btnId, ImVec2(btnW, btnH))) {
+        g_CareerHub.tactics[ins.key] = ins.presets[pi].value;
+        SaveTacticsToDb(g_CareerHub.clubId, g_CareerHub.tactics);
+      }
+      PopMgrFont(g_ManagerFontSmall);
+
+      ImGui::PopStyleColor(4);
+      ImGui::PopStyleVar(2);
+    }
+    ImGui::PopID();
+
+    // Advance cursor past the row
+    ImGui::SetCursorScreenPos(ImVec2(rp.x, rp.y + kRowH + 2.0f));
+    ImGui::Dummy(ImVec2(innerW, 0.0f));
+  }
+
+  // ---- Tactic Visualisation Mini Pitch ------------------------------------
+  ImGui::Dummy(ImVec2(innerW, 8.0f));
+
+  // Read tactic values (use defaults if missing)
+  auto TV = [&](const char *k, float def) -> float {
+    auto it = g_CareerHub.tactics.find(k);
+    return it != g_CareerHub.tactics.end() ? it->second : def;
+  };
+  float offDepth   = TV("position_offense_depth_factor",      0.9f);
+  float defDepth   = TV("position_defense_depth_factor",      0.75f);
+  float offWidth   = TV("position_offense_width_factor",      0.9f); (void)offWidth;
+  float defWidth   = TV("position_defense_width_factor",      0.8f);
+  float offMid     = TV("position_offense_midfieldfocus",     0.6f);
+  float defMid     = TV("position_defense_midfieldfocus",     0.5f);
+  float offSide    = TV("position_offense_sidefocus_strength",  0.1f);
+  float defSide    = TV("position_defense_sidefocus_strength",  0.4f);
+  float offMicro   = TV("position_offense_microfocus_strength", 0.7f); (void)offMicro;
+  float defMicro   = TV("position_defense_microfocus_strength", 0.8f);
+  float dribOff    = TV("dribble_offensiveness",              0.5f);
+  float dribCtr    = TV("dribble_centermagnet",               0.5f);
+
+  // Pitch dimensions — landscape (wide), attack direction left→right
+  // x=0=our goal, x=1=opponent goal  |  y=0=top touchline, y=1=bottom touchline
+  float mpW  = innerW - 4.0f;
+  float mpH  = mpW * 0.38f;   // compact landscape — fits below the tactic rows
+  ImVec2 mpos = ImGui::GetCursorScreenPos();
+  float mpX = mpos.x + 2.0f;
+  float mpY = mpos.y;
+
+  // Arrow helper
+  auto Arrow = [&](float x1,float y1,float x2,float y2, ImU32 col, float thick, float hd) {
+    wdl->AddLine(ImVec2(x1,y1), ImVec2(x2,y2), col, thick);
+    float dx=x2-x1, dy=y2-y1, len=sqrtf(dx*dx+dy*dy);
+    if (len < 2.0f) return;
+    dx/=len; dy/=len;
+    float nx=-dy, ny=dx;
+    wdl->AddTriangleFilled(
+      ImVec2(x2,y2),
+      ImVec2(x2-dx*hd+nx*hd*0.45f, y2-dy*hd+ny*hd*0.45f),
+      ImVec2(x2-dx*hd-nx*hd*0.45f, y2-dy*hd-ny*hd*0.45f), col);
+  };
+  // Normalised-coord helpers: x=0 our goal, x=1 opp goal; y=0 top, y=1 bottom
+  auto PX = [&](float nx) { return mpX + nx * mpW; };
+  auto PY = [&](float ny) { return mpY + ny * mpH; };
+
+  // Pitch stripes (vertical — along the length of the pitch)
+  {
+    int ns = 10;
+    float sh = mpH / ns;
+    for (int i = 0; i < ns; i++) {
+      ImU32 c = (i%2==0) ? IM_COL32(18,80,34,255) : IM_COL32(22,94,40,255);
+      wdl->AddRectFilled(ImVec2(mpX, mpY+i*sh), ImVec2(mpX+mpW, mpY+(i+1)*sh), c);
+    }
+  }
+  wdl->PushClipRect(ImVec2(mpX,mpY), ImVec2(mpX+mpW,mpY+mpH), true);
+  {
+    int ns = 10; float sh = mpH / ns;
+    for (int i = 0; i < ns; i++) {
+      ImU32 c = (i%2==0) ? IM_COL32(18,80,34,255) : IM_COL32(22,94,40,255);
+      wdl->AddRectFilled(ImVec2(mpX, mpY+i*sh), ImVec2(mpX+mpW, mpY+(i+1)*sh), c);
+    }
+  }
+
+  // Pitch markings
+  ImU32 lc = IM_COL32(255,255,255,50);
+  float lm=PX(0.05f), rm=PX(0.95f), tm=PY(0.06f), bm=PY(0.94f);
+  float midX=PX(0.5f), midY=PY(0.5f);
+  wdl->AddRect(ImVec2(lm,tm), ImVec2(rm,bm), lc, 0.0f, 0, 1.2f);
+  wdl->AddLine(ImVec2(midX,tm), ImVec2(midX,bm), lc, 1.2f);        // halfway line
+  wdl->AddCircle(ImVec2(midX,midY), mpH*0.18f, lc, 36, 1.2f);      // centre circle
+  wdl->AddCircleFilled(ImVec2(midX,midY), 2.5f, lc);
+  // Our penalty area (left)
+  float paw=mpW*0.14f, pah=mpH*0.52f, pay=PY(0.5f)-pah*0.5f;
+  wdl->AddRect(ImVec2(lm, pay), ImVec2(lm+paw, pay+pah), lc, 0.0f, 0, 1.2f);
+  // Goal (left)
+  float gw=mpW*0.02f, gh=mpH*0.25f, gy=PY(0.5f)-gh*0.5f;
+  wdl->AddRect(ImVec2(mpX, gy), ImVec2(mpX+gw, gy+gh), lc, 0.0f, 0, 1.2f);
+  // Opponent penalty area (right)
+  wdl->AddRect(ImVec2(rm-paw, pay), ImVec2(rm, pay+pah), lc, 0.0f, 0, 1.2f);
+  // Goal (right)
+  wdl->AddRect(ImVec2(mpX+mpW-gw, gy), ImVec2(mpX+mpW, gy+gh), lc, 0.0f, 0, 1.2f);
+
+  // ---- DEFENDING indicators (blue) ----------------------------------------
+  // Defensive line — vertical bar in our half (x moves right as line goes higher)
+  float defLineNX = 0.26f + defDepth * 0.24f;  // 0.3→0.332, 0.95→0.488
+  {
+    ImU32 defCol = IM_COL32(80, 150, 255, 230);
+    wdl->AddLine(ImVec2(PX(defLineNX), tm+2), ImVec2(PX(defLineNX), bm-2), defCol, 2.0f);
+    wdl->AddLine(ImVec2(PX(defLineNX)-4, tm+2), ImVec2(PX(defLineNX)+4, tm+2), defCol, 1.5f);
+    wdl->AddLine(ImVec2(PX(defLineNX)-4, bm-2), ImVec2(PX(defLineNX)+4, bm-2), defCol, 1.5f);
+  }
+
+  // Defensive width — shaded bands at top and bottom in our half
+  if (defWidth > 0.3f) {
+    float alpha = (defWidth - 0.3f) / 0.7f * 90.0f;
+    float bandH = mpH * defWidth * 0.14f;
+    ImU32 bandCol = IM_COL32(50, 110, 210, (int)alpha);
+    wdl->AddRectFilled(ImVec2(PX(0.05f), PY(0.0f)), ImVec2(PX(defLineNX), PY(0.0f)+bandH), bandCol);
+    wdl->AddRectFilled(ImVec2(PX(0.05f), PY(1.0f)-bandH), ImVec2(PX(defLineNX), PY(1.0f)), bandCol);
+  }
+
+  // Defensive flank coverage — arrows running along top/bottom wings toward our goal
+  if (defSide > 0.2f) {
+    float alpha = (defSide - 0.2f) / 0.8f;
+    ImU32 defArrow = IM_COL32(80, 160, 255, (int)(alpha * 200.0f + 40.0f));
+    float thick = 1.0f + alpha * 1.5f;
+    float hd    = 5.0f + alpha * 3.0f;
+    float wingY = 0.08f + (1.0f - defSide) * 0.24f;  // 0.9→0.08 (near touchline), 0.1→0.32
+    float fromX = defLineNX + 0.14f;
+    float toX   = defLineNX - 0.02f;
+    Arrow(PX(fromX), PY(wingY),        PX(toX), PY(wingY),        defArrow, thick, hd);
+    Arrow(PX(fromX), PY(1.0f-wingY),   PX(toX), PY(1.0f-wingY),   defArrow, thick, hd);
+  }
+
+  // Pressing arrows — rightward arrows in opponent half when midfield presses high
+  if (defMid > 0.5f) {
+    float alpha = (defMid - 0.5f) / 0.5f;
+    ImU32 pressCol = IM_COL32(100, 180, 255, (int)(alpha * 170.0f + 30.0f));
+    float thick = 1.0f + alpha * 1.2f;
+    float hd = 4.0f + alpha * 2.5f;
+    float fromX = 0.52f, toX = 0.66f + alpha * 0.08f;
+    Arrow(PX(fromX), PY(0.25f), PX(toX), PY(0.25f), pressCol, thick, hd);
+    Arrow(PX(fromX), PY(0.50f), PX(toX), PY(0.50f), pressCol, thick, hd);
+    Arrow(PX(fromX), PY(0.75f), PX(toX), PY(0.75f), pressCol, thick, hd);
+  }
+
+  // Defensive compactness — inward arrows from touchlines toward centre in our half
+  if (defMicro > 0.5f) {
+    float alpha = (defMicro - 0.5f) / 0.5f;
+    ImU32 compCol = IM_COL32(60, 130, 220, (int)(alpha * 160.0f + 20.0f));
+    float thick = 1.0f + alpha;
+    float hd = 3.5f + alpha * 2.0f;
+    float compX = defLineNX - 0.06f;
+    Arrow(PX(compX), PY(0.12f), PX(compX), PY(0.30f), compCol, thick, hd); // top → center
+    Arrow(PX(compX), PY(0.88f), PX(compX), PY(0.70f), compCol, thick, hd); // bottom → center
+  }
+
+  // ---- ATTACKING indicators (green) ----------------------------------------
+
+  // Attacking zone shading — how far into opponent half the team pushes
+  {
+    float zoneLeftNX = 0.5f + offDepth * 0.40f;  // 0.25→0.6, 1.0→0.9
+    wdl->AddRectFilled(ImVec2(PX(0.5f), PY(0.06f)),
+                       ImVec2(PX(zoneLeftNX < 0.95f ? zoneLeftNX : 0.95f), PY(0.94f)),
+                       IM_COL32(50, 200, 80, (int)(offDepth * 38.0f + 8.0f)));
+  }
+
+  // Attacking flank arrows — along top/bottom wings into opponent half
+  if (offSide > 0.2f) {
+    float alpha = (offSide - 0.2f) / 0.8f;
+    ImU32 attArrow = IM_COL32(50, 220, 100, (int)(alpha * 210.0f + 40.0f));
+    float thick = 1.2f + alpha * 1.8f;
+    float hd    = 5.0f + alpha * 4.0f;
+    float wingY = 0.07f + (1.0f - offSide) * 0.20f;
+    float fromX = 0.48f, toX = 0.72f + alpha * 0.14f;
+    Arrow(PX(fromX), PY(wingY),      PX(toX), PY(wingY),      attArrow, thick, hd);
+    Arrow(PX(fromX), PY(1.0f-wingY), PX(toX), PY(1.0f-wingY), attArrow, thick, hd);
+  }
+
+  // Attacking depth — central forward arrow in opponent half
+  if (offDepth > 0.4f) {
+    float alpha = (offDepth - 0.4f) / 0.6f;
+    ImU32 attCol = IM_COL32(80, 210, 110, (int)(alpha * 180.0f + 30.0f));
+    float thick = 1.2f + alpha * 1.5f;
+    float hd    = 5.0f + alpha * 3.5f;
+    Arrow(PX(0.50f), PY(0.5f), PX(0.62f + alpha*0.20f), PY(0.5f), attCol, thick, hd);
+  }
+
+  // Midfield joining attack — arrows slightly off-center
+  if (offMid > 0.5f) {
+    float alpha = (offMid - 0.5f) / 0.5f;
+    ImU32 midCol = IM_COL32(120, 230, 140, (int)(alpha * 160.0f + 20.0f));
+    float thick = 1.0f + alpha;
+    float hd    = 4.0f + alpha * 2.5f;
+    float toX   = 0.68f + alpha * 0.10f;
+    Arrow(PX(0.44f), PY(0.34f), PX(toX), PY(0.34f), midCol, thick, hd);
+    Arrow(PX(0.44f), PY(0.66f), PX(toX), PY(0.66f), midCol, thick, hd);
+  }
+
+  // ---- ON THE BALL indicators (amber) -------------------------------------
+  {
+    float alpha = dribOff * 0.85f + 0.15f;
+    float hd    = 4.5f + dribOff * 3.0f;
+    float thick = 1.2f + dribOff * 1.2f;
+    float fromX = 0.50f, toX = 0.66f + dribOff * 0.10f;
+    if (dribCtr > 0.55f) {
+      // Central drive — straight right through middle
+      ImU32 aCol = IM_COL32(255, 190, 60, (int)(alpha * 200.0f));
+      Arrow(PX(fromX), PY(0.5f), PX(toX), PY(0.5f), aCol, thick, hd);
+    } else if (dribCtr < 0.35f) {
+      // Hug flanks — angled toward touchlines
+      ImU32 aCol = IM_COL32(255, 190, 60, (int)(alpha * 180.0f));
+      Arrow(PX(fromX), PY(0.5f), PX(toX-0.04f), PY(0.18f), aCol, thick-0.3f, hd);
+      Arrow(PX(fromX), PY(0.5f), PX(toX-0.04f), PY(0.82f), aCol, thick-0.3f, hd);
+    } else {
+      // Mixed — center + slight flank spread
+      ImU32 aCol = IM_COL32(255, 190, 60, (int)(alpha * 160.0f));
+      Arrow(PX(fromX),  PY(0.50f), PX(toX),        PY(0.50f), aCol, thick,       hd);
+      Arrow(PX(fromX),  PY(0.50f), PX(toX-0.06f),  PY(0.28f), aCol, thick-0.4f, hd-1.0f);
+      Arrow(PX(fromX),  PY(0.50f), PX(toX-0.06f),  PY(0.72f), aCol, thick-0.4f, hd-1.0f);
+    }
+  }
+
+  wdl->PopClipRect();
+
+  // Pitch border
+  wdl->AddRect(ImVec2(mpX,mpY), ImVec2(mpX+mpW,mpY+mpH),
+               IM_COL32(255,255,255,40), 6.0f, 0, 1.2f);
+
+  // Attack direction label (right side)
+  {
+    PushMgrFont(g_ManagerFontSmall);
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f,0.44f,0.54f,1.0f));
+    ImGui::SetCursorScreenPos(ImVec2(mpX, mpY + mpH + 3.0f));
+    ImGui::TextUnformatted("OUR GOAL");
+    float rw = ImGui::CalcTextSize("OPP GOAL").x;
+    ImGui::SetCursorScreenPos(ImVec2(mpX + mpW - rw, mpY + mpH + 3.0f));
+    ImGui::TextUnformatted("OPP GOAL");
+    ImGui::PopStyleColor();
+    PopMgrFont(g_ManagerFontSmall);
+  }
+
+  // Legend dots
+  {
+    float legY = mpY + mpH + 18.0f;
+    float legX = mpX;
+    auto LegDot = [&](float &lx, ImU32 col, const char *lbl) {
+      wdl->AddCircleFilled(ImVec2(lx+5.0f, legY+6.0f), 4.0f, col);
+      lx += 12.0f;
+      PushMgrFont(g_ManagerFontSmall);
+      ImGui::SetCursorScreenPos(ImVec2(lx, legY));
+      ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(col));
+      ImGui::TextUnformatted(lbl);
+      ImGui::PopStyleColor();
+      PopMgrFont(g_ManagerFontSmall);
+      lx += ImGui::CalcTextSize(lbl).x + 10.0f;
+    };
+    LegDot(legX, IM_COL32(80,150,255,255), "Defending");
+    LegDot(legX, IM_COL32(80,210,110,255), "Attacking");
+    LegDot(legX, IM_COL32(255,190,60,255), "On the Ball");
+  }
+
+  // Reserve layout space
+  ImGui::SetCursorScreenPos(ImVec2(mpX, mpY));
+  ImGui::Dummy(ImVec2(mpW, mpH + 32.0f));
+
+  ImGui::EndChild();
+}
+
 // ---- DrawTacticsPage ----------------------------------------------------
 
 // Formation node layout for 4-3-3.
@@ -3108,6 +3580,8 @@ static void DrawTacticsPage(float w, float h) {
   float boardW = usW * 0.57f - kGap * 0.5f;
   float listW  = usW * 0.43f - kGap * 0.5f;
 
+  static bool s_showTeamInstructions = false;
+
   // ===== Formation board ===================================================
   ImGui::BeginGroup();
 
@@ -3115,9 +3589,57 @@ static void DrawTacticsPage(float w, float h) {
   ImDrawList *dl = ImGui::GetWindowDrawList();
 
   float pitchX = cardPos.x;
-  float pitchY = cardPos.y;
   float pitchW = boardW;
-  float pitchH = usH;
+
+  // Header bar: two toggle buttons (32px tall)
+  const float kHdrBarH = 32.0f;
+  {
+    const float kBtnGapHdr = 6.0f;
+    float btnW  = boardW * 0.46f;
+    float btnH  = 26.0f;
+    float btnY  = cardPos.y + (kHdrBarH - btnH) * 0.5f;
+
+    // --- Team Instructions ---
+    ImGui::SetCursorScreenPos(ImVec2(pitchX, btnY));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 5.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.0f, 4.0f));
+    if (s_showTeamInstructions) {
+      ImGui::PushStyleColor(ImGuiCol_Button,        C32(kAccent));
+      ImGui::PushStyleColor(ImGuiCol_ButtonHovered, C32(kAccentH));
+      ImGui::PushStyleColor(ImGuiCol_ButtonActive,  C32(kAccentA));
+      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1,1,1,1));
+    } else {
+      ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(14, 22, 50, 220));
+      ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(30, 45, 90, 230));
+      ImGui::PushStyleColor(ImGuiCol_ButtonActive,  IM_COL32(50, 70, 130, 255));
+      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.75f, 0.88f, 1.0f));
+    }
+    PushMgrFont(g_ManagerFontSmall);
+    if (ImGui::Button("Team Instructions", ImVec2(btnW, btnH)))
+      s_showTeamInstructions = !s_showTeamInstructions;
+    PopMgrFont(g_ManagerFontSmall);
+    ImGui::PopStyleColor(4);
+    ImGui::PopStyleVar(2);
+
+    // --- Player Instructions (placeholder, disabled) ---
+    ImGui::SetCursorScreenPos(ImVec2(pitchX + btnW + kBtnGapHdr, btnY));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 5.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.0f, 4.0f));
+    ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(14, 22, 50, 120));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(14, 22, 50, 120));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  IM_COL32(14, 22, 50, 120));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 0.44f, 0.54f, 1.0f));
+    PushMgrFont(g_ManagerFontSmall);
+    ImGui::BeginDisabled(true);
+    ImGui::Button("Player Instructions", ImVec2(btnW, btnH));
+    ImGui::EndDisabled();
+    PopMgrFont(g_ManagerFontSmall);
+    ImGui::PopStyleColor(4);
+    ImGui::PopStyleVar(2);
+  }
+
+  float pitchY = cardPos.y + kHdrBarH;
+  float pitchH = usH - kHdrBarH;
 
   // Pitch outer card shadow
   dl->AddRectFilled(ImVec2(pitchX + 3, pitchY + 3),
@@ -3180,6 +3702,11 @@ static void DrawTacticsPage(float w, float h) {
     float gw=pitchW*0.22f, gh=pitchH*0.055f, gx=pitchX+(pitchW-gw)*0.5f;
     dl->AddRect(ImVec2(gx, mt), ImVec2(gx+gw, mt+gh), lc, 0.0f, 0, 1.5f); }
 
+  if (s_showTeamInstructions) {
+    DrawTeamInstructionsPanel(pitchX, pitchY, pitchW, pitchH);
+  }
+
+  if (!s_showTeamInstructions) {
   // Build node data — include all fields needed for display and tooltip
   struct NodeInfo {
     std::string name;
@@ -3386,6 +3913,7 @@ static void DrawTacticsPage(float w, float h) {
                           stCol, 2.0f);
     }
   }
+  } // end if (!s_showTeamInstructions)
 
   dl->PopClipRect();
 

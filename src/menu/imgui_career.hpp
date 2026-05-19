@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <functional>
+#include <map>
 
 enum AdvanceAction {
   ADVANCE_NONE         = 0,
@@ -90,6 +91,8 @@ struct CareerHubState {
     std::string p, w, d, l, gf, ga, gd, pts;
   };
   std::vector<Standing> standings;
+
+  std::map<std::string, float> tactics; // tactic key → current value (0.0-1.0)
 
   void Clear();
   void LoadFromDB(int managerId, int clubId);
