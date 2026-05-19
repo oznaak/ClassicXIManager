@@ -25,6 +25,7 @@
 #include "main.hpp"
 #include "utils/database.hpp"
 #include "base/utils.hpp"
+#include "menu/imgui_menu.hpp"
 
 CareerHubState g_CareerHub;
 PreMatchLineupState g_PreMatchLineup;
@@ -879,13 +880,26 @@ static void DrawSidebar(float sideW, float winH) {
 
   ImDrawList *dl = ImGui::GetWindowDrawList();
 
-  // ---- Brand ----------------------------------------------------------
-  ImGui::SetCursorPos(ImVec2(16.0f, 16.0f));
-  PushMgrFont(g_ManagerFontBold);
-  ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
-  ImGui::TextUnformatted(g_CareerHub.manager.name.empty() ? "Classic Manager" : g_CareerHub.manager.name.c_str());
-  ImGui::PopStyleColor();
-  PopMgrFont(g_ManagerFontBold);
+  // ---- Brand (game logo) ----------------------------------------------
+  {
+    GLuint logoTex = GetMainLogoTexture();
+    if (logoTex) {
+      const float logoW = sideW - 32.0f;
+      const float logoH = logoW / kMainLogoAspect;
+      float lx = ImGui::GetWindowPos().x + 16.0f;
+      float ly = ImGui::GetWindowPos().y + 14.0f;
+      dl->AddImage((ImTextureID)(intptr_t)logoTex,
+                   ImVec2(lx, ly), ImVec2(lx + logoW, ly + logoH));
+      ImGui::Dummy(ImVec2(0, logoH + 14.0f));
+    } else {
+      ImGui::SetCursorPos(ImVec2(16.0f, 16.0f));
+      PushMgrFont(g_ManagerFontBold);
+      ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
+      ImGui::TextUnformatted("Classic XI Manager");
+      ImGui::PopStyleColor();
+      PopMgrFont(g_ManagerFontBold);
+    }
+  }
 
   ImGui::Dummy(ImVec2(0, 8.0f));
   {
@@ -918,16 +932,10 @@ static void DrawSidebar(float sideW, float winH) {
   ImGui::Dummy(ImVec2(0, 4.0f));
   ImGui::SetCursorPosX(16.0f);
   PushMgrFont(g_ManagerFontSmall);
-  ImGui::PushStyleColor(ImGuiCol_Text, kTextDim);
+  ImGui::PushStyleColor(ImGuiCol_Text, kTextSec);
   {
-    std::string mgr;
-    if (!g_CareerHub.manager.nationality.empty()) mgr = g_CareerHub.manager.nationality;
-    if (!g_CareerHub.manager.age.empty()) {
-      if (!mgr.empty()) mgr += " \xe2\x80\xa2 Age ";
-      else mgr = "Age ";
-      mgr += g_CareerHub.manager.age;
-    }
-    if (!mgr.empty()) ImGui::TextUnformatted(mgr.c_str());
+    const std::string &mgrName = g_CareerHub.manager.name;
+    if (!mgrName.empty()) ImGui::TextUnformatted(mgrName.c_str());
   }
   ImGui::PopStyleColor();
   PopMgrFont(g_ManagerFontSmall);

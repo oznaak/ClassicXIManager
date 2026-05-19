@@ -377,12 +377,18 @@ static GLuint TryLoadImage(const std::string &path) {
   GLuint texID = 0;
   glGenTextures(1, &texID);
   glBindTexture(GL_TEXTURE_2D, texID);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
   glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, rgba->w, rgba->h, 0,
                GL_RGBA, GL_UNSIGNED_BYTE, rgba->pixels);
+  // Generate mipmaps via SDL proc-address (glGenerateMipmap is GL 3.0+ core)
+  {
+    typedef void (APIENTRY *FnGenMip)(GLenum);
+    static FnGenMip fnGenMip = (FnGenMip)SDL_GL_GetProcAddress("glGenerateMipmap");
+    if (fnGenMip) fnGenMip(GL_TEXTURE_2D);
+  }
   glBindTexture(GL_TEXTURE_2D, 0);
   SDL_FreeSurface(rgba);
 
@@ -432,7 +438,7 @@ static GLuint LoadImageTexture(const std::string &relPath) {
   return texID;
 }
 
-static GLuint GetMainLogoTexture() {
+unsigned int GetMainLogoTexture() {
   static GLuint s_logoTex = 0;
   static bool s_tried = false;
   if (s_tried) return s_logoTex;
@@ -706,23 +712,24 @@ static void DrawMainMenuScreen(float winW, float winH) {
   ImGui::PopStyleColor();
 
   GLuint logoTex = GetMainLogoTexture();
-  const float kLogoSz = 280.0f;
+  const float kLogoH = 180.0f;
+  const float kLogoW = kLogoH * kMainLogoAspect;
 
-  float logoX = (kLeftW - kLogoSz) * 0.5f;
-  float logoY = (winH - kLogoSz) * 0.5f - 20.0f;
+  float logoX = (kLeftW - kLogoW) * 0.5f;
+  float logoY = (winH - kLogoH) * 0.5f - 20.0f;
   if (logoY < 20.0f) logoY = 20.0f;
 
   if (logoTex) {
     dl->AddImage((ImTextureID)(intptr_t)logoTex,
                  ImVec2(wp.x + logoX, wp.y + logoY),
-                 ImVec2(wp.x + logoX + kLogoSz, wp.y + logoY + kLogoSz));
+                 ImVec2(wp.x + logoX + kLogoW, wp.y + logoY + kLogoH));
   }
 
   const char *sub1 = "Build your career. Shape your club.";
   const char *sub2 = "Watch football unfold.";
   ImVec2 sz1 = ImGui::CalcTextSize(sub1);
   ImVec2 sz2 = ImGui::CalcTextSize(sub2);
-  float textY = logoY + kLogoSz + 16.0f;
+  float textY = logoY + kLogoH + 16.0f;
 
   PushMF(g_ManagerFontRegular);
   dl->AddText(ImVec2(wp.x + (kLeftW - sz1.x) * 0.5f, wp.y + textY),
@@ -798,8 +805,8 @@ static void DrawCreateProfileScreen(float winW, float winH) {
   ImVec2 wp = ImGui::GetWindowPos();
   ImVec2 display = ImGui::GetIO().DisplaySize;
 
-  const float kLogoW = 110.0f;
-  const float kLogoH = 110.0f;
+  const float kLogoH   = 80.0f;
+  const float kLogoW   = kLogoH * kMainLogoAspect;
   const float kLogoGap = 24.0f;
   const float kCardW = 620.0f;
   const float kCardH = 560.0f;
@@ -941,8 +948,8 @@ static void DrawSettingsPlaceholderScreen(float winW, float winH) {
   ImVec2 wp = ImGui::GetWindowPos();
   ImVec2 display = ImGui::GetIO().DisplaySize;
 
-  const float kLogoW = 100.0f;
-  const float kLogoH = 100.0f;
+  const float kLogoH = 72.0f;
+  const float kLogoW = kLogoH * kMainLogoAspect;
   const float kLogoGap = 24.0f;
   const float kCardW = 520.0f;
   const float kCardH = 320.0f;
@@ -1014,8 +1021,8 @@ static void DrawLoadGameScreen(float winW, float winH) {
   ImVec2 wp = ImGui::GetWindowPos();
   ImVec2 display = ImGui::GetIO().DisplaySize;
 
-  const float kLogoW = 100.0f;
-  const float kLogoH = 100.0f;
+  const float kLogoH = 72.0f;
+  const float kLogoW = kLogoH * kMainLogoAspect;
   const float kLogoGap = 24.0f;
   const float kCardW = 760.0f;
   const float kCardH = 640.0f;
@@ -1220,8 +1227,8 @@ static void DrawSelectCountryScreen(float winW, float winH) {
   ImVec2 wp = ImGui::GetWindowPos();
   ImVec2 display = ImGui::GetIO().DisplaySize;
 
-  const float kLogoW = 100.0f;
-  const float kLogoH = 100.0f;
+  const float kLogoH = 72.0f;
+  const float kLogoW = kLogoH * kMainLogoAspect;
   const float kLogoGap = 24.0f;
   const float kCardW = 760.0f;
   const float kCardH = 560.0f;
@@ -1373,8 +1380,8 @@ static void DrawSelectLeagueScreen(float winW, float winH) {
   ImVec2 wp = ImGui::GetWindowPos();
   ImVec2 display = ImGui::GetIO().DisplaySize;
 
-  const float kLogoW = 100.0f;
-  const float kLogoH = 100.0f;
+  const float kLogoH = 72.0f;
+  const float kLogoW = kLogoH * kMainLogoAspect;
   const float kLogoGap = 24.0f;
   const float kCardW = 760.0f;
   const float kCardH = 560.0f;
@@ -1550,8 +1557,8 @@ static void DrawSelectClubScreen(float winW, float winH) {
   ImVec2 wp = ImGui::GetWindowPos();
   ImVec2 display = ImGui::GetIO().DisplaySize;
 
-  const float kLogoW = 100.0f;
-  const float kLogoH = 100.0f;
+  const float kLogoH = 72.0f;
+  const float kLogoW = kLogoH * kMainLogoAspect;
   const float kLogoGap = 24.0f;
   const float kCardW = 760.0f;
   const float kCardH = 640.0f;

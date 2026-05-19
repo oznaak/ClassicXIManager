@@ -81,3 +81,8 @@ extern PreCareerState g_PreCareer;
 
 // Called from OpenGLRenderer3D::SwapBuffers() between NewFrame / Render.
 void RenderImGuiPreCareer();
+
+// Logo texture — shared with career UI. Aspect ratio: 1672x941 (landscape).
+// Returns a GL texture ID (unsigned int); include GL headers before use.
+unsigned int GetMainLogoTexture();
+static const float kMainLogoAspect = 1672.0f / 941.0f;
