@@ -202,6 +202,11 @@ static std::string FormatDateDisplay(const std::string &iso) {
   return std::string(buf);
 }
 
+// Mutable accent — updated from club color1 in LoadFromDB
+static ImVec4 kAccent  = ImVec4(0.741f, 0.102f, 0.788f, 1.0f);
+static ImVec4 kAccentH = ImVec4(0.863f, 0.318f, 0.918f, 1.0f);
+static ImVec4 kAccentA = ImVec4(0.576f, 0.047f, 0.620f, 1.0f);
+
 void CareerHubState::LoadFromDB(int mgrId, int cId) {
   active = false;
   managerId = mgrId;
@@ -246,7 +251,7 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
 
   {
     std::stringstream q;
-    q << "SELECT teams.name, teams.shortname, teams.logo_url, leagues.name, leagues.id"
+    q << "SELECT teams.name, teams.shortname, teams.logo_url, leagues.name, leagues.id, teams.color1"
       << " FROM teams JOIN leagues ON teams.league_id = leagues.id"
       << " WHERE teams.id = " << clubId << " LIMIT 1;";
     DatabaseResult *r = GetDB()->Query(q.str());
@@ -255,6 +260,15 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
     club.logoPath   = DBCell(r, 0, 2);
     club.leagueName = DBCell(r, 0, 3);
     club.leagueId   = atoi(DBCell(r, 0, 4).c_str());
+    {
+      std::string c1 = DBCell(r, 0, 5);
+      int ri = 189, gi = 26, bi = 201; // fallback magenta
+      if (!c1.empty()) sscanf(c1.c_str(), "%d , %d , %d", &ri, &gi, &bi);
+      float fr = ri / 255.0f, fg = gi / 255.0f, fb = bi / 255.0f;
+      kAccent  = ImVec4(fr,                   fg,                   fb,                   1.0f);
+      kAccentH = ImVec4(fr*0.88f + 0.12f,     fg*0.88f + 0.12f,     fb*0.88f + 0.12f,     1.0f);
+      kAccentA = ImVec4(fr*0.70f,              fg*0.70f,             fb*0.70f,             1.0f);
+    }
     delete r;
   }
 
@@ -539,9 +553,6 @@ static const ImVec4 kBgHeader  = ImVec4(0.051f, 0.075f, 0.141f, 1.0f); // #0D132
 static const ImVec4 kBgCard    = ImVec4(0.071f, 0.102f, 0.173f, 1.0f); // #121A2C
 static const ImVec4 kBgCardAlt = ImVec4(0.094f, 0.129f, 0.212f, 1.0f); // #182136
 static const ImVec4 kBorder    = ImVec4(0.149f, 0.196f, 0.290f, 0.80f); // #26324A
-static const ImVec4 kAccent    = ImVec4(0.741f, 0.102f, 0.788f, 1.0f); // #BD1AC9 magenta
-static const ImVec4 kAccentH   = ImVec4(0.863f, 0.318f, 0.918f, 1.0f);
-static const ImVec4 kAccentA   = ImVec4(0.576f, 0.047f, 0.620f, 1.0f);
 static const ImVec4 kViolet    = ImVec4(0.482f, 0.231f, 0.929f, 1.0f); // #7C3AED
 static const ImVec4 kTextPri   = ImVec4(0.937f, 0.949f, 0.965f, 1.0f);
 static const ImVec4 kTextSec   = ImVec4(0.612f, 0.655f, 0.729f, 1.0f); // #9CA7BA
@@ -676,8 +687,8 @@ static void DrawAppBackground(float w, float h) {
   ImVec2 wp = ImGui::GetWindowPos();
   dl->AddRectFilled(wp, ImVec2(wp.x+w, wp.y+h), C32(kBgApp));
   ImVec2 br(wp.x+w, wp.y+h);
-  dl->AddCircleFilled(br, w*0.45f, IM_COL32(50,15,105,11), 48);
-  dl->AddCircleFilled(br, w*0.22f, IM_COL32(72,24,145,15), 48);
+  dl->AddCircleFilled(br, w*0.45f, IM_COL32((int)(kAccent.x*255),(int)(kAccent.y*255),(int)(kAccent.z*255),11), 48);
+  dl->AddCircleFilled(br, w*0.22f, IM_COL32((int)(kAccent.x*255),(int)(kAccent.y*255),(int)(kAccent.z*255),15), 48);
   dl->AddRectFilledMultiColor(wp, ImVec2(wp.x+w, wp.y+80.0f),
     IM_COL32(16,26,62,32), IM_COL32(16,26,62,32),
     IM_COL32(0,0,0,0),    IM_COL32(0,0,0,0));
@@ -819,7 +830,7 @@ static void DrawNavItem(const char *label, e_ManagerPage page, int badge = 0) {
 
   ImDrawList *dl = ImGui::GetWindowDrawList();
   if (active) {
-    dl->AddRectFilled(p0, p1, IM_COL32(80, 20, 145, 185), 6.0f);
+    dl->AddRectFilled(p0, p1, IM_COL32((int)(kAccent.x*255),(int)(kAccent.y*255),(int)(kAccent.z*255),75), 6.0f);
     dl->AddRectFilled(p0, ImVec2(p0.x + 3.0f, p1.y), C32(kAccent), 1.5f);
   } else if (hov) {
     dl->AddRectFilled(p0, p1, IM_COL32(22, 38, 76, 175), 6.0f);
@@ -1007,22 +1018,10 @@ static void DrawTopHeader(float contentX, float contentW) {
 
   ImDrawList *dl = ImGui::GetWindowDrawList();
 
-  // ---- Left: page title -----------------------------------------------
-  PushMgrFont(g_ManagerFontTitle);
-  float titleH = ImGui::GetTextLineHeight();
-  PopMgrFont(g_ManagerFontTitle);
-  float titleY = (kTopHdrH - titleH) * 0.5f;
-  ImGui::SetCursorPos(ImVec2(20.0f, titleY));
-  PushMgrFont(g_ManagerFontTitle);
-  ImGui::PushStyleColor(ImGuiCol_Text, kTextPri);
-  ImGui::TextUnformatted(kPageNames[g_activePage]);
-  ImGui::PopStyleColor();
-  PopMgrFont(g_ManagerFontTitle);
-
   // ---- Right: search + date + Advance/PlayMatch + Test Engine CTAs -------
   const float kBtnW    = 112.0f;  // each button width
   const float kDateW   = 88.0f;   // wider for "31 Aug 2026"
-  const float kSearchW = 140.0f;
+  const float kSearchW = 210.0f;
   const float kElemH   = 30.0f;
   const float kGap     = 8.0f;
   float elemY     = (kTopHdrH - kElemH) * 0.5f;
@@ -1064,7 +1063,7 @@ static void DrawTopHeader(float contentX, float contentW) {
   float dateX = advBtnX - kGap - kDateW;
   ImGui::SetCursorPos(ImVec2(dateX, elemY + (kElemH - dateH) * 0.5f));
   PushMgrFont(g_ManagerFontSmall);
-  ImGui::PushStyleColor(ImGuiCol_Text, kTextDim);
+  ImGui::PushStyleColor(ImGuiCol_Text, kTextPri);
   const std::string &dateStr = g_CareerHub.currentDateDisplay.empty()
                                  ? g_CareerHub.currentDate
                                  : g_CareerHub.currentDateDisplay;
@@ -1072,8 +1071,8 @@ static void DrawTopHeader(float contentX, float contentW) {
   ImGui::PopStyleColor();
   PopMgrFont(g_ManagerFontSmall);
 
-  // Search placeholder (draw-list rect + text)
-  float searchX = dateX - kGap - kSearchW;
+  // Search placeholder — centered on the full content width
+  float searchX = (contentW - kSearchW) * 0.5f;
   ImGui::SetCursorPos(ImVec2(searchX, elemY));
   ImVec2 scr = ImGui::GetCursorScreenPos();
   dl->AddRectFilled(scr, ImVec2(scr.x + kSearchW, scr.y + kElemH),
@@ -1082,8 +1081,9 @@ static void DrawTopHeader(float contentX, float contentW) {
              C32(kBorder), 5.0f, 0, 1.0f);
   PushMgrFont(g_ManagerFontSmall);
   float sH = ImGui::GetTextLineHeight();
-  ImGui::SetCursorPos(ImVec2(searchX + 10.0f, elemY + (kElemH - sH) * 0.5f));
-  ImGui::PushStyleColor(ImGuiCol_Text, kTextDim);
+  float sW = ImGui::CalcTextSize("Search...").x;
+  ImGui::SetCursorPos(ImVec2(searchX + (kSearchW - sW) * 0.5f, elemY + (kElemH - sH) * 0.5f));
+  ImGui::PushStyleColor(ImGuiCol_Text, kTextPri);
   ImGui::TextUnformatted("Search...");
   ImGui::PopStyleColor();
   PopMgrFont(g_ManagerFontSmall);
@@ -1528,7 +1528,7 @@ static void DrawLeagueSnapshotCard(ImVec2 sz) {
       const CareerHubState::Standing *s = rows[i];
       bool mine = (s->team == sn);
       ImGui::TableNextRow(0, 26.0f);
-      if (mine) ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, IM_COL32(80,20,160,42));
+      if (mine) ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, IM_COL32((int)(kAccent.x*255),(int)(kAccent.y*255),(int)(kAccent.z*255),42));
       ImGui::TableSetColumnIndex(0);
       ImGui::PushStyleColor(ImGuiCol_Text, kTextDim);
       ImGui::Text("%d.", i + 1);
@@ -1926,9 +1926,18 @@ static void DrawSquadPage(float w, float h) {
         const char *posLbl = PosLabel(p.formationOrder);
         bool isSub  = (p.formationOrder >= 11);
         bool isXI   = (p.formationOrder >= 0 && p.formationOrder <= 10);
-        ImU32 badgeBg  = isXI  ? C32(kViolet)
-                       : isSub ? IM_COL32(30,60,100,220)
-                               : IM_COL32(25,35,58,180);
+        ImU32 badgeBg;
+        if (isXI) {
+          int fo = p.formationOrder;
+          if      (fo == 0)  badgeBg = IM_COL32(220, 160,  30, 220); // GK  gold
+          else if (fo <= 4)  badgeBg = IM_COL32( 80, 150, 255, 220); // DEF blue
+          else if (fo <= 7)  badgeBg = IM_COL32( 80, 210, 110, 220); // MID green
+          else               badgeBg = IM_COL32(255,  90,  70, 220); // FWD red
+        } else if (isSub) {
+          badgeBg = IM_COL32(30, 60, 100, 220);
+        } else {
+          badgeBg = IM_COL32(25, 35, 58, 180);
+        }
         ImU32 badgeTxt = IM_COL32(220,225,235,255);
 
         ImVec2 cp = ImGui::GetCursorScreenPos();
@@ -2100,6 +2109,7 @@ static void DrawSquadPage(float w, float h) {
 
 static int s_calYear  = 0;
 static int s_calMonth = 0; // 1-12
+static std::string s_calLastCareerYM; // "YYYY-MM" of career date when display was last synced
 
 static int DaysInMonth(int year, int month) {
   // Use day-0 of next month trick
@@ -2112,16 +2122,30 @@ static int DaysInMonth(int year, int month) {
 }
 
 static void DrawCalendarPage(float w, float h) {
-  // Always reset to current career month on entry (tracked via s_calInit cleared on page change)
+  // Reset to current career month on entry; also live-follow if career crosses a month boundary.
+  const std::string &cd = g_CareerHub.currentDate;
   if (!s_calInit) {
-    const std::string &cd = g_CareerHub.currentDate;
     if (cd.size() >= 7) {
       s_calYear  = atoi(cd.substr(0, 4).c_str());
       s_calMonth = atoi(cd.substr(5, 2).c_str());
+      s_calLastCareerYM = cd.substr(0, 7);
     } else {
       s_calYear = 2026; s_calMonth = 7;
+      s_calLastCareerYM.clear();
     }
     s_calInit = true;
+  } else if (cd.size() >= 7) {
+    // If the career date has crossed into a new month and the user is still
+    // viewing the old career month (not a manually navigated month), follow it.
+    std::string careerYM = cd.substr(0, 7);
+    if (careerYM != s_calLastCareerYM) {
+      char lastBuf[8]; snprintf(lastBuf, sizeof(lastBuf), "%04d-%02d", s_calYear, s_calMonth);
+      if (s_calLastCareerYM == std::string(lastBuf)) {
+        s_calYear  = atoi(cd.substr(0, 4).c_str());
+        s_calMonth = atoi(cd.substr(5, 2).c_str());
+      }
+      s_calLastCareerYM = careerYM;
+    }
   }
 
   // Build user-fixture map: "YYYY-MM-DD" → index into g_CareerHub.fixtures
@@ -2193,7 +2217,7 @@ static void DrawCalendarPage(float w, float h) {
     ImVec2 ts = ImGui::CalcTextSize(hdr);
     wdl->AddText(ImVec2(hdrPos.x + (usW - ts.x)*0.5f,
                         hdrPos.y + (kHdrH - ts.y)*0.5f),
-                 C32(kBlue), hdr);
+                 C32(kTextPri), hdr);
     PopMgrFont(g_ManagerFontBold);
   }
 
@@ -2295,14 +2319,15 @@ static void DrawCalendarPage(float w, float h) {
       bool hasMatch = (calFixIdx.count(dateStr) > 0);
 
       // Cell background
+      int ar = (int)(kAccent.x*255), ag = (int)(kAccent.y*255), ab = (int)(kAccent.z*255);
       ImU32 bgCol = hasMatch ? IM_COL32(18, 30, 60, 240)
-                  : isToday  ? IM_COL32(24, 26, 50, 220)
+                  : isToday  ? IM_COL32(ar/4, ag/4, ab/4, 220)
                              : IM_COL32(14, 18, 32, 190);
       wdl->AddRectFilled(cMin, cMax, bgCol, 7.0f);
 
       // Border
       if (isToday)
-        wdl->AddRect(cMin, cMax, IM_COL32(90,140,255,200), 7.0f, 0, 1.5f);
+        wdl->AddRect(cMin, cMax, IM_COL32(ar, ag, ab, 200), 7.0f, 0, 1.5f);
       else if (hasMatch)
         wdl->AddRect(cMin, cMax, IM_COL32(55,80,140,120), 7.0f, 0, 1.0f);
       else
@@ -2312,7 +2337,7 @@ static void DrawCalendarPage(float w, float h) {
       char dayBuf[8];
       snprintf(dayBuf, sizeof(dayBuf), "%d", day);
       PushMgrFont(g_ManagerFontSmall);
-      ImU32 dayNumCol = isToday   ? IM_COL32(120,175,255,255)
+      ImU32 dayNumCol = isToday   ? IM_COL32(ar, ag, ab, 255)
                       : hasMatch  ? IM_COL32(200,215,245,220)
                                   : IM_COL32(100,115,155,180);
       wdl->AddText(ImVec2(cMin.x + 7.0f, cMin.y + 5.0f), dayNumCol, dayBuf);
@@ -2649,7 +2674,8 @@ static void DrawSchedulePage(float w, float h) {
     ImGui::PopStyleVar(); ImGui::PopStyleColor();
 
     PushMgrFont(g_ManagerFontBold);
-    ImGui::PushStyleColor(ImGuiCol_Text, kBlue);
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 6.0f);
+    ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
     ImGui::TextUnformatted(lg.c_str());
     ImGui::PopStyleColor();
     PopMgrFont(g_ManagerFontBold);
@@ -2676,10 +2702,13 @@ static void DrawSchedulePage(float w, float h) {
         const std::string &af = f.awayFull.empty() ? f.away : f.awayFull;
         if (!filterClubName.empty() && hf != filterClubName && af != filterClubName)
           continue;
-        bool myGame = (f.home == sn || f.away == sn);
+        bool myGame  = (f.home == sn || f.away == sn);
+        bool isToday = (f.fixtureDate == g_CareerHub.currentDate);
         ImGui::TableNextRow(0, rH);
-        if (myGame)
-          ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, IM_COL32(75,18,140,42));
+        if (isToday || myGame) {
+          int a = myGame && isToday ? 75 : isToday ? 55 : 42;
+          ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, IM_COL32((int)(kAccent.x*255),(int)(kAccent.y*255),(int)(kAccent.z*255),a));
+        }
 
         ImGui::TableSetColumnIndex(0);
         ImGui::PushStyleColor(ImGuiCol_Text, kTextDim);
@@ -2855,7 +2884,8 @@ static void DrawCompetitionsPage(float w, float h) {
     ImGui::PopStyleVar(); ImGui::PopStyleColor();
 
     PushMgrFont(g_ManagerFontBold);
-    ImGui::PushStyleColor(ImGuiCol_Text, kBlue);
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 6.0f);
+    ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
     ImGui::TextUnformatted(lg.c_str());
     ImGui::PopStyleColor();
     PopMgrFont(g_ManagerFontBold);
@@ -2887,7 +2917,7 @@ static void DrawCompetitionsPage(float w, float h) {
         bool mine = (s.team == sn);
         ImGui::TableNextRow(0, rH);
         if (mine)
-          ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, IM_COL32(75,18,140,42));
+          ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, IM_COL32((int)(kAccent.x*255),(int)(kAccent.y*255),(int)(kAccent.z*255),42));
         ImGui::TableSetColumnIndex(0);
         {
           ImVec2 ps = ImGui::GetCursorScreenPos();
@@ -2895,7 +2925,7 @@ static void DrawCompetitionsPage(float w, float h) {
           float cy = ps.y + (rH - 10.0f) * 0.5f + cr * 0.5f;
           ImDrawList *dl2 = ImGui::GetWindowDrawList();
           dl2->AddCircleFilled(ImVec2(ps.x + cr, cy), cr,
-            mine ? C32(kViolet) : IM_COL32(18,30,56,255));
+            mine ? C32(kAccent) : IM_COL32(18,30,56,255));
           char nb[4]; snprintf(nb, sizeof(nb), "%d", pos);
           ImVec2 ts = ImGui::CalcTextSize(nb);
           dl2->AddText(ImVec2(ps.x + cr - ts.x*0.5f, cy - ts.y*0.5f),
@@ -4161,7 +4191,7 @@ static void DrawAdvancingModalOverlay() {
   ImVec2 cardPos((display.x - kCardW) * 0.5f, (display.y - kCardH) * 0.5f);
   ImVec2 cardEnd(cardPos.x + kCardW, cardPos.y + kCardH);
   fg->AddRectFilled(cardPos, cardEnd, IM_COL32(18, 26, 44, 245), kRounding);
-  fg->AddRect(cardPos, cardEnd, IM_COL32(120, 80, 255, 180), kRounding, 0, 1.5f);
+  fg->AddRect(cardPos, cardEnd, IM_COL32((int)(kAccent.x*255),(int)(kAccent.y*255),(int)(kAccent.z*255),180), kRounding, 0, 1.5f);
 
   // Animated dots: cycle "." / ".." / "..." at ~1.5 Hz.
   double t = ImGui::GetTime();

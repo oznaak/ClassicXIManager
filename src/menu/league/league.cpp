@@ -267,7 +267,7 @@ LeagueStartNewPage::LeagueStartNewPage(Gui2WindowManager *windowManager, const G
                            "your league will be based on; any changes to the foundation database later on won't affect your league save (or the other way round).");
   explanationText->AddEmptyLine();
   explanationText->AddText((std::string)
-                           "You can find the foundation database(s) in the 'databases' subdirectory of your Classic Manager installation, and the " +
+                           "You can find the foundation database(s) in the 'databases' subdirectory of your Classic XI Manager installation, and the " +
                            "saved leagues and cups in the 'save' directory.");
 
   frame->AddView(explanationText);

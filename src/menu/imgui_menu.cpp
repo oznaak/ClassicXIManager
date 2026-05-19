@@ -680,10 +680,10 @@ static void EndCardContent() { ImGui::EndChild(); }
 static void DrawPreCareerFooter(float winW, float winH) {
   ImVec2 wp = ImGui::GetWindowPos();
   ImVec2 fp = ImVec2(wp.x + winW * 0.5f, wp.y + winH - 28.0f);
-  ImVec2 fsz = ImGui::CalcTextSize("Classic Manager - Alpha v0.0.01");
+  ImVec2 fsz = ImGui::CalcTextSize("Classic XI Manager - Alpha v0.0.01");
   ImDrawList *dl = ImGui::GetWindowDrawList();
   PushMF(g_ManagerFontSmall);
-  dl->AddText(ImVec2(fp.x - fsz.x * 0.5f, fp.y), C32(kTextDim), "Classic Manager - Alpha v0.0.01");
+  dl->AddText(ImVec2(fp.x - fsz.x * 0.5f, fp.y), C32(kTextDim), "Classic XI Manager - Alpha v0.0.01");
   PopMF(g_ManagerFontSmall);
 }
 
