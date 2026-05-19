@@ -278,7 +278,7 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
     std::stringstream q;
     q << "SELECT id, firstname, lastname, role, age, base_stat,"
       << " formationorder, weekly_wage, contract_expiry, player_potential,"
-      << " foot, stamina"
+      << " foot, stamina, height, reputation"
       << " FROM players WHERE team_id = " << clubId
       << " ORDER BY"
       << "  CASE WHEN formationorder IS NULL OR formationorder < 0 THEN 999"
@@ -304,6 +304,10 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
       p.foot             = DBCell(r, i, 10);
       std::string stStr  = DBCell(r, i, 11);
       p.stamina          = stStr.empty() ? 0 : atoi(stStr.c_str());
+      std::string htStr  = DBCell(r, i, 12);
+      p.height           = htStr.empty() ? 0.0f : (float)atof(htStr.c_str());
+      std::string repStr = DBCell(r, i, 13);
+      p.reputation       = repStr.empty() ? 0.0f : (float)atof(repStr.c_str());
       players.push_back(p);
     }
     delete r;
@@ -2440,12 +2444,12 @@ static void DrawHomePage(float w, float h) {
 
 // ---- Star rating renderer -----------------------------------------------
 
-static void DrawStars(float value, float maxValue, ImU32 filledCol) {
+static void DrawStars(float value, float maxValue, ImU32 filledCol, float scale = 1.0f) {
   float stars = (maxValue > 0.0f) ? (value / maxValue) * 5.0f : 0.0f;
   stars = std::max(0.0f, std::min(5.0f, stars));
   ImDrawList *dl = ImGui::GetWindowDrawList();
   ImVec2 p = ImGui::GetCursorScreenPos();
-  const float kW = 9.0f, kH = 7.0f, kGap = 2.0f;
+  const float kW = 9.0f * scale, kH = 7.0f * scale, kGap = 2.0f * scale;
   float lh = ImGui::GetTextLineHeight();
   float oy = (lh - kH) * 0.5f;
   ImU32 emptyCol = IM_COL32(30, 44, 72, 200);
@@ -2523,19 +2527,20 @@ static void DrawStatSection(const char *title, ImU32 titleColor,
                             int playerId, float baseStat) {
   ImDrawList *dl = ImGui::GetWindowDrawList();
   float secW     = ImGui::GetContentRegionAvail().x;
-  const float kFs   = 11.0f;
-  const float kRowH = 18.0f;
+  const float kFs   = 15.0f;  // readable stat font size
+  const float kTFs  = 13.0f;  // section title font size
+  const float kRowH = 26.0f;  // row height — tall enough to read comfortably
 
-  // Section title row: colored label + thin accent separator
+  // Section title: colored label + thin separator line
   ImVec2 tp = ImGui::GetCursorScreenPos();
   PushMgrFont(g_ManagerFontSmall);
-  dl->AddText(g_ManagerFontSmall, kFs,
+  dl->AddText(g_ManagerFontSmall, kTFs,
               ImVec2(tp.x + 4.0f, tp.y + 2.0f), titleColor, title);
   PopMgrFont(g_ManagerFontSmall);
   int tcR = titleColor & 0xFF, tcG = (titleColor >> 8) & 0xFF, tcB = (titleColor >> 16) & 0xFF;
-  dl->AddLine(ImVec2(tp.x, tp.y + 15.0f), ImVec2(tp.x + secW, tp.y + 15.0f),
+  dl->AddLine(ImVec2(tp.x, tp.y + 19.0f), ImVec2(tp.x + secW, tp.y + 19.0f),
               IM_COL32(tcR, tcG, tcB, 60), 0.5f);
-  ImGui::Dummy(ImVec2(secW, 17.0f));
+  ImGui::Dummy(ImVec2(secW, 23.0f));
 
   // Stat rows
   for (int i = 0; i < count; i++) {
@@ -2549,31 +2554,29 @@ static void DrawStatSection(const char *title, ImU32 titleColor,
 
     // Accent left edge on excellent stats (16+)
     if (val >= 16)
-      dl->AddRectFilled(ImVec2(rp.x, rp.y), ImVec2(rp.x + 2.5f, rp.y + kRowH),
+      dl->AddRectFilled(ImVec2(rp.x, rp.y), ImVec2(rp.x + 3.0f, rp.y + kRowH),
                         IM_COL32(80, 215, 105, 200));
 
     // Stat name
     PushMgrFont(g_ManagerFontSmall);
     dl->AddText(g_ManagerFontSmall, kFs,
                 ImVec2(rp.x + 6.0f, rp.y + (kRowH - kFs) * 0.5f),
-                IM_COL32(188, 198, 222, 235), stats[i].label);
+                IM_COL32(192, 202, 226, 240), stats[i].label);
     PopMgrFont(g_ManagerFontSmall);
 
-    // Fill bar (occupies ~25% of row width between name and number)
+    // Fill bar
     float bX0 = rp.x + secW * 0.60f;
-    float bX1 = rp.x + secW - 22.0f;
+    float bX1 = rp.x + secW - 24.0f;
     if (bX1 > bX0 + 4.0f) {
-      const float bH   = 5.0f;
+      const float bH   = 9.0f;
       const float bY   = rp.y + (kRowH - bH) * 0.5f;
       const float fill = (bX1 - bX0) * (val / 20.0f);
       int vr = valCol & 0xFF, vg = (valCol >> 8) & 0xFF, vb = (valCol >> 16) & 0xFF;
-      // Track (dark)
       dl->AddRectFilled(ImVec2(bX0, bY), ImVec2(bX1, bY + bH),
-                        IM_COL32(22, 30, 58, 210), 2.5f);
-      // Fill (colored)
+                        IM_COL32(22, 30, 58, 210), 3.0f);
       if (fill > 0.5f)
         dl->AddRectFilled(ImVec2(bX0, bY), ImVec2(bX0 + fill, bY + bH),
-                          IM_COL32(vr, vg, vb, 175), 2.5f);
+                          IM_COL32(vr, vg, vb, 175), 3.0f);
     }
 
     // Number — right-aligned, value-colored
@@ -2589,7 +2592,7 @@ static void DrawStatSection(const char *title, ImU32 titleColor,
 
     ImGui::Dummy(ImVec2(secW, kRowH));
   }
-  ImGui::Dummy(ImVec2(0, 10.0f));
+  ImGui::Dummy(ImVec2(0, 14.0f));
 }
 
 // ---- DrawPlayerDetailPage ------------------------------------------------
@@ -2630,79 +2633,81 @@ static void DrawPlayerDetailPage(float w, float h) {
   // ===========================================================
   // Header card
   // ===========================================================
-  const float kHdrH = 100.0f;
+  const float kHdrH = 130.0f;
   ImVec2 hdrOrg = ImGui::GetCursorScreenPos();
   BeginModernCard("##pldhdr", ImVec2(usW, kHdrH));
   ImDrawList *hdl = ImGui::GetWindowDrawList();
 
   // Face placeholder box
-  const float kFaceS = 68.0f;
-  float fx = hdrOrg.x + 14.0f;
+  const float kFaceS = 90.0f;
+  float fx = hdrOrg.x + 16.0f;
   float fy = hdrOrg.y + (kHdrH - kFaceS) * 0.5f;
   hdl->AddRectFilled(ImVec2(fx, fy), ImVec2(fx + kFaceS, fy + kFaceS),
-                     IM_COL32(22, 32, 56, 255), 10.0f);
+                     IM_COL32(22, 32, 56, 255), 12.0f);
   hdl->AddRect(ImVec2(fx, fy), ImVec2(fx + kFaceS, fy + kFaceS),
-               IM_COL32(45, 60, 100, 160), 10.0f, 0, 1.0f);
+               IM_COL32(accR, accG, accB, 80), 12.0f, 0, 1.5f);
   char init[2] = { pl.firstName.empty() ? (pl.lastName.empty() ? '?' : pl.lastName[0])
                                         : pl.firstName[0], '\0' };
   PushMgrFont(g_ManagerFontTitle);
   ImVec2 initSz = g_ManagerFontTitle
-      ? g_ManagerFontTitle->CalcTextSizeA(22.0f, FLT_MAX, 0, init)
+      ? g_ManagerFontTitle->CalcTextSizeA(28.0f, FLT_MAX, 0, init)
       : ImGui::CalcTextSize(init);
-  hdl->AddText(g_ManagerFontTitle, 22.0f,
+  hdl->AddText(g_ManagerFontTitle, 28.0f,
                ImVec2(fx + (kFaceS - initSz.x) * 0.5f, fy + (kFaceS - initSz.y) * 0.5f),
-               IM_COL32(80, 100, 155, 200), init);
+               IM_COL32(accR, accG, accB, 160), init);
   PopMgrFont(g_ManagerFontTitle);
 
   // Name + info block
-  float tx = fx + kFaceS + 16.0f;
-  float ty = hdrOrg.y + 12.0f;
+  float tx = fx + kFaceS + 18.0f;
+  float ty = hdrOrg.y + 14.0f;
 
+  // Full name (title font, natural size)
   PushMgrFont(g_ManagerFontTitle);
-  float titleLineH = g_ManagerFontTitle ? g_ManagerFontTitle->FontSize : 18.0f;
+  float titleLineH = g_ManagerFontTitle ? g_ManagerFontTitle->FontSize : 20.0f;
   hdl->AddText(g_ManagerFontTitle, 0.0f,
-               ImVec2(tx, ty), IM_COL32(230, 235, 248, 255), fullName.c_str());
+               ImVec2(tx, ty), IM_COL32(232, 238, 252, 255), fullName.c_str());
   PopMgrFont(g_ManagerFontTitle);
 
   // Age | Nationality row
-  float row2y = ty + titleLineH + 4.0f;
+  float row2y = ty + titleLineH + 5.0f;
   {
     char ageLine[64];
     snprintf(ageLine, sizeof(ageLine), "Age: %s  |  Nationality: -",
              pl.age.empty() ? "-" : pl.age.c_str());
     PushMgrFont(g_ManagerFontSmall);
-    hdl->AddText(g_ManagerFontSmall, 11.0f, ImVec2(tx, row2y),
-                 IM_COL32(140, 155, 185, 200), ageLine);
+    hdl->AddText(g_ManagerFontSmall, 15.0f, ImVec2(tx, row2y),
+                 IM_COL32(148, 162, 196, 215), ageLine);
     PopMgrFont(g_ManagerFontSmall);
   }
 
   // Position badge
-  float row3y = row2y + 15.0f;
+  float row3y = row2y + 22.0f;
   if (!pl.role.empty()) {
     PushMgrFont(g_ManagerFontSmall);
     ImVec2 rSz = g_ManagerFontSmall
-        ? g_ManagerFontSmall->CalcTextSizeA(11.0f, FLT_MAX, 0, pl.role.c_str())
+        ? g_ManagerFontSmall->CalcTextSizeA(15.0f, FLT_MAX, 0, pl.role.c_str())
         : ImGui::CalcTextSize(pl.role.c_str());
-    float bW = rSz.x + 10.0f, bH = 15.0f;
+    float bW = rSz.x + 16.0f, bH = 22.0f;
     hdl->AddRectFilled(ImVec2(tx, row3y), ImVec2(tx + bW, row3y + bH),
-                       IM_COL32(accR, accG, accB, 50), 4.0f);
+                       IM_COL32(accR, accG, accB, 55), 5.0f);
     hdl->AddRect(ImVec2(tx, row3y), ImVec2(tx + bW, row3y + bH),
-                 IM_COL32(accR, accG, accB, 140), 4.0f, 0, 1.0f);
-    hdl->AddText(g_ManagerFontSmall, 11.0f,
-                 ImVec2(tx + 5.0f, row3y + (bH - 11.0f) * 0.5f),
-                 IM_COL32(220, 228, 245, 230), pl.role.c_str());
+                 IM_COL32(accR, accG, accB, 150), 5.0f, 0, 1.2f);
+    hdl->AddText(g_ManagerFontSmall, 15.0f,
+                 ImVec2(tx + 8.0f, row3y + (bH - 15.0f) * 0.5f),
+                 IM_COL32(222, 230, 248, 235), pl.role.c_str());
     PopMgrFont(g_ManagerFontSmall);
   }
 
   // Right section: club badge + info
   float rx = hdrOrg.x + usW * 0.50f;
-  ImGui::SetCursorScreenPos(ImVec2(rx, hdrOrg.y + (kHdrH - 40.0f) * 0.5f));
-  DrawTeamBadge(g_CareerHub.club.logoPath, g_CareerHub.club.shortName, 40.0f);
+  ImGui::SetCursorScreenPos(ImVec2(rx, hdrOrg.y + (kHdrH - 60.0f) * 0.5f));
+  DrawTeamBadge(g_CareerHub.club.logoPath, g_CareerHub.club.shortName, 60.0f);
 
-  float infoX = rx + 52.0f, infoY = hdrOrg.y + 12.0f;
+  float infoX = rx + 70.0f, infoY = hdrOrg.y + 14.0f;
   PushMgrFont(g_ManagerFontSmall);
-  hdl->AddText(g_ManagerFontSmall, 11.0f, ImVec2(infoX, infoY),
-               IM_COL32(195, 205, 228, 220), g_CareerHub.club.name.c_str());
+  // Club name — slightly larger/brighter
+  hdl->AddText(g_ManagerFontSmall, 18.0f, ImVec2(infoX, infoY),
+               IM_COL32(205, 215, 238, 240), g_CareerHub.club.name.c_str());
   {
     char wb[48];
     if (pl.weeklywage >= 1000)
@@ -2711,8 +2716,8 @@ static void DrawPlayerDetailPage(float w, float h) {
       snprintf(wb, sizeof(wb), "Wage: %d p/w", pl.weeklywage);
     else
       snprintf(wb, sizeof(wb), "Wage: -");
-    hdl->AddText(g_ManagerFontSmall, 11.0f, ImVec2(infoX, infoY + 14.0f),
-                 IM_COL32(145, 160, 192, 200), wb);
+    hdl->AddText(g_ManagerFontSmall, 16.0f, ImVec2(infoX, infoY + 26.0f),
+                 IM_COL32(155, 168, 202, 220), wb);
   }
   {
     std::string exp = pl.contractExpiry;
@@ -2726,23 +2731,23 @@ static void DrawPlayerDetailPage(float w, float h) {
     }
     char cb[48];
     snprintf(cb, sizeof(cb), "Contract: %s", exp.empty() ? "-" : exp.c_str());
-    hdl->AddText(g_ManagerFontSmall, 11.0f, ImVec2(infoX, infoY + 28.0f),
-                 IM_COL32(145, 160, 192, 200), cb);
+    hdl->AddText(g_ManagerFontSmall, 16.0f, ImVec2(infoX, infoY + 52.0f),
+                 IM_COL32(155, 168, 202, 220), cb);
   }
   PopMgrFont(g_ManagerFontSmall);
 
   // CA / PA stars (far right)
-  float starX = hdrOrg.x + usW - 130.0f;
+  float starX = hdrOrg.x + usW - 175.0f;
   PushMgrFont(g_ManagerFontSmall);
-  hdl->AddText(g_ManagerFontSmall, 11.0f, ImVec2(starX, hdrOrg.y + 16.0f),
-               IM_COL32(130, 145, 175, 200), "Ability");
-  hdl->AddText(g_ManagerFontSmall, 11.0f, ImVec2(starX, hdrOrg.y + 38.0f),
-               IM_COL32(130, 145, 175, 200), "Potential");
+  hdl->AddText(g_ManagerFontSmall, 16.0f, ImVec2(starX, hdrOrg.y + 20.0f),
+               IM_COL32(138, 152, 185, 210), "Ability");
+  hdl->AddText(g_ManagerFontSmall, 16.0f, ImVec2(starX, hdrOrg.y + 52.0f),
+               IM_COL32(138, 152, 185, 210), "Potential");
   PopMgrFont(g_ManagerFontSmall);
-  ImGui::SetCursorScreenPos(ImVec2(starX + 56.0f, hdrOrg.y + 13.0f));
-  DrawStars(pl.baseStat, 1.0f, C32(kGold));
-  ImGui::SetCursorScreenPos(ImVec2(starX + 56.0f, hdrOrg.y + 35.0f));
-  DrawStars((float)pl.potential, 200.0f, IM_COL32(100, 160, 220, 220));
+  ImGui::SetCursorScreenPos(ImVec2(starX + 80.0f, hdrOrg.y + 17.0f));
+  DrawStars(pl.baseStat, 1.0f, C32(kGold), 1.5f);
+  ImGui::SetCursorScreenPos(ImVec2(starX + 80.0f, hdrOrg.y + 49.0f));
+  DrawStars((float)pl.potential, 200.0f, IM_COL32(100, 160, 220, 220), 1.5f);
 
   EndModernCard();
   ImGui::Dummy(ImVec2(0, kGap));
@@ -2751,13 +2756,13 @@ static void DrawPlayerDetailPage(float w, float h) {
   // Tab row
   // ===========================================================
   static const char *kDetailTabs[] = {"Overview", "Personal", "Performance", "Career"};
-  const float kTabH = 28.0f;
+  const float kTabH = 34.0f;
   ImVec2 tabOrg = ImGui::GetCursorScreenPos();
   ImDrawList *tdl = ImGui::GetWindowDrawList();
   {
     float tx2 = tabOrg.x;
     for (int ti = 0; ti < 4; ti++) {
-      const float tw = 90.0f;
+      const float tw = 110.0f;
       bool sel = (s_plTab == ti);
       ImGui::SetCursorScreenPos(ImVec2(tx2, tabOrg.y));
       char tbId[16]; snprintf(tbId, sizeof(tbId), "##plt_%d", ti);
@@ -2775,10 +2780,10 @@ static void DrawPlayerDetailPage(float w, float h) {
                      IM_COL32(accR, accG, accB, 220), 2.0f);
       PushMgrFont(g_ManagerFontSmall);
       ImVec2 tsz = g_ManagerFontSmall
-          ? g_ManagerFontSmall->CalcTextSizeA(11.0f, FLT_MAX, 0, kDetailTabs[ti])
+          ? g_ManagerFontSmall->CalcTextSizeA(14.0f, FLT_MAX, 0, kDetailTabs[ti])
           : ImGui::CalcTextSize(kDetailTabs[ti]);
-      tdl->AddText(g_ManagerFontSmall, 11.0f,
-                   ImVec2(tx2 + (tw - tsz.x) * 0.5f, tabOrg.y + (kTabH - 11.0f) * 0.5f),
+      tdl->AddText(g_ManagerFontSmall, 14.0f,
+                   ImVec2(tx2 + (tw - tsz.x) * 0.5f, tabOrg.y + (kTabH - 14.0f) * 0.5f),
                    sel ? IM_COL32(accR, accG, accB, 255) : IM_COL32(140, 155, 185, 200),
                    kDetailTabs[ti]);
       PopMgrFont(g_ManagerFontSmall);
@@ -2875,22 +2880,43 @@ static void DrawPlayerDetailPage(float w, float h) {
   {
     ImDrawList *c3dl = ImGui::GetWindowDrawList();
     float c3avail = ImGui::GetContentRegionAvail().x;
-    const float kFs = 11.0f, kRowH = 18.0f;
+    const float kFs = 15.0f, kRowH = 26.0f;
+    const float kTFs = 13.0f; // section title font size
 
     // ---- Info section -------------------------------------------------------
-    // Title
     ImVec2 cp = ImGui::GetCursorScreenPos();
     PushMgrFont(g_ManagerFontSmall);
-    c3dl->AddText(g_ManagerFontSmall, kFs, ImVec2(cp.x + 4.0f, cp.y + 2.0f),
+    c3dl->AddText(g_ManagerFontSmall, kTFs, ImVec2(cp.x + 4.0f, cp.y + 2.0f),
                   IM_COL32(180,190,215,220), "Info");
     PopMgrFont(g_ManagerFontSmall);
-    c3dl->AddLine(ImVec2(cp.x, cp.y + 15.0f), ImVec2(cp.x + c3avail, cp.y + 15.0f),
+    c3dl->AddLine(ImVec2(cp.x, cp.y + 19.0f), ImVec2(cp.x + c3avail, cp.y + 19.0f),
                   IM_COL32(60, 80, 130, 55), 0.5f);
-    ImGui::Dummy(ImVec2(c3avail, 17.0f));
+    ImGui::Dummy(ImVec2(c3avail, 23.0f));
 
-    // Info rows (DrawList, two-column hand-rolled)
-    static const char *kInfoLabels[] = {"Height", "Personality", "Reputation"};
-    static const char *kInfoVals[]   = {"- cm",   "-",           "-"};
+    // Build live info values
+    char heightBuf[16] = "-";
+    if (pPlayer->height > 0.5f) {
+      int hcm = (int)roundf(pPlayer->height * 100.0f);
+      snprintf(heightBuf, sizeof(heightBuf), "%d cm", hcm);
+    }
+    const char *repLabel = "-";
+    ImU32 repCol = IM_COL32(212,220,238,235);
+    if (pPlayer->reputation > 0.0f) {
+      float rep = pPlayer->reputation;
+      if      (rep >= 20.0f) { repLabel = "GOAT";          repCol = IM_COL32(255,215, 40,255); }
+      else if (rep >= 19.0f) { repLabel = "Legend";        repCol = IM_COL32(220,160, 60,255); }
+      else if (rep >= 16.0f) { repLabel = "World Class";   repCol = IM_COL32(120,200,255,255); }
+      else if (rep >= 13.0f) { repLabel = "Star";          repCol = IM_COL32( 80,215,105,255); }
+      else if (rep >=  9.0f) { repLabel = "Above Average"; repCol = IM_COL32(155,215, 80,255); }
+      else if (rep >=  7.0f) { repLabel = "Average";       repCol = IM_COL32(215,195, 55,255); }
+      else if (rep >=  4.0f) { repLabel = "Below Average"; repCol = IM_COL32(215,130, 45,255); }
+      else                   { repLabel = "No Namer";      repCol = IM_COL32(160,170,195,200); }
+    }
+    const char *kInfoLabels[] = {"Height", "Personality", "Reputation"};
+    const char *kInfoVals[]   = {heightBuf, "-", repLabel};
+    ImU32       kInfoCols[]   = {IM_COL32(212,220,238,235),
+                                 IM_COL32(212,220,238,235),
+                                 repCol};
     for (int i = 0; i < 3; i++) {
       cp = ImGui::GetCursorScreenPos();
       ImU32 rowBg = (i%2==0) ? IM_COL32(15,22,46,130) : IM_COL32(10,16,34,60);
@@ -2898,10 +2924,10 @@ static void DrawPlayerDetailPage(float w, float h) {
       PushMgrFont(g_ManagerFontSmall);
       c3dl->AddText(g_ManagerFontSmall, kFs,
                     ImVec2(cp.x+6.0f, cp.y+(kRowH-kFs)*0.5f),
-                    IM_COL32(170,180,210,210), kInfoLabels[i]);
+                    IM_COL32(172,182,212,215), kInfoLabels[i]);
       c3dl->AddText(g_ManagerFontSmall, kFs,
-                    ImVec2(cp.x + c3avail*0.55f, cp.y+(kRowH-kFs)*0.5f),
-                    IM_COL32(210,218,235,230), kInfoVals[i]);
+                    ImVec2(cp.x + c3avail*0.52f, cp.y+(kRowH-kFs)*0.5f),
+                    kInfoCols[i], kInfoVals[i]);
       PopMgrFont(g_ManagerFontSmall);
       ImGui::Dummy(ImVec2(c3avail, kRowH));
     }
@@ -2910,49 +2936,44 @@ static void DrawPlayerDetailPage(float w, float h) {
     // ---- Preferred Foot section ---------------------------------------------
     cp = ImGui::GetCursorScreenPos();
     PushMgrFont(g_ManagerFontSmall);
-    c3dl->AddText(g_ManagerFontSmall, kFs, ImVec2(cp.x + 4.0f, cp.y + 2.0f),
+    c3dl->AddText(g_ManagerFontSmall, kTFs, ImVec2(cp.x + 4.0f, cp.y + 2.0f),
                   IM_COL32(180,190,215,220), "Preferred Foot");
     PopMgrFont(g_ManagerFontSmall);
-    c3dl->AddLine(ImVec2(cp.x, cp.y + 15.0f), ImVec2(cp.x + c3avail, cp.y + 15.0f),
+    c3dl->AddLine(ImVec2(cp.x, cp.y + 19.0f), ImVec2(cp.x + c3avail, cp.y + 19.0f),
                   IM_COL32(60,80,130,55), 0.5f);
-    ImGui::Dummy(ImVec2(c3avail, 17.0f));
+    ImGui::Dummy(ImVec2(c3avail, 23.0f));
 
     bool isLeft  = (!pl.foot.empty() && (pl.foot[0]=='L'||pl.foot[0]=='l'));
     bool isRight = (!pl.foot.empty() && (pl.foot[0]=='R'||pl.foot[0]=='r'));
-    float footColW = c3avail * 0.5f - 3.0f;
+    float footColW = c3avail * 0.5f - 4.0f;
     float lfx2 = ImGui::GetCursorScreenPos().x;
-    float rfx2 = lfx2 + c3avail * 0.5f + 3.0f;
+    float rfx2 = lfx2 + c3avail * 0.5f + 4.0f;
 
-    // Draw a foot block: label + strength label + bar
     auto drawFoot = [&](float bx, bool strong, const char *side) {
-      ImVec2 fcp = ImGui::GetCursorScreenPos();
-      fcp.x = bx;
-      // Side label
+      ImVec2 fcp = ImGui::GetCursorScreenPos(); fcp.x = bx;
       PushMgrFont(g_ManagerFontSmall);
       c3dl->AddText(g_ManagerFontSmall, kFs, ImVec2(bx, fcp.y),
-                    IM_COL32(165,178,210,220), side);
-      // Strength label (right-aligned)
+                    IM_COL32(168,180,212,230), side);
       const char *strengthLbl = strong ? "Strong" : "Weak";
-      ImU32 strCol = strong ? IM_COL32(80,215,105,220) : IM_COL32(155,165,195,180);
+      ImU32 strCol = strong ? IM_COL32(80,215,105,230) : IM_COL32(155,165,195,185);
       ImVec2 stSz = g_ManagerFontSmall
           ? g_ManagerFontSmall->CalcTextSizeA(kFs, FLT_MAX, 0, strengthLbl)
           : ImGui::CalcTextSize(strengthLbl);
       c3dl->AddText(g_ManagerFontSmall, kFs,
                     ImVec2(bx + footColW - stSz.x, fcp.y), strCol, strengthLbl);
       PopMgrFont(g_ManagerFontSmall);
-      // Bar
-      float barY = fcp.y + 14.0f;
+      float barY = fcp.y + 20.0f;
       float fill = strong ? 0.90f : 0.28f;
       ImU32 fillCol = strong ? IM_COL32(80,215,105,190) : IM_COL32(80,100,160,140);
-      c3dl->AddRectFilled(ImVec2(bx, barY), ImVec2(bx+footColW, barY+6.0f),
+      c3dl->AddRectFilled(ImVec2(bx, barY), ImVec2(bx+footColW, barY+10.0f),
                           IM_COL32(22,30,58,210), 3.0f);
-      c3dl->AddRectFilled(ImVec2(bx, barY), ImVec2(bx+footColW*fill, barY+6.0f),
+      c3dl->AddRectFilled(ImVec2(bx, barY), ImVec2(bx+footColW*fill, barY+10.0f),
                           fillCol, 3.0f);
     };
     drawFoot(lfx2, isLeft,  "Left");
     drawFoot(rfx2, isRight, "Right");
-    ImGui::Dummy(ImVec2(0, 24.0f)); // labels + bar height
-    ImGui::Dummy(ImVec2(0, 8.0f));
+    ImGui::Dummy(ImVec2(0, 34.0f)); // label + bar
+    ImGui::Dummy(ImVec2(0, 10.0f));
 
     // ---- Spider / Radar chart -----------------------------------------------
     cp = ImGui::GetCursorScreenPos();
@@ -2992,10 +3013,10 @@ static void DrawPlayerDetailPage(float w, float h) {
       // Axis label
       PushMgrFont(g_ManagerFontSmall);
       ImVec2 lsz = g_ManagerFontSmall
-          ? g_ManagerFontSmall->CalcTextSizeA(10.0f, FLT_MAX, 0, kAxes[ai])
+          ? g_ManagerFontSmall->CalcTextSizeA(12.0f, FLT_MAX, 0, kAxes[ai])
           : ImGui::CalcTextSize(kAxes[ai]);
-      float lblDist = spR + 13.0f;
-      c3dl->AddText(g_ManagerFontSmall, 10.0f,
+      float lblDist = spR + 14.0f;
+      c3dl->AddText(g_ManagerFontSmall, 12.0f,
                     ImVec2(spCx + cosf(ang)*lblDist - lsz.x*0.5f,
                            spCy + sinf(ang)*lblDist - lsz.y*0.5f),
                     IM_COL32(145, 158, 192, 215), kAxes[ai]);

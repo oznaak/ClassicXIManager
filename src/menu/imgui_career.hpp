@@ -71,6 +71,8 @@ struct CareerHubState {
     int         potential     = 0;
     std::string foot;          // "L" or "R"
     int         stamina       = 0; // 0-100
+    float       height        = 0.0f; // metres e.g. 1.80
+    float       reputation    = 0.0f; // 1-20 scale
   };
   std::vector<Player> players;
 
