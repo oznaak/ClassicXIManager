@@ -536,6 +536,28 @@ static int  s_playerDetailId     = -1;
 static int  s_playerDetailLastId = -1;
 static int  s_plTab              = 0;
 
+// ---- Live player search --------------------------------------------------
+struct SearchPlayerResult {
+  int         id            = 0;
+  std::string firstName, lastName, role, age, clubName, clubShortName, clubLogoPath;
+  float       baseStat      = 0.0f;
+  float       height        = 0.0f;
+  float       reputation    = 0.0f;
+  int         weeklywage    = 0;
+  std::string contractExpiry, foot;
+  int         stamina       = 0;
+  int         potential     = 0;
+  int         formationOrder = -1;
+};
+static char   s_searchBuf[128]              = "";
+static std::string  s_searchLastTerm;
+static std::vector<SearchPlayerResult> s_searchResults;
+static bool   s_searchActive                = false;
+static ImVec2 s_searchDropdownPos;
+static float  s_searchDropdownW             = 360.0f;
+static bool   s_detailOverrideActive        = false;
+static CareerHubState::Player s_detailPlayerOverride;
+
 // Navigate to a new page — pushes current to back stack, clears forward stack.
 static void NavPush(e_ManagerPage page) {
   if (page == g_activePage) return;
@@ -1054,6 +1076,9 @@ static void DrawSidebar(float sideW, float winH) {
   ImGui::EndChild(); // sidebar
 }
 
+static void RunPlayerSearch(const char *raw);  // forward declaration
+static void DrawSearchDropdown();              // forward declaration
+
 // ---- DrawTopHeader ------------------------------------------------------
 
 static void DrawTopHeader(float contentX, float contentW) {
@@ -1169,22 +1194,83 @@ static void DrawTopHeader(float contentX, float contentW) {
   ImGui::PopStyleColor();
   PopMgrFont(g_ManagerFontSmall);
 
-  // Search placeholder — centered on the full content width
+  // Live search bar — centered in the top header
   float searchX = (contentW - kSearchW) * 0.5f;
   ImGui::SetCursorPos(ImVec2(searchX, elemY));
   ImVec2 scr = ImGui::GetCursorScreenPos();
-  dl->AddRectFilled(scr, ImVec2(scr.x + kSearchW, scr.y + kElemH),
-                   C32(ImVec4(0.055f,0.082f,0.153f,1.0f)), 5.0f);
-  dl->AddRect(scr, ImVec2(scr.x + kSearchW, scr.y + kElemH),
-             C32(kBorder), 5.0f, 0, 1.0f);
+
+  // Style the InputText to match the dark UI
+  ImGui::PushStyleColor(ImGuiCol_FrameBg,        C32(ImVec4(0.055f,0.082f,0.153f,1.0f)));
+  ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, IM_COL32(22, 34, 68, 255));
+  ImGui::PushStyleColor(ImGuiCol_FrameBgActive,  IM_COL32(18, 28, 58, 255));
+  ImGui::PushStyleColor(ImGuiCol_Border,         C32(kBorder));
+  ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,  ImVec2(32.0f, 6.0f)); // leave room for icon
   PushMgrFont(g_ManagerFontSmall);
-  float sH = ImGui::GetTextLineHeight();
-  float sW = ImGui::CalcTextSize("Search...").x;
-  ImGui::SetCursorPos(ImVec2(searchX + (kSearchW - sW) * 0.5f, elemY + (kElemH - sH) * 0.5f));
-  ImGui::PushStyleColor(ImGuiCol_Text, kTextPri);
-  ImGui::TextUnformatted("Search...");
-  ImGui::PopStyleColor();
+  ImGui::SetNextItemWidth(kSearchW);
+  bool changed = ImGui::InputText("##search_bar", s_searchBuf, sizeof(s_searchBuf),
+                                   ImGuiInputTextFlags_AutoSelectAll);
+  bool focused = ImGui::IsItemFocused() || ImGui::IsItemActive();
   PopMgrFont(g_ManagerFontSmall);
+  ImGui::PopStyleVar(2);
+  ImGui::PopStyleColor(4);
+
+  // Hint text when empty
+  if (s_searchBuf[0] == '\0') {
+    PushMgrFont(g_ManagerFontSmall);
+    dl->AddText(g_ManagerFontSmall, 12.0f,
+                ImVec2(scr.x + 32.0f, scr.y + (kElemH - 12.0f) * 0.5f),
+                IM_COL32(90, 105, 140, 180), "Search players...");
+    PopMgrFont(g_ManagerFontSmall);
+  }
+
+  // Search icon (magnifying glass — drawn with primitives)
+  {
+    float ic = scr.x + 14.0f, iy = scr.y + kElemH * 0.5f;
+    ImU32 iconCol = focused ? C32(kAccent) : IM_COL32(90, 105, 140, 200);
+    dl->AddCircle(ImVec2(ic, iy - 1.0f), 5.5f, iconCol, 12, 1.4f);
+    dl->AddLine(ImVec2(ic + 3.8f, iy + 2.8f), ImVec2(ic + 7.5f, iy + 6.5f), iconCol, 1.8f);
+  }
+
+  // Accent border glow when focused
+  if (focused) {
+    int ar = (int)(kAccent.x*255), ag2 = (int)(kAccent.y*255), ab2 = (int)(kAccent.z*255);
+    dl->AddRect(scr, ImVec2(scr.x + kSearchW, scr.y + kElemH),
+                IM_COL32(ar, ag2, ab2, 160), 6.0f, 0, 1.5f);
+  }
+
+  // X clear button when there's text
+  if (s_searchBuf[0] != '\0') {
+    float xBtnX = scr.x + kSearchW - 22.0f;
+    float xBtnY = scr.y + (kElemH - 16.0f) * 0.5f;
+    ImVec2 mp   = ImGui::GetMousePos();
+    bool xHov   = mp.x >= xBtnX && mp.x <= xBtnX+16.0f &&
+                  mp.y >= xBtnY && mp.y <= xBtnY+16.0f;
+    ImU32 xCol  = xHov ? IM_COL32(220, 80, 80, 255) : IM_COL32(100, 115, 150, 180);
+    dl->AddLine(ImVec2(xBtnX+3, xBtnY+3), ImVec2(xBtnX+13, xBtnY+13), xCol, 1.8f);
+    dl->AddLine(ImVec2(xBtnX+13, xBtnY+3), ImVec2(xBtnX+3, xBtnY+13), xCol, 1.8f);
+    if (xHov && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+      memset(s_searchBuf, 0, sizeof(s_searchBuf));
+      s_searchResults.clear();
+      s_searchActive   = false;
+      s_searchLastTerm = "";
+      ImGui::SetKeyboardFocusHere(-1); // release focus from InputText
+    }
+  }
+
+  // Store dropdown anchor
+  s_searchDropdownPos = ImVec2(scr.x + (kSearchW - s_searchDropdownW) * 0.5f,
+                                scr.y + kElemH + 4.0f);
+
+  // Trigger search on change
+  std::string curTerm = s_searchBuf;
+  if (changed || curTerm != s_searchLastTerm) {
+    s_searchLastTerm = curTerm;
+    RunPlayerSearch(s_searchBuf);
+    s_searchActive = !curTerm.empty();
+  }
+
+  // Dropdown is rendered by RenderImGuiCareerHub just before End() so it sits on top.
 
   // Bottom border
   ImVec2 hp = ImGui::GetWindowPos();
@@ -2521,6 +2607,73 @@ static ImU32 StatValueColor(int v) {
   return             IM_COL32(210,  60,  55, 255); // red    — poor
 }
 
+// ---- Search helpers -------------------------------------------------------
+
+static ImU32 QualityColor(float baseStat) {
+  if (baseStat >= 0.80f) return IM_COL32( 80, 215, 105, 255);
+  if (baseStat >= 0.65f) return IM_COL32(155, 215,  80, 255);
+  if (baseStat >= 0.50f) return IM_COL32(215, 195,  55, 255);
+  if (baseStat >= 0.35f) return IM_COL32(215, 130,  45, 255);
+  return                        IM_COL32(210,  60,  55, 255);
+}
+
+static void RunPlayerSearch(const char *raw) {
+  s_searchResults.clear();
+  std::string term = raw;
+  if (term.empty()) return;
+
+  // lower-case + escape single quotes for LIKE
+  std::string lo;
+  lo.reserve(term.size() * 2);
+  for (unsigned char c : term) {
+    lo += (char)tolower(c);
+    if (c == '\'') lo += '\''; // double the quote
+  }
+
+  std::stringstream q;
+  q << "SELECT p.id, p.firstname, p.lastname, p.role, p.age, p.base_stat,"
+    << " p.player_potential, p.foot, p.stamina, p.height, p.reputation,"
+    << " p.weekly_wage, p.contract_expiry, p.formationorder,"
+    << " COALESCE(t.name,'') as club_name,"
+    << " COALESCE(t.logo_url,'') as club_logo,"
+    << " COALESCE(t.shortname,'') as club_short"
+    << " FROM players p LEFT JOIN teams t ON p.team_id = t.id"
+    << " WHERE LOWER(p.firstname) LIKE '%" << lo << "%'"
+    << " OR LOWER(p.lastname)    LIKE '%" << lo << "%'"
+    << " ORDER BY p.base_stat DESC LIMIT 12;";
+
+  DatabaseResult *r = GetDB()->Query(q.str());
+  for (unsigned int i = 0; i < r->data.size(); i++) {
+    SearchPlayerResult sr;
+    sr.id             = atoi(DBCell(r, i, 0).c_str());
+    sr.firstName      = DBCell(r, i, 1);
+    sr.lastName       = DBCell(r, i, 2);
+    sr.role           = DBCell(r, i, 3);
+    sr.age            = DBCell(r, i, 4);
+    std::string bs    = DBCell(r, i, 5);
+    sr.baseStat       = bs.empty() ? 0.0f : (float)atof(bs.c_str());
+    std::string pts   = DBCell(r, i, 6);
+    sr.potential      = pts.empty() ? 0 : atoi(pts.c_str());
+    sr.foot           = DBCell(r, i, 7);
+    std::string sts   = DBCell(r, i, 8);
+    sr.stamina        = sts.empty() ? 0 : atoi(sts.c_str());
+    std::string hs    = DBCell(r, i, 9);
+    sr.height         = hs.empty() ? 0.0f : (float)atof(hs.c_str());
+    std::string rps   = DBCell(r, i, 10);
+    sr.reputation     = rps.empty() ? 0.0f : (float)atof(rps.c_str());
+    std::string ws    = DBCell(r, i, 11);
+    sr.weeklywage     = ws.empty() ? 0 : atoi(ws.c_str());
+    sr.contractExpiry = DBCell(r, i, 12);
+    std::string fos   = DBCell(r, i, 13);
+    sr.formationOrder = fos.empty() ? -1 : atoi(fos.c_str());
+    sr.clubName       = DBCell(r, i, 14);
+    sr.clubLogoPath   = DBCell(r, i, 15);
+    sr.clubShortName  = DBCell(r, i, 16);
+    s_searchResults.push_back(sr);
+  }
+  delete r;
+}
+
 // Draws a section title + bar-based stat rows, all via DrawList (no ImGui tables).
 static void DrawStatSection(const char *title, ImU32 titleColor,
                             const StatDef *stats, int count,
@@ -2601,6 +2754,9 @@ static void DrawPlayerDetailPage(float w, float h) {
   const CareerHubState::Player *pPlayer = nullptr;
   for (const auto &p : g_CareerHub.players)
     if (p.id == s_playerDetailId) { pPlayer = &p; break; }
+  // Fall back to override (player found via search, not in current squad)
+  if (!pPlayer && s_detailOverrideActive && s_detailPlayerOverride.id == s_playerDetailId)
+    pPlayer = &s_detailPlayerOverride;
   if (!pPlayer) {
     ImGui::SetCursorPos(ImVec2(16.0f, 8.0f));
     PushMgrFont(g_ManagerFontSmall);
@@ -3351,7 +3507,8 @@ static void DrawSquadPage(float w, float h) {
                        IM_COL32(ar2, ag2, ab2, 180), 1.0f);
         }
         if (nclicked && !s_escMenuOpen) {
-          s_playerDetailId = p.id;
+          s_playerDetailId       = p.id;
+          s_detailOverrideActive = false; // squad player — no override needed
           NavPush(PAGE_PLAYER_DETAIL);
         }
       }
@@ -5609,6 +5766,159 @@ static void DrawManagerShell(float winW, float winH) {
 
 // ---- Entry point --------------------------------------------------------
 
+// ---- Search results dropdown overlay ------------------------------------
+// Called from RenderImGuiCareerHub just before ImGui::End() so it renders on top.
+static void DrawSearchDropdown() {
+  if (!s_searchActive || s_searchResults.empty()) return;
+
+  const float kDropW   = s_searchDropdownW;
+  const float kCardH   = 58.0f;
+  int  numR   = (int)s_searchResults.size();
+  float totalH = numR * kCardH;
+
+  ImGui::SetCursorScreenPos(s_searchDropdownPos);
+
+  ImGui::PushStyleColor(ImGuiCol_ChildBg,  IM_COL32(10, 15, 30, 252));
+  ImGui::PushStyleColor(ImGuiCol_Border,   IM_COL32(40, 58, 100, 200));
+  ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding,   8.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,   ImVec2(0, 0));
+  ImGui::BeginChild("##srch_drop", ImVec2(kDropW, totalH), true,
+    ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoNav);
+
+  ImDrawList *dl  = ImGui::GetWindowDrawList();
+  ImVec2     wpos = ImGui::GetWindowPos();
+  int ar = (int)(kAccent.x*255), ag2 = (int)(kAccent.y*255), ab2 = (int)(kAccent.z*255);
+
+  // Result cards
+  bool clicked = false;
+  int  clickedId = -1;
+  int  clickedIdx = -1;
+
+  float ry = wpos.y;
+  int maxVisible = numR;
+  for (int i = 0; i < maxVisible; i++) {
+    const SearchPlayerResult &sr = s_searchResults[i];
+    ImU32 qCol = QualityColor(sr.baseStat);
+    int qr = qCol & 0xFF, qg = (qCol>>8)&0xFF, qb = (qCol>>16)&0xFF;
+
+    // Row background
+    ImGui::SetCursorScreenPos(ImVec2(wpos.x, ry));
+    char rowId[32]; snprintf(rowId, sizeof(rowId), "##sr_%d", i);
+    ImGui::InvisibleButton(rowId, ImVec2(kDropW, kCardH));
+    bool hov = ImGui::IsItemHovered();
+    bool clk = ImGui::IsItemClicked();
+
+    ImU32 rowBg = hov ? IM_COL32(ar, ag2, ab2, 22) : IM_COL32(8, 13, 28, 200);
+    dl->AddRectFilled(ImVec2(wpos.x, ry), ImVec2(wpos.x+kDropW, ry+kCardH), rowBg);
+
+    // Quality left stripe
+    dl->AddRectFilled(ImVec2(wpos.x, ry+4), ImVec2(wpos.x+3, ry+kCardH-4),
+                      IM_COL32(qr, qg, qb, hov?255:160), 2.0f);
+
+    // Club badge (36x36), centered vertically in the card
+    const float kBadgeSz = 36.0f;
+    float badgeLeft = wpos.x + 12.0f;
+    float badgeTop  = ry + (kCardH - kBadgeSz) * 0.5f;
+    ImGui::SetCursorScreenPos(ImVec2(badgeLeft, badgeTop));
+    DrawTeamBadge(sr.clubLogoPath, sr.clubShortName, kBadgeSz);
+
+    // Name
+    float textX = wpos.x + 58.0f; // badge(12+36=48) + 10px gap
+    std::string fullName = sr.firstName + " " + sr.lastName;
+    PushMgrFont(g_ManagerFontSmall);
+    dl->AddText(g_ManagerFontSmall, 14.0f,
+                ImVec2(textX, ry + 9.0f),
+                hov ? IM_COL32(ar,ag2,ab2,255) : IM_COL32(225, 232, 250, 245),
+                fullName.c_str());
+
+    // Club | Role | Age sub-line
+    char subBuf[96];
+    snprintf(subBuf, sizeof(subBuf), "%s  |  %s  |  Age %s",
+             sr.clubName.empty() ? "-" : sr.clubName.c_str(),
+             sr.role.empty()     ? "-" : sr.role.c_str(),
+             sr.age.empty()      ? "-" : sr.age.c_str());
+    dl->AddText(g_ManagerFontSmall, 11.0f,
+                ImVec2(textX, ry + 28.0f),
+                IM_COL32(108, 122, 160, 200), subBuf);
+    PopMgrFont(g_ManagerFontSmall);
+
+    // Quality rating badge (right side)
+    int ovr = (int)(sr.baseStat * 100.0f);
+    char ovrBuf[8]; snprintf(ovrBuf, sizeof(ovrBuf), "%d", ovr);
+    float badgeX = wpos.x + kDropW - 44.0f;
+    float badgeY = ry + (kCardH - 28.0f) * 0.5f;
+    dl->AddRectFilled(ImVec2(badgeX, badgeY), ImVec2(badgeX+38, badgeY+28),
+                      IM_COL32(qr/5, qg/5, qb/5+6, 200), 6.0f);
+    dl->AddRect(ImVec2(badgeX, badgeY), ImVec2(badgeX+38, badgeY+28),
+                IM_COL32(qr, qg, qb, 80), 6.0f, 0, 1.0f);
+    PushMgrFont(g_ManagerFontSmall);
+    ImVec2 oSz = g_ManagerFontSmall
+        ? g_ManagerFontSmall->CalcTextSizeA(15.0f, FLT_MAX, 0, ovrBuf)
+        : ImGui::CalcTextSize(ovrBuf);
+    dl->AddText(g_ManagerFontSmall, 15.0f,
+                ImVec2(badgeX + (38.0f-oSz.x)*0.5f, badgeY + (28.0f-15.0f)*0.5f),
+                IM_COL32(qr, qg, qb, 235), ovrBuf);
+    PopMgrFont(g_ManagerFontSmall);
+
+    // Row separator
+    if (i < maxVisible - 1)
+      dl->AddLine(ImVec2(wpos.x+8, ry+kCardH-0.5f), ImVec2(wpos.x+kDropW-8, ry+kCardH-0.5f),
+                  IM_COL32(30, 45, 85, 120), 0.5f);
+
+    if (clk) { clicked = true; clickedId = sr.id; clickedIdx = i; }
+    ry += kCardH;
+  }
+
+
+  ImGui::EndChild();
+  ImGui::PopStyleVar(3);
+  ImGui::PopStyleColor(2);
+
+  // Close when clicking outside the dropdown
+  if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+    ImVec2 mp = ImGui::GetMousePos();
+    ImVec2 p1 = ImVec2(s_searchDropdownPos.x + kDropW, s_searchDropdownPos.y + totalH);
+    if (mp.x < s_searchDropdownPos.x || mp.x > p1.x ||
+        mp.y < s_searchDropdownPos.y || mp.y > p1.y) {
+      s_searchBuf[0]   = '\0';
+      s_searchActive   = false;
+      s_searchLastTerm = "";
+      s_searchResults.clear();
+    }
+  }
+
+  // Handle click — load player data and navigate
+  if (clicked && clickedIdx >= 0) {
+    const SearchPlayerResult &sr = s_searchResults[clickedIdx];
+    // Fill override struct from search result
+    CareerHubState::Player op;
+    op.id             = sr.id;
+    op.firstName      = sr.firstName;
+    op.lastName       = sr.lastName;
+    op.role           = sr.role;
+    op.age            = sr.age;
+    op.baseStat       = sr.baseStat;
+    op.potential      = sr.potential;
+    op.foot           = sr.foot;
+    op.stamina        = sr.stamina;
+    op.height         = sr.height;
+    op.reputation     = sr.reputation;
+    op.weeklywage     = sr.weeklywage;
+    op.contractExpiry = sr.contractExpiry;
+    op.formationOrder = sr.formationOrder;
+    s_detailPlayerOverride       = op;
+    s_detailOverrideActive       = true;
+    s_playerDetailId             = sr.id;
+    // Clear search
+    s_searchBuf[0]   = '\0';
+    s_searchActive   = false;
+    s_searchLastTerm = "";
+    s_searchResults.clear();
+    NavPush(PAGE_PLAYER_DETAIL);
+  }
+}
+
 void RenderImGuiCareerHub() {
   if (!g_CareerHub.active) return;
 
@@ -5729,6 +6039,10 @@ void RenderImGuiCareerHub() {
     ImGui::PopStyleColor(4);
     ImGui::PopStyleVar(4);
   }
+
+  // Search dropdown — rendered last so it draws on top of all child windows.
+  if (s_searchActive && !s_searchResults.empty())
+    DrawSearchDropdown();
 
   ImGui::End();
 
