@@ -2510,51 +2510,86 @@ static int DerivedStat(int playerId, int statIdx, float baseStat) {
 }
 
 static ImU32 StatValueColor(int v) {
-  if (v >= 16) return IM_COL32(100, 220, 120, 255);
-  if (v >= 11) return IM_COL32(170, 215, 100, 255);
-  if (v >= 7)  return IM_COL32(215, 185,  60, 255);
-  return             IM_COL32(215,  70,  60, 255);
+  if (v >= 16) return IM_COL32( 80, 215, 105, 255); // green  — excellent
+  if (v >= 13) return IM_COL32(155, 215,  80, 255); // lime   — good
+  if (v >= 10) return IM_COL32(215, 195,  55, 255); // gold   — average
+  if (v >= 7)  return IM_COL32(215, 130,  45, 255); // orange — below avg
+  return             IM_COL32(210,  60,  55, 255); // red    — poor
 }
 
-// Draws a labeled section header + 2-col stat table inside the current child window.
-static void DrawStatSection(const char *tableId, const char *title, ImU32 titleColor,
+// Draws a section title + bar-based stat rows, all via DrawList (no ImGui tables).
+static void DrawStatSection(const char *title, ImU32 titleColor,
                             const StatDef *stats, int count,
                             int playerId, float baseStat) {
-  ImDrawList *dl  = ImGui::GetWindowDrawList();
-  float secW      = ImGui::GetContentRegionAvail().x;
-  const float kHH = 17.0f;
+  ImDrawList *dl = ImGui::GetWindowDrawList();
+  float secW     = ImGui::GetContentRegionAvail().x;
+  const float kFs   = 11.0f;
+  const float kRowH = 18.0f;
 
-  ImVec2 hp = ImGui::GetCursorScreenPos();
-  dl->AddRectFilled(hp, ImVec2(hp.x + secW, hp.y + kHH), IM_COL32(18, 24, 44, 220));
+  // Section title row: colored label + thin accent separator
+  ImVec2 tp = ImGui::GetCursorScreenPos();
   PushMgrFont(g_ManagerFontSmall);
-  dl->AddText(g_ManagerFontSmall, 11.0f,
-              ImVec2(hp.x + 6.0f, hp.y + (kHH - 11.0f) * 0.5f),
-              titleColor, title);
+  dl->AddText(g_ManagerFontSmall, kFs,
+              ImVec2(tp.x + 4.0f, tp.y + 2.0f), titleColor, title);
   PopMgrFont(g_ManagerFontSmall);
-  ImGui::Dummy(ImVec2(secW, kHH));
+  int tcR = titleColor & 0xFF, tcG = (titleColor >> 8) & 0xFF, tcB = (titleColor >> 16) & 0xFF;
+  dl->AddLine(ImVec2(tp.x, tp.y + 15.0f), ImVec2(tp.x + secW, tp.y + 15.0f),
+              IM_COL32(tcR, tcG, tcB, 60), 0.5f);
+  ImGui::Dummy(ImVec2(secW, 17.0f));
 
-  ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(4.0f, 1.0f));
-  if (ImGui::BeginTable(tableId, 2, ImGuiTableFlags_None, ImVec2(secW, 0))) {
-    ImGui::TableSetupColumn("##n", ImGuiTableColumnFlags_WidthStretch);
-    ImGui::TableSetupColumn("##v", ImGuiTableColumnFlags_WidthFixed, 20.0f);
+  // Stat rows
+  for (int i = 0; i < count; i++) {
+    int   val    = DerivedStat(playerId, stats[i].idx, baseStat);
+    ImU32 valCol = StatValueColor(val);
+    ImVec2 rp    = ImGui::GetCursorScreenPos();
+
+    // Alternating row tint
+    ImU32 rowBg = (i % 2 == 0) ? IM_COL32(15, 22, 46, 130) : IM_COL32(10, 16, 34, 60);
+    dl->AddRectFilled(ImVec2(rp.x, rp.y), ImVec2(rp.x + secW, rp.y + kRowH), rowBg);
+
+    // Accent left edge on excellent stats (16+)
+    if (val >= 16)
+      dl->AddRectFilled(ImVec2(rp.x, rp.y), ImVec2(rp.x + 2.5f, rp.y + kRowH),
+                        IM_COL32(80, 215, 105, 200));
+
+    // Stat name
     PushMgrFont(g_ManagerFontSmall);
-    for (int i = 0; i < count; i++) {
-      int val = DerivedStat(playerId, stats[i].idx, baseStat);
-      ImGui::TableNextRow(0, 16.0f);
-      ImGui::TableSetColumnIndex(0);
-      ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(175, 185, 210, 210));
-      ImGui::TextUnformatted(stats[i].label);
-      ImGui::PopStyleColor();
-      ImGui::TableSetColumnIndex(1);
-      ImGui::PushStyleColor(ImGuiCol_Text, StatValueColor(val));
-      ImGui::Text("%d", val);
-      ImGui::PopStyleColor();
-    }
+    dl->AddText(g_ManagerFontSmall, kFs,
+                ImVec2(rp.x + 6.0f, rp.y + (kRowH - kFs) * 0.5f),
+                IM_COL32(188, 198, 222, 235), stats[i].label);
     PopMgrFont(g_ManagerFontSmall);
-    ImGui::EndTable();
+
+    // Fill bar (occupies ~25% of row width between name and number)
+    float bX0 = rp.x + secW * 0.60f;
+    float bX1 = rp.x + secW - 22.0f;
+    if (bX1 > bX0 + 4.0f) {
+      const float bH   = 5.0f;
+      const float bY   = rp.y + (kRowH - bH) * 0.5f;
+      const float fill = (bX1 - bX0) * (val / 20.0f);
+      int vr = valCol & 0xFF, vg = (valCol >> 8) & 0xFF, vb = (valCol >> 16) & 0xFF;
+      // Track (dark)
+      dl->AddRectFilled(ImVec2(bX0, bY), ImVec2(bX1, bY + bH),
+                        IM_COL32(22, 30, 58, 210), 2.5f);
+      // Fill (colored)
+      if (fill > 0.5f)
+        dl->AddRectFilled(ImVec2(bX0, bY), ImVec2(bX0 + fill, bY + bH),
+                          IM_COL32(vr, vg, vb, 175), 2.5f);
+    }
+
+    // Number — right-aligned, value-colored
+    char vbuf[4]; snprintf(vbuf, sizeof(vbuf), "%d", val);
+    PushMgrFont(g_ManagerFontSmall);
+    ImVec2 vsz = g_ManagerFontSmall
+        ? g_ManagerFontSmall->CalcTextSizeA(kFs, FLT_MAX, 0, vbuf)
+        : ImGui::CalcTextSize(vbuf);
+    dl->AddText(g_ManagerFontSmall, kFs,
+                ImVec2(rp.x + secW - vsz.x - 4.0f, rp.y + (kRowH - kFs) * 0.5f),
+                valCol, vbuf);
+    PopMgrFont(g_ManagerFontSmall);
+
+    ImGui::Dummy(ImVec2(secW, kRowH));
   }
-  ImGui::PopStyleVar();
-  ImGui::Dummy(ImVec2(0, 8.0f));
+  ImGui::Dummy(ImVec2(0, 10.0f));
 }
 
 // ---- DrawPlayerDetailPage ------------------------------------------------
@@ -2629,12 +2664,12 @@ static void DrawPlayerDetailPage(float w, float h) {
                ImVec2(tx, ty), IM_COL32(230, 235, 248, 255), fullName.c_str());
   PopMgrFont(g_ManagerFontTitle);
 
-  // Age • Nationality row
+  // Age | Nationality row
   float row2y = ty + titleLineH + 4.0f;
   {
     char ageLine[64];
-    snprintf(ageLine, sizeof(ageLine), "%s  \xe2\x80\xa2  \xe2\x80\x94",
-             pl.age.empty() ? "\xe2\x80\x94" : pl.age.c_str());
+    snprintf(ageLine, sizeof(ageLine), "Age: %s  |  Nationality: -",
+             pl.age.empty() ? "-" : pl.age.c_str());
     PushMgrFont(g_ManagerFontSmall);
     hdl->AddText(g_ManagerFontSmall, 11.0f, ImVec2(tx, row2y),
                  IM_COL32(140, 155, 185, 200), ageLine);
@@ -2669,13 +2704,13 @@ static void DrawPlayerDetailPage(float w, float h) {
   hdl->AddText(g_ManagerFontSmall, 11.0f, ImVec2(infoX, infoY),
                IM_COL32(195, 205, 228, 220), g_CareerHub.club.name.c_str());
   {
-    char wb[40];
+    char wb[48];
     if (pl.weeklywage >= 1000)
-      snprintf(wb, sizeof(wb), "\xe2\x82\xac%d,%03d p/w", pl.weeklywage/1000, pl.weeklywage%1000);
+      snprintf(wb, sizeof(wb), "Wage: %d,%03d p/w", pl.weeklywage/1000, pl.weeklywage%1000);
     else if (pl.weeklywage > 0)
-      snprintf(wb, sizeof(wb), "\xe2\x82\xac%d p/w", pl.weeklywage);
+      snprintf(wb, sizeof(wb), "Wage: %d p/w", pl.weeklywage);
     else
-      snprintf(wb, sizeof(wb), "\xe2\x80\x94");
+      snprintf(wb, sizeof(wb), "Wage: -");
     hdl->AddText(g_ManagerFontSmall, 11.0f, ImVec2(infoX, infoY + 14.0f),
                  IM_COL32(145, 160, 192, 200), wb);
   }
@@ -2690,7 +2725,7 @@ static void DrawPlayerDetailPage(float w, float h) {
       exp = eb;
     }
     char cb[48];
-    snprintf(cb, sizeof(cb), "Contract: %s", exp.empty() ? "\xe2\x80\x94" : exp.c_str());
+    snprintf(cb, sizeof(cb), "Contract: %s", exp.empty() ? "-" : exp.c_str());
     hdl->AddText(g_ManagerFontSmall, 11.0f, ImVec2(infoX, infoY + 28.0f),
                  IM_COL32(145, 160, 192, 200), cb);
   }
@@ -2801,17 +2836,17 @@ static void DrawPlayerDetailPage(float w, float h) {
   float colH   = statsH - 28.0f;
   if (colH < 40.0f) colH = 40.0f;
 
-  const float c0W = availW * 0.22f;
-  const float c1W = availW * 0.24f;
+  const float c0W = availW * 0.25f;
+  const float c1W = availW * 0.25f;
   const float c2W = availW * 0.22f;
   const float c3W = availW - c0W - c1W - c2W - 8.0f;
 
   // Column 0: Technical + Set Pieces
   ImGui::BeginChild("##pdc0", ImVec2(c0W, colH), false,
                     ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-  DrawStatSection("##tech",  "Technical",  IM_COL32(130,185,130,230),
+  DrawStatSection("Technical",  IM_COL32(130,185,130,230),
                   kTechStats,  10, pl.id, pl.baseStat);
-  DrawStatSection("##setp",  "Set Pieces", IM_COL32(130,185,130,160),
+  DrawStatSection("Set Pieces", IM_COL32(130,185,130,160),
                   kSetStats,    4, pl.id, pl.baseStat);
   ImGui::EndChild();
   ImGui::SameLine(0, 2.0f);
@@ -2819,7 +2854,7 @@ static void DrawPlayerDetailPage(float w, float h) {
   // Column 1: Mental
   ImGui::BeginChild("##pdc1", ImVec2(c1W, colH), false,
                     ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-  DrawStatSection("##ment", "Mental", IM_COL32(130,150,220,230),
+  DrawStatSection("Mental", IM_COL32(130,150,220,230),
                   kMentStats, 14, pl.id, pl.baseStat);
   ImGui::EndChild();
   ImGui::SameLine(0, 2.0f);
@@ -2827,9 +2862,9 @@ static void DrawPlayerDetailPage(float w, float h) {
   // Column 2: Physical + Goalkeeping
   ImGui::BeginChild("##pdc2", ImVec2(c2W, colH), false,
                     ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-  DrawStatSection("##phys", "Physical",    IM_COL32(220,140,100,230),
+  DrawStatSection("Physical",    IM_COL32(220,140,100,230),
                   kPhysStats,  8, pl.id, pl.baseStat);
-  DrawStatSection("##gk",   "Goalkeeping", IM_COL32(220,140,100,160),
+  DrawStatSection("Goalkeeping", IM_COL32(220,140,100,160),
                   kGKStats,    1, pl.id, pl.baseStat);
   ImGui::EndChild();
   ImGui::SameLine(0, 2.0f);
@@ -2839,139 +2874,180 @@ static void DrawPlayerDetailPage(float w, float h) {
                     ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
   {
     ImDrawList *c3dl = ImGui::GetWindowDrawList();
-    float c3W2 = ImGui::GetContentRegionAvail().x;
+    float c3avail = ImGui::GetContentRegionAvail().x;
+    const float kFs = 11.0f, kRowH = 18.0f;
 
-    // Info header
+    // ---- Info section -------------------------------------------------------
+    // Title
     ImVec2 cp = ImGui::GetCursorScreenPos();
-    c3dl->AddRectFilled(cp, ImVec2(cp.x + c3W2, cp.y + 17.0f), IM_COL32(18,24,44,220));
     PushMgrFont(g_ManagerFontSmall);
-    c3dl->AddText(g_ManagerFontSmall, 11.0f, ImVec2(cp.x + 6.0f, cp.y + 3.0f),
+    c3dl->AddText(g_ManagerFontSmall, kFs, ImVec2(cp.x + 4.0f, cp.y + 2.0f),
                   IM_COL32(180,190,215,220), "Info");
     PopMgrFont(g_ManagerFontSmall);
-    ImGui::Dummy(ImVec2(c3W2, 17.0f));
+    c3dl->AddLine(ImVec2(cp.x, cp.y + 15.0f), ImVec2(cp.x + c3avail, cp.y + 15.0f),
+                  IM_COL32(60, 80, 130, 55), 0.5f);
+    ImGui::Dummy(ImVec2(c3avail, 17.0f));
 
-    // Info rows
-    ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(4.0f, 1.0f));
-    if (ImGui::BeginTable("##infotbl", 2, ImGuiTableFlags_None, ImVec2(c3W2, 0))) {
-      ImGui::TableSetupColumn("##il", ImGuiTableColumnFlags_WidthStretch);
-      ImGui::TableSetupColumn("##iv", ImGuiTableColumnFlags_WidthStretch);
+    // Info rows (DrawList, two-column hand-rolled)
+    static const char *kInfoLabels[] = {"Height", "Personality", "Reputation"};
+    static const char *kInfoVals[]   = {"- cm",   "-",           "-"};
+    for (int i = 0; i < 3; i++) {
+      cp = ImGui::GetCursorScreenPos();
+      ImU32 rowBg = (i%2==0) ? IM_COL32(15,22,46,130) : IM_COL32(10,16,34,60);
+      c3dl->AddRectFilled(cp, ImVec2(cp.x+c3avail, cp.y+kRowH), rowBg);
       PushMgrFont(g_ManagerFontSmall);
-      auto InfoRow = [&](const char *lbl, const char *val) {
-        ImGui::TableNextRow(0, 16.0f);
-        ImGui::TableSetColumnIndex(0);
-        ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(175,185,210,210));
-        ImGui::TextUnformatted(lbl);
-        ImGui::PopStyleColor();
-        ImGui::TableSetColumnIndex(1);
-        ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(210,215,230,220));
-        ImGui::TextUnformatted(val);
-        ImGui::PopStyleColor();
-      };
-      InfoRow("Height",       "\xe2\x80\x94 cm");
-      InfoRow("Personality",  "\xe2\x80\x94");
-      InfoRow("Reputation",   "\xe2\x80\x94");
+      c3dl->AddText(g_ManagerFontSmall, kFs,
+                    ImVec2(cp.x+6.0f, cp.y+(kRowH-kFs)*0.5f),
+                    IM_COL32(170,180,210,210), kInfoLabels[i]);
+      c3dl->AddText(g_ManagerFontSmall, kFs,
+                    ImVec2(cp.x + c3avail*0.55f, cp.y+(kRowH-kFs)*0.5f),
+                    IM_COL32(210,218,235,230), kInfoVals[i]);
       PopMgrFont(g_ManagerFontSmall);
-      ImGui::EndTable();
+      ImGui::Dummy(ImVec2(c3avail, kRowH));
     }
-    ImGui::PopStyleVar();
-    ImGui::Dummy(ImVec2(0, 8.0f));
+    ImGui::Dummy(ImVec2(0, 10.0f));
 
-    // Foot bars
+    // ---- Preferred Foot section ---------------------------------------------
     cp = ImGui::GetCursorScreenPos();
+    PushMgrFont(g_ManagerFontSmall);
+    c3dl->AddText(g_ManagerFontSmall, kFs, ImVec2(cp.x + 4.0f, cp.y + 2.0f),
+                  IM_COL32(180,190,215,220), "Preferred Foot");
+    PopMgrFont(g_ManagerFontSmall);
+    c3dl->AddLine(ImVec2(cp.x, cp.y + 15.0f), ImVec2(cp.x + c3avail, cp.y + 15.0f),
+                  IM_COL32(60,80,130,55), 0.5f);
+    ImGui::Dummy(ImVec2(c3avail, 17.0f));
+
     bool isLeft  = (!pl.foot.empty() && (pl.foot[0]=='L'||pl.foot[0]=='l'));
     bool isRight = (!pl.foot.empty() && (pl.foot[0]=='R'||pl.foot[0]=='r'));
-    float halfW  = c3W2 * 0.5f - 4.0f;
-    float lfx = cp.x + 2.0f, rfx = cp.x + c3W2 * 0.5f + 2.0f;
-    PushMgrFont(g_ManagerFontSmall);
-    c3dl->AddText(g_ManagerFontSmall, 11.0f, ImVec2(lfx, cp.y),
-                  IM_COL32(150,165,195,200), "Left Foot");
-    c3dl->AddText(g_ManagerFontSmall, 11.0f, ImVec2(rfx, cp.y),
-                  IM_COL32(150,165,195,200), "Right Foot");
-    PopMgrFont(g_ManagerFontSmall);
-    ImGui::Dummy(ImVec2(0, 14.0f));
-    cp = ImGui::GetCursorScreenPos();
-    auto drawFootBar = [&](float bx, float fill) {
-      c3dl->AddRectFilled(ImVec2(bx, cp.y), ImVec2(bx + halfW, cp.y + 6.0f),
-                          IM_COL32(20,28,52,200), 3.0f);
-      c3dl->AddRectFilled(ImVec2(bx, cp.y), ImVec2(bx + halfW * fill, cp.y + 6.0f),
-                          IM_COL32(80,180,120,220), 3.0f);
-    };
-    drawFootBar(lfx, isLeft ? 0.88f : 0.25f);
-    drawFootBar(rfx, isRight ? 0.88f : 0.25f);
-    ImGui::Dummy(ImVec2(0, 16.0f));
+    float footColW = c3avail * 0.5f - 3.0f;
+    float lfx2 = ImGui::GetCursorScreenPos().x;
+    float rfx2 = lfx2 + c3avail * 0.5f + 3.0f;
 
-    // Spider chart
+    // Draw a foot block: label + strength label + bar
+    auto drawFoot = [&](float bx, bool strong, const char *side) {
+      ImVec2 fcp = ImGui::GetCursorScreenPos();
+      fcp.x = bx;
+      // Side label
+      PushMgrFont(g_ManagerFontSmall);
+      c3dl->AddText(g_ManagerFontSmall, kFs, ImVec2(bx, fcp.y),
+                    IM_COL32(165,178,210,220), side);
+      // Strength label (right-aligned)
+      const char *strengthLbl = strong ? "Strong" : "Weak";
+      ImU32 strCol = strong ? IM_COL32(80,215,105,220) : IM_COL32(155,165,195,180);
+      ImVec2 stSz = g_ManagerFontSmall
+          ? g_ManagerFontSmall->CalcTextSizeA(kFs, FLT_MAX, 0, strengthLbl)
+          : ImGui::CalcTextSize(strengthLbl);
+      c3dl->AddText(g_ManagerFontSmall, kFs,
+                    ImVec2(bx + footColW - stSz.x, fcp.y), strCol, strengthLbl);
+      PopMgrFont(g_ManagerFontSmall);
+      // Bar
+      float barY = fcp.y + 14.0f;
+      float fill = strong ? 0.90f : 0.28f;
+      ImU32 fillCol = strong ? IM_COL32(80,215,105,190) : IM_COL32(80,100,160,140);
+      c3dl->AddRectFilled(ImVec2(bx, barY), ImVec2(bx+footColW, barY+6.0f),
+                          IM_COL32(22,30,58,210), 3.0f);
+      c3dl->AddRectFilled(ImVec2(bx, barY), ImVec2(bx+footColW*fill, barY+6.0f),
+                          fillCol, 3.0f);
+    };
+    drawFoot(lfx2, isLeft,  "Left");
+    drawFoot(rfx2, isRight, "Right");
+    ImGui::Dummy(ImVec2(0, 24.0f)); // labels + bar height
+    ImGui::Dummy(ImVec2(0, 8.0f));
+
+    // ---- Spider / Radar chart -----------------------------------------------
     cp = ImGui::GetCursorScreenPos();
-    float spR  = std::min(c3W2 * 0.32f, 50.0f);
-    float spCx = cp.x + c3W2 * 0.5f;
-    float spCy = cp.y + spR + 10.0f;
-    // Grid rings
-    for (int ring = 1; ring <= 3; ring++) {
+    float spR  = std::min(c3avail * 0.38f, 64.0f);
+    float spCx = cp.x + c3avail * 0.5f;
+    float spCy = cp.y + spR + 14.0f;
+
+    // Filled concentric rings (subtle)
+    for (int ring = 3; ring >= 1; ring--) {
       ImVec2 pts[6];
       for (int ai = 0; ai < 6; ai++) {
         float ang = ai * (2.0f * 3.14159f / 6.0f) - 3.14159f * 0.5f;
         float r   = spR * (ring / 3.0f);
-        pts[ai]   = ImVec2(spCx + cosf(ang) * r, spCy + sinf(ang) * r);
+        pts[ai]   = ImVec2(spCx + cosf(ang)*r, spCy + sinf(ang)*r);
       }
+      // Ring fill (very subtle gradient from dark to darker)
+      c3dl->AddConvexPolyFilled(pts, 6,
+          ring == 3 ? IM_COL32(18,25,50,100) :
+          ring == 2 ? IM_COL32(16,22,44,100) :
+                      IM_COL32(14,19,38,100));
+      // Ring outline
       for (int ai = 0; ai < 6; ai++)
-        c3dl->AddLine(pts[ai], pts[(ai+1)%6], IM_COL32(40,55,90,120), 0.5f);
+        c3dl->AddLine(pts[ai], pts[(ai+1)%6],
+                      IM_COL32(50, 68, 115, 110), 0.5f);
     }
-    // Axes + data polygon
-    static const char *kAxes[]    = {"Def","Phy","Men","Tec","Att","Spd"};
+
+    // Axis lines
+    static const char *kAxes[]    = {"Def", "Phy", "Men", "Tec", "Att", "Spd"};
     static const int   kAxeStat[] = {8, 28, 17, 9, 2, 33};
     ImVec2 webPts[6];
     for (int ai = 0; ai < 6; ai++) {
       float ang = ai * (2.0f * 3.14159f / 6.0f) - 3.14159f * 0.5f;
       c3dl->AddLine(ImVec2(spCx, spCy),
                     ImVec2(spCx + cosf(ang)*spR, spCy + sinf(ang)*spR),
-                    IM_COL32(45,60,100,160), 1.0f);
+                    IM_COL32(55, 72, 120, 150), 0.8f);
+
+      // Axis label
       PushMgrFont(g_ManagerFontSmall);
       ImVec2 lsz = g_ManagerFontSmall
           ? g_ManagerFontSmall->CalcTextSizeA(10.0f, FLT_MAX, 0, kAxes[ai])
           : ImGui::CalcTextSize(kAxes[ai]);
+      float lblDist = spR + 13.0f;
       c3dl->AddText(g_ManagerFontSmall, 10.0f,
-                    ImVec2(spCx + cosf(ang)*(spR+11.0f) - lsz.x*0.5f,
-                           spCy + sinf(ang)*(spR+11.0f) - lsz.y*0.5f),
-                    IM_COL32(120,135,170,200), kAxes[ai]);
+                    ImVec2(spCx + cosf(ang)*lblDist - lsz.x*0.5f,
+                           spCy + sinf(ang)*lblDist - lsz.y*0.5f),
+                    IM_COL32(145, 158, 192, 215), kAxes[ai]);
       PopMgrFont(g_ManagerFontSmall);
-      int sv  = DerivedStat(pl.id, kAxeStat[ai], pl.baseStat);
+
+      int sv = DerivedStat(pl.id, kAxeStat[ai], pl.baseStat);
       float r = (sv / 20.0f) * spR;
       webPts[ai] = ImVec2(spCx + cosf(ang)*r, spCy + sinf(ang)*r);
     }
-    c3dl->AddConvexPolyFilled(webPts, 6, IM_COL32(accR, accG, accB, 45));
-    for (int ai = 0; ai < 6; ai++)
-      c3dl->AddLine(webPts[ai], webPts[(ai+1)%6],
-                    IM_COL32(accR, accG, accB, 200), 1.5f);
-    ImGui::Dummy(ImVec2(0, spR * 2.0f + 28.0f));
 
-    // Pros
+    // Data polygon fill + outline
+    c3dl->AddConvexPolyFilled(webPts, 6, IM_COL32(accR, accG, accB, 55));
+    for (int ai = 0; ai < 6; ai++) {
+      c3dl->AddLine(webPts[ai], webPts[(ai+1)%6],
+                    IM_COL32(accR, accG, accB, 210), 1.8f);
+      c3dl->AddCircleFilled(webPts[ai], 2.5f, IM_COL32(accR, accG, accB, 240));
+    }
+    ImGui::Dummy(ImVec2(0, spR * 2.0f + 32.0f));
+
+    // ---- Pros / Cons --------------------------------------------------------
+    // Pros title
     cp = ImGui::GetCursorScreenPos();
-    c3dl->AddRectFilled(cp, ImVec2(cp.x + c3W2, cp.y + 17.0f), IM_COL32(18,24,44,220));
     PushMgrFont(g_ManagerFontSmall);
-    c3dl->AddText(g_ManagerFontSmall, 11.0f, ImVec2(cp.x + 6.0f, cp.y + 3.0f),
-                  IM_COL32(80,195,110,230), "Pros");
+    c3dl->AddText(g_ManagerFontSmall, kFs, ImVec2(cp.x + 4.0f, cp.y + 2.0f),
+                  IM_COL32(80,200,110,230), "Pros");
     PopMgrFont(g_ManagerFontSmall);
-    ImGui::Dummy(ImVec2(c3W2, 17.0f));
+    c3dl->AddLine(ImVec2(cp.x, cp.y+15.0f), ImVec2(cp.x+c3avail, cp.y+15.0f),
+                  IM_COL32(80,200,110,45), 0.5f);
+    ImGui::Dummy(ImVec2(c3avail, 17.0f));
+    cp = ImGui::GetCursorScreenPos();
     PushMgrFont(g_ManagerFontSmall);
-    ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(145,160,192,200));
-    ImGui::TextUnformatted("  \xe2\x80\x94 (Coming soon)");
-    ImGui::PopStyleColor();
+    c3dl->AddText(g_ManagerFontSmall, kFs, ImVec2(cp.x+6.0f, cp.y+2.0f),
+                  IM_COL32(140,155,192,180), "+ (Coming soon)");
     PopMgrFont(g_ManagerFontSmall);
+    ImGui::Dummy(ImVec2(c3avail, 16.0f));
     ImGui::Dummy(ImVec2(0, 6.0f));
 
-    // Cons
+    // Cons title
     cp = ImGui::GetCursorScreenPos();
-    c3dl->AddRectFilled(cp, ImVec2(cp.x + c3W2, cp.y + 17.0f), IM_COL32(18,24,44,220));
     PushMgrFont(g_ManagerFontSmall);
-    c3dl->AddText(g_ManagerFontSmall, 11.0f, ImVec2(cp.x + 6.0f, cp.y + 3.0f),
+    c3dl->AddText(g_ManagerFontSmall, kFs, ImVec2(cp.x + 4.0f, cp.y + 2.0f),
                   IM_COL32(215,75,75,230), "Cons");
     PopMgrFont(g_ManagerFontSmall);
-    ImGui::Dummy(ImVec2(c3W2, 17.0f));
+    c3dl->AddLine(ImVec2(cp.x, cp.y+15.0f), ImVec2(cp.x+c3avail, cp.y+15.0f),
+                  IM_COL32(215,75,75,45), 0.5f);
+    ImGui::Dummy(ImVec2(c3avail, 17.0f));
+    cp = ImGui::GetCursorScreenPos();
     PushMgrFont(g_ManagerFontSmall);
-    ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(145,160,192,200));
-    ImGui::TextUnformatted("  \xe2\x80\x94 (Coming soon)");
-    ImGui::PopStyleColor();
+    c3dl->AddText(g_ManagerFontSmall, kFs, ImVec2(cp.x+6.0f, cp.y+2.0f),
+                  IM_COL32(140,155,192,180), "- (Coming soon)");
     PopMgrFont(g_ManagerFontSmall);
+    ImGui::Dummy(ImVec2(c3avail, 16.0f));
   }
   ImGui::EndChild(); // ##pdc3
 
