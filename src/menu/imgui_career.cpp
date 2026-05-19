@@ -1882,9 +1882,11 @@ static void DrawTacticsOverviewCard(ImVec2 sz) {
     return cy;
   };
 
-  float halfW  = listColW * 0.5f - 4.0f;
-  float colAX  = listPos.x;
-  float colDX  = listPos.x + halfW + 8.0f;
+  // Center the content block horizontally within listColW
+  const float kListMargin = 3.0f;
+  float halfW  = (listColW - 2.0f * kListMargin - 8.0f) * 0.5f;
+  float colAX  = listPos.x + kListMargin;
+  float colDX  = colAX + halfW + 8.0f;
 
   float bottomAtt = drawCol(colAX, listStartY, kCatAtt, "Attacking", att, halfW);
   float bottomDef = drawCol(colDX, listStartY, kCatDef, "Defending", def, halfW);
@@ -1921,6 +1923,233 @@ static void DrawTacticsOverviewCard(ImVec2 sz) {
   ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + std::max(ptH, totalH)));
   ImGui::Dummy(ImVec2(avW, 1.0f));
 
+  EndModernCard();
+}
+
+static GLuint s_DefaultFaceTex     = 0;
+static bool   s_DefaultFaceTexTried = false;
+static GLuint GetDefaultFaceTex() {
+  if (s_DefaultFaceTexTried) return s_DefaultFaceTex;
+  s_DefaultFaceTexTried = true;
+  SDL_Surface *surf = IMG_Load("media/textures/faces/Men Default faces /Zet /male.png");
+  if (!surf) return 0;
+  SDL_Surface *rgba = SDL_ConvertSurfaceFormat(surf, SDL_PIXELFORMAT_RGBA32, 0);
+  SDL_FreeSurface(surf);
+  if (!rgba) return 0;
+  glGenTextures(1, &s_DefaultFaceTex);
+  glBindTexture(GL_TEXTURE_2D, s_DefaultFaceTex);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, rgba->w, rgba->h, 0,
+               GL_RGBA, GL_UNSIGNED_BYTE, rgba->pixels);
+  SDL_FreeSurface(rgba);
+  glBindTexture(GL_TEXTURE_2D, 0);
+  return s_DefaultFaceTex;
+}
+
+static void DrawTransfersCard(ImVec2 sz) {
+  BeginModernCard("##transfers_ph", sz);
+
+  struct OfferEntry {
+    const char *name;
+    const char *club;
+    const char *nat;
+    const char *amount;
+  };
+  static const OfferEntry kOffers[] = {
+    { "Xavier Chavalerin", "Troyes AC",     "FRA", "216K EUR p/a" },
+    { "Yannik Moker",      "FC Groningen",  "GER", "220K EUR p/a" },
+  };
+
+  GLuint faceTex = GetDefaultFaceTex();
+
+  ImDrawList *dl = ImGui::GetWindowDrawList();
+  PushMgrFont(g_ManagerFontSmall);
+  float lh = ImGui::GetTextLineHeight();
+
+  const float kAvatarSz = lh * 2.4f;
+  const float kRowH     = kAvatarSz + 12.0f;
+  const float kSepH     = 1.0f + 4.0f;  // separator + dummy
+  float totalH = 2.0f * kRowH + kSepH;
+  float avail  = ImGui::GetContentRegionAvail().y;
+  float topOff = (avail - totalH) * 0.5f;
+  if (topOff > 0.0f) ImGui::Dummy(ImVec2(0, topOff));
+
+  for (int i = 0; i < 2; i++) {
+    const OfferEntry &o = kOffers[i];
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 6.0f);
+    ImVec2 rowStart = ImGui::GetCursorScreenPos();
+
+    // Face image (rounded square)
+    if (faceTex) {
+      dl->AddImageRounded((ImTextureID)(intptr_t)faceTex,
+                          rowStart,
+                          ImVec2(rowStart.x + kAvatarSz, rowStart.y + kAvatarSz),
+                          ImVec2(0,0), ImVec2(1,1),
+                          IM_COL32(255,255,255,255), kAvatarSz * 0.35f);
+    } else {
+      dl->AddRectFilled(rowStart,
+                        ImVec2(rowStart.x + kAvatarSz, rowStart.y + kAvatarSz),
+                        IM_COL32(60,70,100,200), kAvatarSz * 0.35f);
+    }
+
+    // Text block
+    float tx = rowStart.x + kAvatarSz + 10.0f;
+    float ty = rowStart.y + (kAvatarSz - lh * 2.0f - 3.0f) * 0.5f;
+
+    dl->AddText(ImGui::GetFont(), lh, ImVec2(tx, ty),
+                IM_COL32(230,230,240,230), o.name);
+    char sub[64]; snprintf(sub, sizeof(sub), "%s  %s", o.club, o.nat);
+    dl->AddText(ImGui::GetFont(), lh * 0.85f, ImVec2(tx, ty + lh + 2.0f),
+                IM_COL32(140,145,165,200), sub);
+
+    // Amount — right-aligned, accent colour
+    float avail = ImGui::GetContentRegionAvail().x - 6.0f;
+    float amtW  = ImGui::CalcTextSize(o.amount).x;
+    float amtX  = rowStart.x + avail - amtW;
+    float amtY  = rowStart.y + (kAvatarSz - lh) * 0.5f;
+    dl->AddText(ImGui::GetFont(), lh, ImVec2(amtX, amtY),
+                IM_COL32((int)(kAccent.x*255),(int)(kAccent.y*255),(int)(kAccent.z*255),220),
+                o.amount);
+
+    ImGui::Dummy(ImVec2(0, kRowH));
+    if (i < 1) {
+      ImGui::PushStyleColor(ImGuiCol_Separator, kBorder);
+      ImGui::Separator();
+      ImGui::PopStyleColor();
+      ImGui::Dummy(ImVec2(0, 2.0f));
+    }
+  }
+
+  PopMgrFont(g_ManagerFontSmall);
+  EndModernCard();
+}
+
+static const char *PosLabel(int fo); // forward declaration — defined with Squad page below
+
+static void DrawSquadSnapshotCard(ImVec2 sz) {
+  BeginModernCard("##squad_snap", sz);
+
+  GLuint faceTex = GetDefaultFaceTex();
+
+  // Only formationOrder 0-19: 0-10 = Starting XI, 11-19 = Subs
+  std::vector<const CareerHubState::Player *> xi, subs;
+  for (const auto &p : g_CareerHub.players) {
+    if      (p.formationOrder >= 0  && p.formationOrder <= 10) xi.push_back(&p);
+    else if (p.formationOrder >= 11 && p.formationOrder <= 19) subs.push_back(&p);
+  }
+  std::sort(xi.begin(),   xi.end(),   [](const CareerHubState::Player *a, const CareerHubState::Player *b){ return a->formationOrder < b->formationOrder; });
+  std::sort(subs.begin(), subs.end(), [](const CareerHubState::Player *a, const CareerHubState::Player *b){ return a->formationOrder < b->formationOrder; });
+
+  PushMgrFont(g_ManagerFontSmall);
+  float lh = ImGui::GetTextLineHeight();
+  PopMgrFont(g_ManagerFontSmall);
+
+  // Compact row height to fit 20 rows: face + 1px top/bottom padding
+  const float kFaceH  = lh + 2.0f;   // tiny face thumbnail
+  const float kRowH   = kFaceH + 3.0f;
+  const float kHdrH   = lh + 4.0f;   // column header row
+
+  ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(3.0f, 1.0f));
+  if (ImGui::BeginTable("##sq_snap", 7,
+                        ImGuiTableFlags_RowBg | ImGuiTableFlags_PadOuterX,
+                        ImVec2(0, 0))) {
+    ImGui::TableSetupColumn("POS",  ImGuiTableColumnFlags_WidthFixed,   28.0f);
+    ImGui::TableSetupColumn("##fc", ImGuiTableColumnFlags_WidthFixed,   kFaceH);
+    ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
+    ImGui::TableSetupColumn("MP",   ImGuiTableColumnFlags_WidthFixed,   22.0f);
+    ImGui::TableSetupColumn("G",    ImGuiTableColumnFlags_WidthFixed,   18.0f);
+    ImGui::TableSetupColumn("A",    ImGuiTableColumnFlags_WidthFixed,   18.0f);
+    ImGui::TableSetupColumn("R",    ImGuiTableColumnFlags_WidthFixed,   32.0f);
+
+    // Header row
+    ImGui::TableNextRow(0, kHdrH);
+    PushMgrFont(g_ManagerFontSmall);
+    ImGui::PushStyleColor(ImGuiCol_Text, kTextDim);
+    for (int c = 0; c < 7; c++) {
+      ImGui::TableSetColumnIndex(c);
+      static const char *kHdrs[] = {"POS","","Player","MP","G","A","R"};
+      ImGui::TextUnformatted(kHdrs[c]);
+    }
+    ImGui::PopStyleColor();
+    PopMgrFont(g_ManagerFontSmall);
+
+    // Helper to draw one player row
+    auto drawRow = [&](const CareerHubState::Player *p, bool isXI) {
+      ImGui::TableNextRow(0, kRowH);
+
+      // POS badge
+      ImGui::TableSetColumnIndex(0);
+      {
+        PushMgrFont(g_ManagerFontSmall);
+        ImDrawList *dl = ImGui::GetWindowDrawList();
+        ImVec2 pos = ImGui::GetCursorScreenPos();
+        ImU32 badgeBg;
+        int fo = p->formationOrder;
+        if      (!isXI)   badgeBg = IM_COL32(60, 65, 85,200);  // subs — neutral
+        else if (fo == 0) badgeBg = IM_COL32(220,160, 30,200); // GK gold
+        else if (fo <= 4) badgeBg = IM_COL32( 80,150,255,200); // DEF blue
+        else if (fo <= 7) badgeBg = IM_COL32( 80,210,110,200); // MID green
+        else              badgeBg = IM_COL32(255, 90, 70,200); // FWD red
+        const char *posStr = PosLabel(fo);
+        float tw = ImGui::CalcTextSize(posStr).x;
+        float bw = std::max(tw + 6.0f, 24.0f);
+        float bh = lh + 2.0f;
+        dl->AddRectFilled(ImVec2(pos.x, pos.y), ImVec2(pos.x+bw, pos.y+bh), badgeBg, 3.0f);
+        dl->AddText(ImGui::GetFont(), lh, ImVec2(pos.x+(bw-tw)*0.5f, pos.y+1.0f),
+                    IM_COL32(255,255,255,230), posStr);
+        ImGui::Dummy(ImVec2(bw, bh));
+        PopMgrFont(g_ManagerFontSmall);
+      }
+
+      // Face
+      ImGui::TableSetColumnIndex(1);
+      if (faceTex) {
+        ImGui::Image((ImTextureID)(intptr_t)faceTex, ImVec2(kFaceH, kFaceH));
+      } else {
+        ImGui::Dummy(ImVec2(kFaceH, kFaceH));
+      }
+
+      // Name
+      ImGui::TableSetColumnIndex(2);
+      PushMgrFont(g_ManagerFontSmall);
+      std::string full = p->firstName + " " + p->lastName;
+      ImGui::PushStyleColor(ImGuiCol_Text, isXI ? kTextPri : kTextSec);
+      ImGui::TextUnformatted(full.c_str());
+      ImGui::PopStyleColor();
+      PopMgrFont(g_ManagerFontSmall);
+
+      // MP / G / A / R — all placeholder dashes
+      PushMgrFont(g_ManagerFontSmall);
+      ImGui::PushStyleColor(ImGuiCol_Text, kTextDim);
+      ImGui::TableSetColumnIndex(3); ImGui::TextUnformatted("-");
+      ImGui::TableSetColumnIndex(4); ImGui::TextUnformatted("-");
+      ImGui::TableSetColumnIndex(5); ImGui::TextUnformatted("-");
+      ImGui::PopStyleColor();
+      // Rating badge
+      ImGui::TableSetColumnIndex(6);
+      {
+        ImDrawList *dl = ImGui::GetWindowDrawList();
+        ImVec2 rp = ImGui::GetCursorScreenPos();
+        const float rw = 28.0f, rh = lh + 1.0f;
+        dl->AddRectFilled(rp, ImVec2(rp.x+rw, rp.y+rh),
+                          IM_COL32((int)(kAccent.x*255),(int)(kAccent.y*255),(int)(kAccent.z*255),50), 3.0f);
+        dl->AddText(ImGui::GetFont(), lh,
+                    ImVec2(rp.x + (rw - ImGui::CalcTextSize("-").x)*0.5f, rp.y),
+                    IM_COL32((int)(kAccent.x*255),(int)(kAccent.y*255),(int)(kAccent.z*255),220), "-");
+        ImGui::Dummy(ImVec2(rw, rh));
+      }
+      PopMgrFont(g_ManagerFontSmall);
+    };
+
+    for (const auto *p : xi)   drawRow(p, true);
+    for (const auto *p : subs) drawRow(p, false);
+
+    ImGui::EndTable();
+  }
+  ImGui::PopStyleVar();
   EndModernCard();
 }
 
@@ -1973,9 +2202,12 @@ static void DrawHomePage(float w, float h) {
   const float kTrainH  = 5.0f * msgFontH + 6.0f;
   const float kBoardH  = 3.0f * (msgFontH + 10.0f) + 36.0f;
   const float kMedH    = 3.0f * (msgFontH + 10.0f) + 46.0f;
+  const float kTransH  = 2.0f * (msgFontH * 2.4f + 12.0f) + 58.0f;
   const float kTacH    = 220.0f;
+  // Squad snapshot: header + 20 compact rows. rowH = (msgFontH+2)+3 = msgFontH+5
+  const float kSquadH  = (msgFontH + 4.0f) + 20.0f * (msgFontH + 5.0f) + 24.0f;
 
-  // Left: Messages + Training Schedule + Board Objectives
+  // Left: Messages + Training Schedule + Board Objectives + Squad Snapshot
   ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0,0,0,0));
   ImGui::BeginChild("##ov_l", ImVec2(leftW, colH), false, ImGuiWindowFlags_NoScrollbar);
   ImGui::PopStyleColor();
@@ -1984,6 +2216,8 @@ static void DrawHomePage(float w, float h) {
   DrawTrainingScheduleCard(ImVec2(leftW, kTrainH));
   ImGui::Dummy(ImVec2(0, kGap));
   DrawBoardObjectivesCard(ImVec2(leftW, kBoardH));
+  ImGui::Dummy(ImVec2(0, kGap));
+  DrawSquadSnapshotCard(ImVec2(leftW, kSquadH));
   ImGui::EndChild();
 
   ImGui::SameLine(0, kGap);
@@ -2061,6 +2295,8 @@ static void DrawHomePage(float w, float h) {
   }
   ImGui::Dummy(ImVec2(0, kGap));
   DrawMedicalCentreCard(ImVec2(rightW, kMedH));
+  ImGui::Dummy(ImVec2(0, kGap));
+  DrawTransfersCard(ImVec2(rightW, kTransH));
   ImGui::EndChild();
 }
 
