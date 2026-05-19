@@ -1141,7 +1141,7 @@ static void DrawMessagesCard(ImVec2 sz) {
     for (int i = 0; i < kN; i++) {
       ImGui::TableNextRow();
       ImGui::TableSetColumnIndex(0);
-      ImGui::PushStyleColor(ImGuiCol_Text, kViolet);
+      ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
       ImGui::TextUnformatted(kMsgs[i].from);
       ImGui::PopStyleColor();
       ImGui::TableSetColumnIndex(1);
@@ -1339,7 +1339,7 @@ static void DrawNextFixtureCard(ImVec2 sz) {
       if (oy > 0) ImGui::SetCursorPosY(ImGui::GetCursorPosY() - oy);
       ImGui::SameLine(0, 6);
     }
-    ImGui::PushStyleColor(ImGuiCol_Text, kBlue);
+    ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
     ImGui::TextUnformatted(hdr);
     ImGui::PopStyleColor();
     PopMgrFont(g_ManagerFontSmall);
@@ -1419,7 +1419,7 @@ static void DrawFixtureScheduleCard(ImVec2 sz) {
   ImGui::Dummy(ImVec2(0, 4.0f));
   ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 4.0f);
   PushMgrFont(g_ManagerFontSmall);
-  ImGui::PushStyleColor(ImGuiCol_Text, kBlue);
+  ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
   ImGui::Text("Matchweek %d", currentMD);
   ImGui::PopStyleColor();
   PopMgrFont(g_ManagerFontSmall);
@@ -1495,7 +1495,7 @@ static void DrawLeagueSnapshotCard(ImVec2 sz) {
   ImGui::Dummy(ImVec2(0, 4.0f));
   ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 4.0f);
   PushMgrFont(g_ManagerFontSmall);
-  ImGui::PushStyleColor(ImGuiCol_Text, kBlue);
+  ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
   ImGui::TextUnformatted(myLeague.c_str());
   ImGui::PopStyleColor();
   ImGui::PushStyleColor(ImGuiCol_Separator, kBorder);
@@ -1560,8 +1560,370 @@ static void DrawLeagueSnapshotCard(ImVec2 sz) {
   EndModernCard();
 }
 
+// ---- Tactic instruction data (shared by home overview + tactics page) ------
+
+struct TacInstruction {
+  const char *key;
+  const char *name;
+  const char *category; // "Attacking" | "Defending" | "On the Ball"
+  struct Preset { const char *label; float value; } presets[4];
+};
+
+static const TacInstruction kTacInstructions[] = {
+  { "position_offense_depth_factor", "Attacking Depth", "Attacking",
+    {{"Compact",0.25f},{"Balanced",0.5f},{"Expansive",0.75f},{"Total Attack",1.0f}} },
+  { "position_offense_width_factor", "Attacking Width", "Attacking",
+    {{"Narrow",0.3f},{"Balanced",0.6f},{"Wide",0.8f},{"Full Width",1.0f}} },
+  { "position_offense_midfieldfocus", "Midfield in Attack", "Attacking",
+    {{"Hold Shape",0.2f},{"Balanced",0.45f},{"Join Attack",0.7f},{"All Forward",0.9f}} },
+  { "position_offense_sidefocus_strength", "Flank Play", "Attacking",
+    {{"Central",0.1f},{"Mixed",0.35f},{"Wide Threat",0.6f},{"Wing Overloads",0.9f}} },
+  { "position_offense_microfocus_strength", "Attacking Pressing", "Attacking",
+    {{"Loose",0.2f},{"Balanced",0.5f},{"Tight",0.75f},{"Swarm",0.95f}} },
+  { "position_defense_depth_factor", "Defensive Line", "Defending",
+    {{"Deep Block",0.3f},{"Mid Block",0.55f},{"High Line",0.75f},{"Ultra High",0.95f}} },
+  { "position_defense_width_factor", "Defensive Shape", "Defending",
+    {{"Narrow Block",0.3f},{"Balanced",0.55f},{"Wide",0.8f},{"Spread",1.0f}} },
+  { "position_defense_midfieldfocus", "Midfield Pressure", "Defending",
+    {{"Drop Deep",0.2f},{"Compact",0.45f},{"Press High",0.7f},{"Extreme Press",0.9f}} },
+  { "position_defense_sidefocus_strength", "Flank Coverage", "Defending",
+    {{"Narrow",0.1f},{"Balanced",0.4f},{"Cover Wings",0.65f},{"Full Width",0.9f}} },
+  { "position_defense_microfocus_strength", "Defensive Compactness", "Defending",
+    {{"Loose",0.2f},{"Solid",0.5f},{"Compact",0.75f},{"Ultra Compact",0.95f}} },
+  { "dribble_offensiveness", "Dribble Rate", "On the Ball",
+    {{"Cautious",0.2f},{"Balanced",0.5f},{"Direct",0.7f},{"Expressive",0.9f}} },
+  { "dribble_centermagnet", "Dribble Direction", "On the Ball",
+    {{"Hug Flanks",0.1f},{"Mixed",0.4f},{"Through Middle",0.7f},{"Central Drive",0.9f}} },
+};
+static const int kNumTacInstructions = 12;
+
+// ---- Placeholder home panels -----------------------------------------------
+
+static void DrawPlaceholderHeader(const char *title) {
+  PushMgrFont(g_ManagerFontBold);
+  ImGui::PushStyleColor(ImGuiCol_Text, kTextPri);
+  ImGui::TextUnformatted(title);
+  ImGui::PopStyleColor();
+  PopMgrFont(g_ManagerFontBold);
+  ImGui::PushStyleColor(ImGuiCol_Separator, kBorder);
+  ImGui::Separator();
+  ImGui::PopStyleColor();
+  ImGui::Spacing();
+}
+
+static void DrawTrainingScheduleCard(ImVec2 sz) {
+  BeginModernCard("##training_ph", sz);
+
+  static const struct { const char *abbr; const char *focus; } kWeek[] = {
+    { "Mon", "Tactical"  },
+    { "Tue", "Physical"  },
+    { "Wed", "Rest"      },
+    { "Thu", "Set Pieces"},
+    { "Fri", "Match Prep"},
+    { "Sat", "Recovery"  },
+    { "Sun", "Day Off"   },
+  };
+
+  ImDrawList *dl = ImGui::GetWindowDrawList();
+  float avW = ImGui::GetContentRegionAvail().x;
+  float avH = ImGui::GetContentRegionAvail().y;
+  const int kN = 7;
+  float cellW = avW / (float)kN;
+  float cellH = avH - 4.0f;
+  cellH = cellH < 40.0f ? 40.0f : cellH;
+  float startX = ImGui::GetCursorScreenPos().x;
+  float startY = ImGui::GetCursorScreenPos().y + 2.0f;
+
+  PushMgrFont(g_ManagerFontSmall);
+  float lh = ImGui::GetTextLineHeight();
+  int todayDow = -1;
+  {
+    const std::string &cd = g_CareerHub.currentDate;
+    if (cd.size() >= 10) {
+      // weekday from career date: quick Zeller's congruence
+      int y = atoi(cd.substr(0,4).c_str());
+      int m = atoi(cd.substr(5,2).c_str());
+      int d = atoi(cd.substr(8,2).c_str());
+      if (m < 3) { m += 12; y--; }
+      int k = y % 100, j = y / 100;
+      int h = (d + (13*(m+1))/5 + k + k/4 + j/4 + 5*j) % 7;
+      // h: 0=Sat,1=Sun,2=Mon,...,6=Fri → Mon=2→0 ... Sun=1→6
+      int dow = (h + 5) % 7; // 0=Mon ... 6=Sun
+      todayDow = dow;
+    }
+  }
+
+  for (int i = 0; i < kN; i++) {
+    float cx = startX + i * cellW;
+    float cy = startY;
+    bool isToday = (i == todayDow);
+    ImVec2 cMin(cx + 2.0f, cy);
+    ImVec2 cMax(cx + cellW - 2.0f, cy + cellH);
+
+    if (isToday)
+      dl->AddRectFilled(cMin, cMax, IM_COL32((int)(kAccent.x*255),(int)(kAccent.y*255),(int)(kAccent.z*255),40), 5.0f);
+
+    // Day abbreviation: fixed near top
+    float dayW = ImGui::CalcTextSize(kWeek[i].abbr).x;
+    float dayX = cx + (cellW - dayW) * 0.5f;
+    ImU32 dayCol = isToday ? IM_COL32((int)(kAccent.x*255),(int)(kAccent.y*255),(int)(kAccent.z*255),255)
+                           : IM_COL32(255,255,255,160);
+    const float kDayTopOff = 5.0f;
+    dl->AddText(ImGui::GetFont(), lh, ImVec2(dayX, cy + kDayTopOff), dayCol, kWeek[i].abbr);
+
+    // Focus text: vertically centered in the remaining space below the day abbreviation
+    float focScale = 0.82f;
+    float remainY  = cy + kDayTopOff + lh;   // top of remaining space
+    float remainH  = cellH - kDayTopOff - lh; // height of remaining space
+    float focH     = lh * focScale;
+    float focTopY  = remainY + (remainH - focH) * 0.5f;
+    if (focTopY < remainY) focTopY = remainY;
+    float focW = ImGui::CalcTextSize(kWeek[i].focus).x;
+    float scale = focScale;
+    if (focW * scale > cellW - 4.0f) scale = (cellW - 4.0f) / focW;
+    float focX = cx + (cellW - focW * scale) * 0.5f;
+    dl->AddText(ImGui::GetFont(), lh * scale, ImVec2(focX, focTopY),
+                IM_COL32(255,255,255, isToday ? 210 : 100), kWeek[i].focus);
+
+    if (isToday)
+      dl->AddRect(cMin, cMax, IM_COL32((int)(kAccent.x*255),(int)(kAccent.y*255),(int)(kAccent.z*255),160), 5.0f, 0, 1.0f);
+  }
+  // Advance cursor past the drawn region so EndModernCard clips correctly
+  ImGui::Dummy(ImVec2(avW, cellH + 2.0f));
+  PopMgrFont(g_ManagerFontSmall);
+  EndModernCard();
+}
+
+static void DrawBoardObjectivesCard(ImVec2 sz) {
+  BeginModernCard("##boardobj_ph", sz);
+
+  static const struct { const char *text; ImU32 dotCol; } kObjs[] = {
+    { "Avoid relegation",        IM_COL32( 34,197, 94,220) }, // green  – achieved
+    { "Reach knockout rounds",   IM_COL32(248,158, 11,220) }, // amber  – in progress
+    { "Develop 2 youth players", IM_COL32( 90, 95,110,220) }, // dim    – not started
+  };
+  ImDrawList *dl = ImGui::GetWindowDrawList();
+  PushMgrFont(g_ManagerFontSmall);
+  float lh = ImGui::GetTextLineHeight();
+  float cr = 4.0f;
+
+  ImGui::Dummy(ImVec2(0, 4.0f));
+  for (const auto &o : kObjs) {
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 8.0f);
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    dl->AddCircleFilled(ImVec2(p.x + cr, p.y + lh * 0.5f), cr, o.dotCol);
+    ImGui::Dummy(ImVec2(cr * 2.0f + 8.0f, lh));
+    ImGui::SameLine(0, 0);
+    ImGui::PushStyleColor(ImGuiCol_Text, kTextPri);
+    ImGui::TextUnformatted(o.text);
+    ImGui::PopStyleColor();
+    ImGui::Spacing();
+  }
+  PopMgrFont(g_ManagerFontSmall);
+  EndModernCard();
+}
+
+static void DrawMedicalCentreCard(ImVec2 sz) {
+  BeginModernCard("##medical_ph", sz);
+
+  ImDrawList *dl = ImGui::GetWindowDrawList();
+  PushMgrFont(g_ManagerFontSmall);
+  float lh = ImGui::GetTextLineHeight();
+  float cr = lh * 0.48f;
+
+  auto IconRow = [&](ImU32 iconCol, const char *text, ImVec4 textCol) {
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 8.0f);
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    dl->AddCircleFilled(ImVec2(p.x + cr, p.y + lh * 0.5f), cr, iconCol);
+    ImVec2 psz = ImGui::CalcTextSize("+");
+    dl->AddText(ImGui::GetFont(), lh,
+                ImVec2(p.x + cr - psz.x * 0.5f, p.y + lh * 0.5f - psz.y * 0.5f),
+                IM_COL32(255,255,255,220), "+");
+    ImGui::Dummy(ImVec2(cr * 2.0f + 8.0f, lh));
+    ImGui::SameLine(0, 0);
+    ImGui::PushStyleColor(ImGuiCol_Text, textCol);
+    ImGui::TextUnformatted(text);
+    ImGui::PopStyleColor();
+  };
+
+  ImGui::Dummy(ImVec2(0, 4.0f));
+  IconRow(IM_COL32(200,30,30,220),  "No players injured",          kTextPri);
+  ImGui::Spacing();
+  ImGui::PushStyleColor(ImGuiCol_Separator, kBorder);
+  ImGui::Separator();
+  ImGui::PopStyleColor();
+  ImGui::Spacing();
+  IconRow(IM_COL32(190,100,20,220), "0 players at risk of injury", kTextPri);
+
+  PopMgrFont(g_ManagerFontSmall);
+  EndModernCard();
+}
+
+static void DrawTacticsOverviewCard(ImVec2 sz) {
+  BeginModernCard("##tactics_ph", sz);
+
+  ImDrawList *dl = ImGui::GetWindowDrawList();
+  float avW = ImGui::GetContentRegionAvail().x;
+  float avH = ImGui::GetContentRegionAvail().y - 2.0f;
+
+  // Split: left 36% pitch, right 64% tactic list
+  const float kSplit = 0.36f;
+  float pitchColW = avW * kSplit - 4.0f;
+  float listColW  = avW - pitchColW - 8.0f;
+
+  ImVec2 origin = ImGui::GetCursorScreenPos();
+
+  // ---- Left: vertical mini pitch ----
+  const float kAspect = 0.62f;
+  float ptW = pitchColW;
+  float ptH = ptW / kAspect;
+  if (ptH > avH) { ptH = avH; ptW = ptH * kAspect; }
+  float pitchOffX = (pitchColW - ptW) * 0.5f;
+  ImVec2 ptMin(origin.x + pitchOffX, origin.y);
+  ImVec2 ptMax(ptMin.x + ptW, ptMin.y + ptH);
+
+  dl->AddRectFilled(ptMin, ptMax, IM_COL32(30, 90, 45, 220), 6.0f);
+  dl->AddRect(ptMin, ptMax, IM_COL32(255,255,255,25), 6.0f, 0, 1.0f);
+  float mx = (ptMin.x + ptMax.x) * 0.5f;
+  float my = (ptMin.y + ptMax.y) * 0.5f;
+  dl->AddLine(ImVec2(ptMin.x+4, my), ImVec2(ptMax.x-4, my), IM_COL32(255,255,255,30), 1.0f);
+  dl->AddCircle(ImVec2(mx, my), ptW * 0.20f, IM_COL32(255,255,255,25), 32, 1.0f);
+  float bw = ptW * 0.55f, bh = ptH * 0.14f;
+  float bx = ptMin.x + (ptW - bw) * 0.5f;
+  dl->AddRect(ImVec2(bx, ptMin.y),     ImVec2(bx+bw, ptMin.y+bh),  IM_COL32(255,255,255,22), 0.0f, 0, 1.0f);
+  dl->AddRect(ImVec2(bx, ptMax.y-bh),  ImVec2(bx+bw, ptMax.y),     IM_COL32(255,255,255,22), 0.0f, 0, 1.0f);
+
+  auto roleCol = [](int fo) -> ImU32 {
+    if (fo == 0)  return IM_COL32(220,160, 30,210);
+    if (fo <= 4)  return IM_COL32( 80,150,255,210);
+    if (fo <= 7)  return IM_COL32( 80,210,110,210);
+    return              IM_COL32(255, 90, 70,210);
+  };
+  static const float kNX[] = { 0.50f, 0.15f, 0.38f, 0.62f, 0.85f,
+                                0.22f, 0.50f, 0.78f, 0.22f, 0.50f, 0.78f };
+  static const float kNY[] = { 0.90f, 0.72f, 0.72f, 0.72f, 0.72f,
+                                0.50f, 0.50f, 0.50f, 0.22f, 0.22f, 0.22f };
+  float pw2 = ptMax.x - ptMin.x, ph2 = ptMax.y - ptMin.y;
+  for (const auto &pl : g_CareerHub.players) {
+    int fo = pl.formationOrder;
+    if (fo < 0 || fo > 10) continue;
+    float dx = ptMin.x + kNX[fo] * pw2;
+    float dy = ptMin.y + kNY[fo] * ph2;
+    dl->AddCircleFilled(ImVec2(dx, dy), 5.0f, roleCol(fo));
+    dl->AddCircle(ImVec2(dx, dy), 5.0f, IM_COL32(0,0,0,140), 12, 1.0f);
+  }
+
+  // ---- Right: read-only tactic instructions — 2-column layout ----
+  // Shift left slightly: reduce gap between pitch and list from 8 to 2
+  ImVec2 listPos(origin.x + pitchColW + 2.0f, origin.y);
+  ImGui::PushClipRect(listPos, ImVec2(listPos.x + listColW, listPos.y + avH), true);
+
+  PushMgrFont(g_ManagerFontSmall);
+  float lh   = ImGui::GetTextLineHeight();
+  float rowH = lh + 4.0f;
+  float catH = lh * 0.78f + 3.0f;
+
+  // Pre-compute total block height for vertical centering
+  // Attacking/Defending columns (same height): catH + 5*rowH
+  // Gap between sections: 4px
+  // On the Ball: catH + 1*rowH
+  float colSectionH = catH + 5.0f * rowH;
+  float totalBlockH = colSectionH + 4.0f + catH + rowH;
+  float listStartY  = listPos.y + (avH - totalBlockH) * 0.5f;
+  if (listStartY < listPos.y) listStartY = listPos.y;
+
+  auto bestPreset = [](const TacInstruction &ins, float val) -> const char * {
+    int best = 0; float bestD = 999.0f;
+    for (int p = 0; p < 4; p++) {
+      float d = fabsf(ins.presets[p].value - val);
+      if (d < bestD) { bestD = d; best = p; }
+    }
+    return ins.presets[best].label;
+  };
+
+  const ImU32 kCatAtt = IM_COL32( 50,200, 90,255);
+  const ImU32 kCatDef = IM_COL32( 80,160,255,255);
+  const ImU32 kCatBal = IM_COL32(255,190, 60,255);
+  const ImU32 kDim    = IM_COL32(170,170,185,200);
+  const ImU32 kAcc    = IM_COL32((int)(kAccent.x*255),(int)(kAccent.y*255),(int)(kAccent.z*255),220);
+
+  // Separate tactics into three buckets
+  std::vector<const TacInstruction *> att, def, bal;
+  for (int ti = 0; ti < kNumTacInstructions; ti++) {
+    const TacInstruction &ins = kTacInstructions[ti];
+    if      (strcmp(ins.category, "Attacking")   == 0) att.push_back(&ins);
+    else if (strcmp(ins.category, "Defending")   == 0) def.push_back(&ins);
+    else                                               bal.push_back(&ins);
+  }
+
+  // Draw one column of tactics starting at (cx, cy), width colW
+  auto drawCol = [&](float cx, float cy, ImU32 catColor, const char *catName,
+                     const std::vector<const TacInstruction *> &rows, float colW) {
+    float dotR = 2.5f;
+    dl->AddCircleFilled(ImVec2(cx + dotR, cy + lh * 0.78f * 0.5f), dotR, catColor);
+    dl->AddText(ImGui::GetFont(), lh * 0.78f,
+                ImVec2(cx + dotR * 2.0f + 3.0f, cy), catColor, catName);
+    cy += catH;
+    for (const TacInstruction *ins : rows) {
+      float val = 0.5f;
+      auto it = g_CareerHub.tactics.find(ins->key);
+      if (it != g_CareerHub.tactics.end()) val = it->second;
+      const char *pl = bestPreset(*ins, val);
+      // Name left-aligned, value right-aligned within the column
+      dl->AddText(ImGui::GetFont(), lh, ImVec2(cx + 2.0f, cy), kDim, ins->name);
+      float plW = ImGui::CalcTextSize(pl).x;
+      float plX = cx + colW - plW - 2.0f;
+      if (plX < cx + 2.0f) plX = cx + 2.0f;
+      dl->AddText(ImGui::GetFont(), lh, ImVec2(plX, cy), kAcc, pl);
+      cy += rowH;
+    }
+    return cy;
+  };
+
+  float halfW  = listColW * 0.5f - 4.0f;
+  float colAX  = listPos.x;
+  float colDX  = listPos.x + halfW + 8.0f;
+
+  float bottomAtt = drawCol(colAX, listStartY, kCatAtt, "Attacking", att, halfW);
+  float bottomDef = drawCol(colDX, listStartY, kCatDef, "Defending", def, halfW);
+  float bottomRow = std::max(bottomAtt, bottomDef) + 4.0f;
+
+  // On the Ball — shared header, then one item per column
+  {
+    float dotR = 2.5f;
+    dl->AddCircleFilled(ImVec2(colAX + dotR, bottomRow + lh * 0.78f * 0.5f), dotR, kCatBal);
+    dl->AddText(ImGui::GetFont(), lh * 0.78f,
+                ImVec2(colAX + dotR * 2.0f + 3.0f, bottomRow), kCatBal, "On the Ball");
+    bottomRow += catH;
+    // Dribble Rate → left column, Dribble Direction → right column
+    for (int i = 0; i < (int)bal.size(); i++) {
+      const TacInstruction *ins = bal[i];
+      float val = 0.5f;
+      auto it = g_CareerHub.tactics.find(ins->key);
+      if (it != g_CareerHub.tactics.end()) val = it->second;
+      const char *pl = bestPreset(*ins, val);
+      float cx = (i == 0) ? colAX : colDX;
+      dl->AddText(ImGui::GetFont(), lh, ImVec2(cx + 2.0f, bottomRow), kDim, ins->name);
+      float plW = ImGui::CalcTextSize(pl).x;
+      float plX = cx + halfW - plW - 2.0f;
+      if (plX < cx + 2.0f) plX = cx + 2.0f;
+      dl->AddText(ImGui::GetFont(), lh, ImVec2(plX, bottomRow), kAcc, pl);
+    }
+  }
+
+  PopMgrFont(g_ManagerFontSmall);
+  ImGui::PopClipRect();
+
+  // Advance cursor
+  float totalH = (bottomRow - listPos.y) + rowH;
+  ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + std::max(ptH, totalH)));
+  ImGui::Dummy(ImVec2(avW, 1.0f));
+
+  EndModernCard();
+}
+
 // ---- DrawHomePage -------------------------------------------------------
-// Layout: Left 28% (Messages) | Center 42% (Story + Fixture + Agenda) | Right 30% (Schedule + Snapshot)
+// Layout: Left 28% (Messages + Training + Board Objectives) | Center 42% (Story + Fixture + Agenda + Tactics) | Right 30% (Schedule + Snapshot + Medical)
 
 static void DrawHomePage(float w, float h) {
   const float kPad = 16.0f, kGap = 10.0f;
@@ -1606,11 +1968,20 @@ static void DrawHomePage(float w, float h) {
 
   ImGui::SetCursorPos(ImVec2(kPad, 8.0f));
 
-  // Left: Messages — fixed content height, no stretching.
+  const float kTrainH  = 5.0f * msgFontH + 6.0f;
+  const float kBoardH  = 3.0f * (msgFontH + 10.0f) + 36.0f;
+  const float kMedH    = 3.0f * (msgFontH + 10.0f) + 46.0f;
+  const float kTacH    = 220.0f;
+
+  // Left: Messages + Training Schedule + Board Objectives
   ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0,0,0,0));
   ImGui::BeginChild("##ov_l", ImVec2(leftW, colH), false, ImGuiWindowFlags_NoScrollbar);
   ImGui::PopStyleColor();
   DrawMessagesCard(ImVec2(leftW, kMsgH));
+  ImGui::Dummy(ImVec2(0, kGap));
+  DrawTrainingScheduleCard(ImVec2(leftW, kTrainH));
+  ImGui::Dummy(ImVec2(0, kGap));
+  DrawBoardObjectivesCard(ImVec2(leftW, kBoardH));
   ImGui::EndChild();
 
   ImGui::SameLine(0, kGap);
@@ -1663,11 +2034,13 @@ static void DrawHomePage(float w, float h) {
     ImGui::PopStyleVar();
     EndModernCard();
   }
+  ImGui::Dummy(ImVec2(0, kGap));
+  DrawTacticsOverviewCard(ImVec2(centerW, kTacH));
   ImGui::EndChild();
 
   ImGui::SameLine(0, kGap);
 
-  // Right: Fixture Schedule + League Snapshot
+  // Right: Fixture Schedule + League Snapshot + Medical Centre
   ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0,0,0,0));
   ImGui::BeginChild("##ov_r", ImVec2(rightW, colH), false, ImGuiWindowFlags_NoScrollbar);
   ImGui::PopStyleColor();
@@ -1684,6 +2057,8 @@ static void DrawHomePage(float w, float h) {
         g_activePage = PAGE_COMPETITIONS;
     }
   }
+  ImGui::Dummy(ImVec2(0, kGap));
+  DrawMedicalCentreCard(ImVec2(rightW, kMedH));
   ImGui::EndChild();
 }
 
@@ -3006,41 +3381,6 @@ static void SaveTacticsToDb(int clubId, const std::map<std::string, float> &tact
   DatabaseResult *r = GetDB()->Query(q.str());
   delete r;
 }
-
-struct TacInstruction {
-  const char *key;
-  const char *name;
-  const char *category; // "Attacking" | "Defending" | "On the Ball"
-  struct Preset { const char *label; float value; } presets[4];
-};
-
-static const TacInstruction kTacInstructions[] = {
-  { "position_offense_depth_factor", "Attacking Depth", "Attacking",
-    {{"Compact",0.25f},{"Balanced",0.5f},{"Expansive",0.75f},{"Total Attack",1.0f}} },
-  { "position_offense_width_factor", "Attacking Width", "Attacking",
-    {{"Narrow",0.3f},{"Balanced",0.6f},{"Wide",0.8f},{"Full Width",1.0f}} },
-  { "position_offense_midfieldfocus", "Midfield in Attack", "Attacking",
-    {{"Hold Shape",0.2f},{"Balanced",0.45f},{"Join Attack",0.7f},{"All Forward",0.9f}} },
-  { "position_offense_sidefocus_strength", "Flank Play", "Attacking",
-    {{"Central",0.1f},{"Mixed",0.35f},{"Wide Threat",0.6f},{"Wing Overloads",0.9f}} },
-  { "position_offense_microfocus_strength", "Attacking Pressing", "Attacking",
-    {{"Loose",0.2f},{"Balanced",0.5f},{"Tight",0.75f},{"Swarm",0.95f}} },
-  { "position_defense_depth_factor", "Defensive Line", "Defending",
-    {{"Deep Block",0.3f},{"Mid Block",0.55f},{"High Line",0.75f},{"Ultra High",0.95f}} },
-  { "position_defense_width_factor", "Defensive Shape", "Defending",
-    {{"Narrow Block",0.3f},{"Balanced",0.55f},{"Wide",0.8f},{"Spread",1.0f}} },
-  { "position_defense_midfieldfocus", "Midfield Pressure", "Defending",
-    {{"Drop Deep",0.2f},{"Compact",0.45f},{"Press High",0.7f},{"Extreme Press",0.9f}} },
-  { "position_defense_sidefocus_strength", "Flank Coverage", "Defending",
-    {{"Narrow",0.1f},{"Balanced",0.4f},{"Cover Wings",0.65f},{"Full Width",0.9f}} },
-  { "position_defense_microfocus_strength", "Defensive Compactness", "Defending",
-    {{"Loose",0.2f},{"Solid",0.5f},{"Compact",0.75f},{"Ultra Compact",0.95f}} },
-  { "dribble_offensiveness", "Dribble Rate", "On the Ball",
-    {{"Cautious",0.2f},{"Balanced",0.5f},{"Direct",0.7f},{"Expressive",0.9f}} },
-  { "dribble_centermagnet", "Dribble Direction", "On the Ball",
-    {{"Hug Flanks",0.1f},{"Mixed",0.4f},{"Through Middle",0.7f},{"Central Drive",0.9f}} },
-};
-static const int kNumTacInstructions = 12;
 
 static void DrawTeamInstructionsPanel(float px, float py, float pw, float ph) {
   ImDrawList *dl = ImGui::GetWindowDrawList();
