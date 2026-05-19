@@ -1766,20 +1766,22 @@ static void DrawTacticsOverviewCard(ImVec2 sz) {
   float avW = ImGui::GetContentRegionAvail().x;
   float avH = ImGui::GetContentRegionAvail().y - 2.0f;
 
-  // Split: left 36% pitch, right 64% tactic list
-  const float kSplit = 0.36f;
+  // Split: left 30% pitch, right 70% tactic list
+  const float kSplit = 0.30f;
   float pitchColW = avW * kSplit - 4.0f;
   float listColW  = avW - pitchColW - 8.0f;
 
   ImVec2 origin = ImGui::GetCursorScreenPos();
 
-  // ---- Left: vertical mini pitch ----
+  // ---- Left: vertical mini pitch (with top/bottom margin) ----
+  const float kPitchMargin = 8.0f;
   const float kAspect = 0.62f;
   float ptW = pitchColW;
   float ptH = ptW / kAspect;
-  if (ptH > avH) { ptH = avH; ptW = ptH * kAspect; }
+  float maxPtH = avH - kPitchMargin * 2.0f;
+  if (ptH > maxPtH) { ptH = maxPtH; ptW = ptH * kAspect; }
   float pitchOffX = (pitchColW - ptW) * 0.5f;
-  ImVec2 ptMin(origin.x + pitchOffX, origin.y);
+  ImVec2 ptMin(origin.x + pitchOffX, origin.y + kPitchMargin);
   ImVec2 ptMax(ptMin.x + ptW, ptMin.y + ptH);
 
   dl->AddRectFilled(ptMin, ptMax, IM_COL32(30, 90, 45, 220), 6.0f);
