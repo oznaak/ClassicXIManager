@@ -125,6 +125,22 @@ struct CareerHubState {
   };
   std::vector<ScoutReport> scoutReports;
 
+  struct InboxMessage {
+    int         id          = 0;
+    int         templateId  = 0;
+    std::string senderType; // "board"|"staff"|"media"|"fans"|"players"|"competition"|"transfers"|"finance"
+    std::string senderName;
+    std::string subject;
+    std::string body;
+    std::string category;
+    std::string gameDate;   // YYYY-MM-DD
+    bool        isRead      = false;
+    bool        isStarred   = false;
+    bool        hasTask     = false;
+    bool        taskDone    = false;
+  };
+  std::vector<InboxMessage> inbox;
+
   struct FinanceTransaction {
     std::string date;
     std::string category;   // 'tv_rights','matchday','wages','operating','prize'

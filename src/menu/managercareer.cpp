@@ -24,6 +24,35 @@ static std::string SqlEscape(const std::string &in) {
   return out;
 }
 
+// ---- Inbox helpers ---------------------------------------------------------
+
+
+static void DeliverInboxMessage(int managerId,
+                                const std::string &gameDate,
+                                const std::string &senderType,
+                                const std::string &senderName,
+                                const std::string &subject,
+                                const std::string &body,
+                                const std::string &category,
+                                int hasTask = 0) {
+  std::stringstream q;
+  q << "INSERT INTO manager_inbox"
+    << " (manager_id,template_id,sender_type,sender_name,subject,body,category,game_date,has_task)"
+    << " VALUES ("
+    << managerId << ",0,"
+    << "'" << SqlEscape(senderType) << "',"
+    << "'" << SqlEscape(senderName) << "',"
+    << "'" << SqlEscape(subject)    << "',"
+    << "'" << SqlEscape(body)       << "',"
+    << "'" << SqlEscape(category)   << "',"
+    << "'" << gameDate              << "',"
+    << hasTask << ");";
+  DatabaseResult *r = GetDB()->Query(q.str());
+  delete r;
+  printf("[INBOX] Delivered: manager=%d date=%s from=%s\n",
+         managerId, gameDate.c_str(), senderName.c_str());
+}
+
 static void EnsureCareerTables() {
   DatabaseResult *r0 = GetDB()->Query(
     "CREATE TABLE IF NOT EXISTS managers ("
@@ -247,6 +276,29 @@ static void EnsureCareerTables() {
       "UNIQUE(manager_id, player_id));");
     delete r;
   }
+
+  // Create manager_inbox table (per-save delivered messages).
+  // message_templates lives in the base DB — seeded via seed_message_templates.sql.
+  {
+    DatabaseResult *r = GetDB()->Query(
+      "CREATE TABLE IF NOT EXISTS manager_inbox ("
+      "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+      "manager_id INTEGER NOT NULL,"
+      "template_id INTEGER DEFAULT 0,"
+      "sender_type VARCHAR(32) NOT NULL DEFAULT 'board',"
+      "sender_name VARCHAR(64) NOT NULL DEFAULT 'The Board',"
+      "subject TEXT NOT NULL,"
+      "body TEXT NOT NULL,"
+      "category VARCHAR(32) NOT NULL DEFAULT 'board',"
+      "game_date TEXT NOT NULL,"
+      "is_read INTEGER DEFAULT 0,"
+      "is_starred INTEGER DEFAULT 0,"
+      "has_task INTEGER DEFAULT 0,"
+      "task_done INTEGER DEFAULT 0,"
+      "created_at DATETIME DEFAULT CURRENT_TIMESTAMP"
+      ");");
+    delete r;
+  }
 }
 
 static void DeleteCareerSeason(int managerId) {
@@ -452,6 +504,79 @@ void GenerateCareerSeason(int managerId, int seasonYear) {
      << " WHERE id=" << managerId << ";";
   DatabaseResult *ur = GetDB()->Query(uq.str());
   delete ur;
+
+  // Deliver season-start inbox messages.
+  {
+    std::string mgrName = "Manager", clubName = "the Club";
+    {
+      std::stringstream mq;
+      mq << "SELECT m.name, t.name FROM managers m"
+         << " LEFT JOIN teams t ON t.id=m.club_id"
+         << " WHERE m.id=" << managerId << " LIMIT 1;";
+      DatabaseResult *mr = GetDB()->Query(mq.str());
+      if (mr && mr->data.size() > 0) {
+        if (!mr->data[0][0].empty()) mgrName = mr->data[0][0];
+        if (mr->data[0].size() > 1 && !mr->data[0][1].empty()) clubName = mr->data[0][1];
+      }
+      if (mr) delete mr;
+    }
+
+    // Simple placeholder replacement.
+    auto Rep = [](std::string s, const std::string &f, const std::string &to) {
+      size_t pos = 0;
+      while ((pos = s.find(f, pos)) != std::string::npos) {
+        s.replace(pos, f.size(), to);
+        pos += to.size();
+      }
+      return s;
+    };
+    std::string yr = std::to_string(seasonYear);
+    auto Fill = [&](const std::string &tmpl) {
+      return Rep(Rep(Rep(tmpl, "%ManagerName%", mgrName), "%ClubName%", clubName),
+                 "%SeasonYear%", yr);
+    };
+
+    // Welcome message — only on first career start.
+    bool isFirst = false;
+    {
+      std::stringstream ck;
+      ck << "SELECT COUNT(*) FROM manager_inbox WHERE manager_id=" << managerId << ";";
+      DatabaseResult *cr = GetDB()->Query(ck.str());
+      isFirst = !(cr && cr->data.size() > 0 && !cr->data[0][0].empty()
+                  && atoi(cr->data[0][0].c_str()) > 0);
+      if (cr) delete cr;
+    }
+    if (isFirst) {
+      DeliverInboxMessage(managerId, careerDate, "board", "The Board",
+        Fill("Welcome to %ClubName%, %ManagerName%"),
+        Fill("Dear %ManagerName%,\n\nOn behalf of everyone at %ClubName%, we are delighted to welcome you as our new manager.\n\nWe have full confidence in your abilities and look forward to an exciting partnership. The squad is ready and the fans are eager to see your vision come to life.\n\nYour first priority will be to review the squad and prepare for the upcoming %SeasonYear% season.\n\nWelcome aboard.\n\nThe Board"),
+        "board", 0);
+    }
+
+    // Pre-season objectives (every season).
+    DeliverInboxMessage(managerId, careerDate, "board", "The Board",
+      Fill("Season %SeasonYear% - Pre-Season Objectives"),
+      Fill("Dear %ManagerName%,\n\nWith the %SeasonYear% season approaching, the board has outlined the following objectives:\n\n- Achieve a competitive league position\n- Show progress in cup competitions\n- Develop young talent within the squad\n- Maintain financial sustainability\n\nWe believe you have the tools to succeed. Your transfer budget has been confirmed separately.\n\nGood luck this season.\n\nThe Board"),
+      "board", 1);
+
+    // Transfer budget (every season).
+    DeliverInboxMessage(managerId, careerDate, "board", "The Board",
+      Fill("Transfer Budget Confirmed - %SeasonYear%"),
+      Fill("Dear %ManagerName%,\n\nYour transfer budget for the %SeasonYear% season has been finalised. Please use these resources wisely to strengthen the squad while remaining within wage guidelines.\n\nAny transfer activity must align with the long-term strategy and financial health of %ClubName%.\n\nKind regards,\nThe Board"),
+      "board", 0);
+
+    // Pre-season fitness report.
+    DeliverInboxMessage(managerId, careerDate, "staff", "Fitness Coach",
+      "Pre-Season Fitness Assessment",
+      "Manager,\n\nPre-season fitness testing is now complete. The squad is in good shape heading into the new campaign.\n\nKey findings:\n- Overall squad fitness: 87%\n- No major injury concerns at present\n- Two players on individual conditioning programmes\n\nWe will maintain weekly testing throughout the season.\n\nFitness Coach",
+      "staff", 0);
+
+    // Season kick-off from competition.
+    DeliverInboxMessage(managerId, careerDate, "competition", "League Administration",
+      Fill("Season %SeasonYear% Officially Begins"),
+      Fill("Dear %ManagerName%,\n\nThe %SeasonYear% season is now officially underway. Fixtures have been confirmed and the schedule has been distributed to all clubs.\n\nWe wish %ClubName% the best of luck this season.\n\nLeague Administration"),
+      "competition", 0);
+  }
 
   printf("[CAREER] New season generated manager=%d season_year=%d current_date=%s\n",
          managerId, seasonYear, careerDate);

@@ -188,6 +188,7 @@ void CareerHubState::Clear() {
   staff.clear();
   scoutQueue.clear();
   scoutReports.clear();
+  inbox.clear();
   finances = {};
   ClearBadgeCache();
   ResetNavState();
@@ -989,6 +990,36 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
     }
   }
 
+  // Load manager inbox (newest first, up to 200 messages)
+  inbox.clear();
+  {
+    std::stringstream q;
+    q << "SELECT id,template_id,sender_type,sender_name,subject,body,category,"
+      << "game_date,is_read,is_starred,has_task,task_done"
+      << " FROM manager_inbox WHERE manager_id=" << mgrId
+      << " ORDER BY id DESC LIMIT 200;";
+    DatabaseResult *r = GetDB()->Query(q.str());
+    if (r) {
+      for (unsigned int i = 0; i < r->data.size(); i++) {
+        InboxMessage msg;
+        msg.id         = atoi(DBCell(r, i,  0).c_str());
+        msg.templateId = atoi(DBCell(r, i,  1).c_str());
+        msg.senderType = DBCell(r, i,  2);
+        msg.senderName = DBCell(r, i,  3);
+        msg.subject    = DBCell(r, i,  4);
+        msg.body       = DBCell(r, i,  5);
+        msg.category   = DBCell(r, i,  6);
+        msg.gameDate   = DBCell(r, i,  7);
+        msg.isRead     = DBCell(r, i,  8) == "1";
+        msg.isStarred  = DBCell(r, i,  9) == "1";
+        msg.hasTask    = DBCell(r, i, 10) == "1";
+        msg.taskDone   = DBCell(r, i, 11) == "1";
+        inbox.push_back(msg);
+      }
+      delete r;
+    }
+  }
+
   active = true;
 }
 
@@ -1197,6 +1228,18 @@ static void ApplyManagerTheme() {
 
 static inline void PushMgrFont(ImFont *f) { if (f) ImGui::PushFont(f); }
 static inline void PopMgrFont(ImFont *f)  { if (f) ImGui::PopFont(); }
+
+static ImU32 SenderTypeColor(const std::string &t) {
+  if (t == "board")       return IM_COL32( 59,130,246,255);
+  if (t == "staff")       return IM_COL32( 34,197, 94,255);
+  if (t == "media")       return IM_COL32(148,163,184,255);
+  if (t == "fans")        return IM_COL32(251,191, 36,255);
+  if (t == "players")     return IM_COL32(167,139,250,255);
+  if (t == "competition") return IM_COL32( 34,211,238,255);
+  if (t == "transfers")   return IM_COL32(251,146, 60,255);
+  if (t == "finance")     return IM_COL32( 52,211,153,255);
+  return IM_COL32(100,120,160,255);
+}
 
 // ---- Button helpers -----------------------------------------------------
 
@@ -1530,7 +1573,11 @@ static void DrawSidebar(float sideW, float winH) {
 
   DrawNavSectionHeader("MAIN");
   DrawNavItem("Home",     PAGE_HOME);
-  DrawNavItem("Inbox",    PAGE_INBOX, 3);
+  {
+    int unread = 0;
+    for (const auto &m : g_CareerHub.inbox) if (!m.isRead) unread++;
+    DrawNavItem("Inbox", PAGE_INBOX, unread);
+  }
   DrawNavItem("News",     PAGE_NEWS);
   DrawNavItem("Schedule", PAGE_CALENDAR);
   ImGui::Dummy(ImVec2(0, 6.0f));
@@ -1795,25 +1842,27 @@ static void DrawTopHeader(float contentX, float contentW) {
 // ---- Home page cards ----------------------------------------------------
 
 static void DrawMessagesCard(ImVec2 sz) {
-  static const struct { const char *from, *subject, *time; } kMsgs[] = {
-    { "Board",  "Pre-season objectives confirmed",  "Today"     },
-    { "Media",  "Press conference this Friday",      "Today"     },
-    { "Staff",  "Fitness report ready",              "Yesterday" },
-    { "Board",  "Transfer budget allocated",         "2d ago"    },
-    { "Fans",   "Season ticket renewals open",       "3d ago"    },
-    { "Staff",  "Training schedule published",       "4d ago"    },
-    { "Board",  "Scouting targets list sent",        "5d ago"    },
-    { "Media",  "Pre-season preview requested",      "6d ago"    },
+  const auto &inbox = g_CareerHub.inbox;
+  const int kN = (int)inbox.size() < 8 ? (int)inbox.size() : 8;
+  const bool hasReal = kN > 0;
+
+  // Fallback mock rows when inbox not yet loaded
+  static const struct { const char *from, *subject, *time; } kMock[] = {
+    { "Board",  "Pre-season objectives confirmed", "Jul 1"    },
+    { "Board",  "Transfer budget confirmed",       "Jul 1"    },
+    { "Staff",  "Pre-season fitness assessment",   "Jul 1"    },
+    { "Comp.",  "Season begins",                   "Jul 1"    },
   };
-  const int kN = 8;
+  const int kMockN = 4;
+
   BeginModernCard("##msgs_ov", sz);
-  // Vertically centre the table block within the card.
   {
+    int rows = hasReal ? kN : kMockN;
     PushMgrFont(g_ManagerFontSmall);
     float fh = ImGui::GetTextLineHeight();
     PopMgrFont(g_ManagerFontSmall);
-    float tableH = kN * (fh + 14.0f);        // 8 rows × (font + CellPad.y 7×2)
-    float innerH = sz.y - 24.0f;             // card WindowPadding top+bot
+    float tableH = rows * (fh + 14.0f);
+    float innerH = sz.y - 24.0f;
     float topOff = (innerH - tableH) * 0.5f;
     if (topOff > 2.0f) ImGui::Dummy(ImVec2(0, topOff));
   }
@@ -1825,18 +1874,49 @@ static void DrawMessagesCard(ImVec2 sz) {
     ImGui::TableSetupColumn("Subject", ImGuiTableColumnFlags_WidthStretch);
     ImGui::TableSetupColumn("When",    ImGuiTableColumnFlags_WidthFixed,  55.0f);
     PushMgrFont(g_ManagerFontSmall);
-    for (int i = 0; i < kN; i++) {
-      ImGui::TableNextRow();
-      ImGui::TableSetColumnIndex(0);
-      ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
-      ImGui::TextUnformatted(kMsgs[i].from);
-      ImGui::PopStyleColor();
-      ImGui::TableSetColumnIndex(1);
-      ImGui::TextUnformatted(kMsgs[i].subject);
-      ImGui::TableSetColumnIndex(2);
-      ImGui::PushStyleColor(ImGuiCol_Text, kTextDim);
-      ImGui::TextUnformatted(kMsgs[i].time);
-      ImGui::PopStyleColor();
+    if (hasReal) {
+      for (int i = 0; i < kN; i++) {
+        const auto &m = inbox[i];
+        // Shorten sender name to first word or 8 chars
+        std::string sn = m.senderName;
+        size_t sp = sn.find(' ');
+        if (sp != std::string::npos) sn = sn.substr(0, sp);
+        if (sn.size() > 8) sn = sn.substr(0, 7) + ".";
+        // Shorten date to "D Mon"
+        std::string ds = FormatDateDisplay(m.gameDate);
+        size_t ls = ds.rfind(' ');
+        if (ls != std::string::npos) ds = ds.substr(0, ls);
+
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        ImU32 snCol = m.isRead ? C32(kTextSec) : C32(kAccent);
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(snCol));
+        ImGui::TextUnformatted(sn.c_str());
+        ImGui::PopStyleColor();
+        ImGui::TableSetColumnIndex(1);
+        if (!m.isRead) ImGui::PushStyleColor(ImGuiCol_Text, kTextPri);
+        else           ImGui::PushStyleColor(ImGuiCol_Text, kTextSec);
+        ImGui::TextUnformatted(m.subject.c_str());
+        ImGui::PopStyleColor();
+        ImGui::TableSetColumnIndex(2);
+        ImGui::PushStyleColor(ImGuiCol_Text, kTextDim);
+        ImGui::TextUnformatted(ds.c_str());
+        ImGui::PopStyleColor();
+      }
+    } else {
+      for (int i = 0; i < kMockN; i++) {
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
+        ImGui::TextUnformatted(kMock[i].from);
+        ImGui::PopStyleColor();
+        ImGui::TableSetColumnIndex(1);
+        ImGui::TextUnformatted(kMock[i].subject);
+        ImGui::TableSetColumnIndex(2);
+        ImGui::PushStyleColor(ImGuiCol_Text, kTextDim);
+        ImGui::TextUnformatted(kMock[i].time);
+        ImGui::PopStyleColor();
+      }
     }
     PopMgrFont(g_ManagerFontSmall);
     ImGui::EndTable();
@@ -4011,6 +4091,319 @@ static void DrawPlayerDetailPage(float w, float h) {
   ImGui::EndChild(); // ##pdc3
 
   EndModernCard(); // ##pldstats
+}
+
+// ---- DrawInboxPage ------------------------------------------------------
+
+static void DrawInboxPage(float w, float h) {
+  static int s_sel = -1;
+  static int s_tab =  0; // 0=All 1=New 2=Unread
+
+  const auto &msgs = g_CareerHub.inbox;
+  const int total  = (int)msgs.size();
+
+  if (s_sel >= total) s_sel = -1;
+
+  int cntNew = 0;
+  for (const auto &m : msgs) if (!m.isRead) cntNew++;
+
+  // Filter: tab 1=New(unread), tab 2=Unread (same filter)
+  std::vector<int> filt;
+  filt.reserve(total);
+  for (int i = 0; i < total; i++) {
+    const auto &m = msgs[i];
+    if ((s_tab == 1 || s_tab == 2) && m.isRead) continue;
+    filt.push_back(i);
+  }
+
+  const float kListW = floorf(w * 0.36f);
+  const float kDetW  = w - kListW - 1.0f;
+  const int   kAR    = (int)(kAccent.x * 255);
+  const int   kAG    = (int)(kAccent.y * 255);
+  const int   kAB    = (int)(kAccent.z * 255);
+
+  // Font sizes (+4px from original)
+  const float kFsTab  = 18.0f;
+  const float kFsName = 18.0f;
+  const float kFsSubj = 16.0f;
+  const float kFsDate = 16.0f;
+  const float kFsIni  = 18.0f;  // avatar initial in list
+  const float kFsIni2 = 21.0f;  // avatar initial in detail
+
+  // ---- LEFT PANEL: message list ----------------------------------------
+  ImGui::PushStyleColor(ImGuiCol_ChildBg, kBgSidebar);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+  ImGui::BeginChild("##inbx_L", ImVec2(kListW, h), false,
+                    ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+  ImGui::PopStyleVar();
+  ImGui::PopStyleColor();
+  {
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    ImVec2      wp = ImGui::GetWindowPos();
+    const float kTabH = 46.0f;
+
+    dl->AddRectFilled(wp, ImVec2(wp.x + kListW, wp.y + kTabH),
+                      IM_COL32(10, 16, 38, 255));
+
+    // 3 tabs: All / New / Unread
+    struct TabDef { const char *label; int count; };
+    TabDef tabs[3] = { {"All",total},{"New",cntNew},{"Unread",cntNew} };
+    float tabX = 12.0f;
+    for (int t = 0; t < 3; t++) {
+      bool act = (s_tab == t);
+      char buf[28];
+      if (tabs[t].count > 0) snprintf(buf, sizeof(buf), "%s (%d)", tabs[t].label, tabs[t].count);
+      else                   snprintf(buf, sizeof(buf), "%s",       tabs[t].label);
+
+      float bw = g_ManagerFontSmall
+        ? g_ManagerFontSmall->CalcTextSizeA(kFsTab, FLT_MAX, 0.0f, buf).x + 16.0f
+        : ImGui::CalcTextSize(buf).x + 16.0f;
+
+      if (act)
+        dl->AddRectFilled(ImVec2(wp.x + tabX, wp.y + kTabH - 2.0f),
+                          ImVec2(wp.x + tabX + bw, wp.y + kTabH),
+                          IM_COL32(kAR, kAG, kAB, 255));
+
+      ImVec2 tp(wp.x + tabX + 8.0f, wp.y + (kTabH - kFsTab) * 0.5f);
+      ImU32  tc = act ? C32(kTextPri) : C32(kTextSec);
+      if (g_ManagerFontSmall) dl->AddText(g_ManagerFontSmall, kFsTab, tp, tc, buf);
+      else                    dl->AddText(tp, tc, buf);
+
+      ImGui::SetCursorScreenPos(ImVec2(wp.x + tabX, wp.y));
+      char bid[12]; snprintf(bid, sizeof(bid), "##itab%d", t);
+      if (ImGui::InvisibleButton(bid, ImVec2(bw, kTabH))) s_tab = t;
+      tabX += bw;
+    }
+    dl->AddLine(ImVec2(wp.x, wp.y + kTabH), ImVec2(wp.x + kListW, wp.y + kTabH),
+                C32(kBorder), 1.0f);
+
+    // Scrollable list
+    ImGui::SetCursorScreenPos(ImVec2(wp.x, wp.y + kTabH + 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+    ImGui::BeginChild("##inbx_rows", ImVec2(kListW, h - kTabH - 1.0f), false, 0);
+    ImGui::PopStyleColor();
+    ImDrawList *ldl   = ImGui::GetWindowDrawList();
+    const float kRowH = 76.0f;  // taller rows for bigger fonts
+    const float kAvR  = 18.0f;  // slightly larger avatar
+    const float kLPad = 14.0f;  // left margin inside row
+
+    if (filt.empty()) {
+      PushMgrFont(g_ManagerFontSmall);
+      ImGui::PushStyleColor(ImGuiCol_Text, kTextDim);
+      const char *empty = s_tab == 0 ? "No messages yet" : "No messages";
+      float tw = ImGui::CalcTextSize(empty).x;
+      ImGui::SetCursorPos(ImVec2((kListW - tw) * 0.5f, ImGui::GetContentRegionAvail().y * 0.35f));
+      ImGui::TextUnformatted(empty);
+      ImGui::PopStyleColor();
+      PopMgrFont(g_ManagerFontSmall);
+    }
+
+    for (int fi = 0; fi < (int)filt.size(); fi++) {
+      int idx = filt[fi];
+      const auto &msg = msgs[idx];
+      bool sel = (s_sel == idx);
+
+      ImVec2 rP  = ImGui::GetCursorScreenPos();
+      ImVec2 rPx = ImVec2(rP.x + kListW, rP.y + kRowH);
+      bool   hov = ImGui::IsMouseHoveringRect(rP, rPx, false);
+
+      if (sel)      ldl->AddRectFilled(rP, rPx, IM_COL32(kAR, kAG, kAB, 28));
+      else if (hov) ldl->AddRectFilled(rP, rPx, IM_COL32(255,255,255, 7));
+      ldl->AddLine(ImVec2(rP.x+12.0f, rPx.y-1.0f), ImVec2(rPx.x-4.0f, rPx.y-1.0f),
+                   C32(kBorder), 1.0f);
+
+      // Unread dot (left edge)
+      if (!msg.isRead)
+        ldl->AddCircleFilled(ImVec2(rP.x + 5.0f, rP.y + kRowH * 0.5f),
+                             5.0f, IM_COL32(kAR, kAG, kAB, 240));
+
+      // Avatar circle + initial
+      float avCX = rP.x + kLPad + kAvR, avCY = rP.y + kRowH * 0.5f;
+      ldl->AddCircleFilled(ImVec2(avCX, avCY), kAvR, SenderTypeColor(msg.senderType));
+      if (g_ManagerFontSmall && !msg.senderType.empty()) {
+        char ini[2] = { (char)::toupper((unsigned char)msg.senderType[0]), 0 };
+        ImVec2 isz = g_ManagerFontSmall->CalcTextSizeA(kFsIni, FLT_MAX, 0.0f, ini);
+        ldl->AddText(g_ManagerFontSmall, kFsIni,
+                     ImVec2(avCX - isz.x*0.5f, avCY - isz.y*0.5f),
+                     IM_COL32(255,255,255,230), ini);
+      }
+
+      // Text area (sender name + subject)
+      float tx  = rP.x + kLPad + kAvR*2.0f + 12.0f;
+      float txW = kListW - (tx - rP.x) - 60.0f; // reserve right margin for date
+      float topY  = rP.y + kRowH * 0.5f - kFsName - 2.0f;
+      float subjY = rP.y + kRowH * 0.5f + 4.0f;
+
+      // Sender name (bold if unread)
+      if (g_ManagerFontSmall) {
+        ImFont *nf  = msg.isRead ? g_ManagerFontSmall : g_ManagerFontBold;
+        ImU32   nc  = msg.isRead ? C32(kTextSec) : C32(kTextPri);
+        std::string sn = msg.senderName;
+        if (nf) {
+          while (sn.size() > 3 &&
+                 nf->CalcTextSizeA(kFsName, FLT_MAX, 0.0f, sn.c_str()).x > txW)
+            sn.resize(sn.size() - 1);
+        }
+        ldl->AddText(nf ? nf : g_ManagerFontSmall, kFsName,
+                     ImVec2(tx, topY), nc, sn.c_str());
+      }
+
+      // Subject (truncated) — white for unread, dim for read
+      if (g_ManagerFontSmall) {
+        std::string subj = msg.subject;
+        while (subj.size() > 3 &&
+               g_ManagerFontSmall->CalcTextSizeA(kFsSubj, FLT_MAX, 0.0f, subj.c_str()).x > txW)
+          subj.resize(subj.size() - 1);
+        ImU32 subjCol = msg.isRead ? C32(kTextDim) : C32(kTextPri);
+        ldl->AddText(g_ManagerFontSmall, kFsSubj,
+                     ImVec2(tx, subjY), subjCol, subj.c_str());
+      }
+
+      // Date top-right (shortened "D Mon")
+      if (g_ManagerFontSmall) {
+        std::string ds = FormatDateDisplay(msg.gameDate);
+        size_t ls = ds.rfind(' ');
+        if (ls != std::string::npos) ds = ds.substr(0, ls);
+        ImVec2 dsz = g_ManagerFontSmall->CalcTextSizeA(kFsDate, FLT_MAX, 0.0f, ds.c_str());
+        ldl->AddText(g_ManagerFontSmall, kFsDate,
+                     ImVec2(rPx.x - dsz.x - 8.0f, topY),
+                     C32(kTextDim), ds.c_str());
+      }
+
+      // Invisible button
+      ImGui::SetCursorScreenPos(rP);
+      char rid[20]; snprintf(rid, sizeof(rid), "##irow%d", idx);
+      if (ImGui::InvisibleButton(rid, ImVec2(kListW, kRowH))) {
+        s_sel = idx;
+        if (!msgs[idx].isRead) {
+          std::stringstream uq;
+          uq << "UPDATE manager_inbox SET is_read=1 WHERE id=" << msgs[idx].id << ";";
+          DatabaseResult *ur = GetDB()->Query(uq.str()); delete ur;
+          g_CareerHub.inbox[idx].isRead = true;
+        }
+      }
+      if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    }
+    ImGui::EndChild(); // inbx_rows
+  }
+  ImGui::EndChild(); // inbx_L
+
+  // Vertical separator
+  ImGui::SameLine(0.0f, 0.0f);
+  {
+    ImVec2 sp = ImGui::GetCursorScreenPos();
+    ImGui::GetWindowDrawList()->AddLine(sp, ImVec2(sp.x, sp.y + h), C32(kBorder), 1.0f);
+  }
+  ImGui::SameLine(0.0f, 1.0f);
+
+  // ---- RIGHT PANEL: message detail -------------------------------------
+  const float kP     = 28.0f; // left/right margin
+  const float kPTop  = 24.0f; // top margin
+  const float kInnerW = kDetW - kP * 2.0f;
+  ImGui::PushStyleColor(ImGuiCol_ChildBg, kBgApp);
+  ImGui::BeginChild("##inbx_R", ImVec2(kDetW, h), false, 0);
+  ImGui::PopStyleColor();
+  {
+    if (s_sel < 0 || s_sel >= total) {
+      PushMgrFont(g_ManagerFontSmall);
+      ImGui::PushStyleColor(ImGuiCol_Text, kTextDim);
+      const char *hint = "Select a message to read it";
+      float tw = ImGui::CalcTextSize(hint).x;
+      ImGui::SetCursorPos(ImVec2((kDetW - tw) * 0.5f, h * 0.42f));
+      ImGui::TextUnformatted(hint);
+      ImGui::PopStyleColor();
+      PopMgrFont(g_ManagerFontSmall);
+    } else {
+      const auto &msg = msgs[s_sel];
+      ImDrawList *rdl = ImGui::GetWindowDrawList();
+
+      // Explicit top+left margin via cursor position
+      ImGui::SetCursorPos(ImVec2(kP, kPTop));
+
+      // Sender header: avatar circle + name/date vertically centered beside it
+      {
+        const float kAvR2  = 24.0f;
+        const float kAvDiam = kAvR2 * 2.0f;
+        ImVec2 avP = ImGui::GetCursorScreenPos();
+
+        rdl->AddCircleFilled(ImVec2(avP.x + kAvR2, avP.y + kAvR2),
+                             kAvR2, SenderTypeColor(msg.senderType));
+        if (g_ManagerFontBold && !msg.senderType.empty()) {
+          char ini[2] = { (char)::toupper((unsigned char)msg.senderType[0]), 0 };
+          ImVec2 isz = g_ManagerFontBold->CalcTextSizeA(kFsIni2, FLT_MAX, 0.0f, ini);
+          rdl->AddText(g_ManagerFontBold, kFsIni2,
+                       ImVec2(avP.x + kAvR2 - isz.x*0.5f, avP.y + kAvR2 - isz.y*0.5f),
+                       IM_COL32(255,255,255,230), ini);
+        }
+
+        // Reserve avatar footprint then place text beside it
+        ImGui::Dummy(ImVec2(kAvDiam + 14.0f, kAvDiam));
+        ImGui::SameLine(0.0f, 0.0f);
+
+        // Vertically center name+date block against the avatar diameter
+        float nameH = g_ManagerFontBold  ? g_ManagerFontBold->FontSize  : 20.0f;
+        float dateH = g_ManagerFontSmall ? g_ManagerFontSmall->FontSize : 15.0f;
+        float blockH = nameH + 4.0f + dateH;
+        float vOff   = floorf((kAvDiam - blockH) * 0.5f);
+        if (vOff < 0.0f) vOff = 0.0f;
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + vOff);
+
+        ImGui::BeginGroup();
+        PushMgrFont(g_ManagerFontBold);
+        ImGui::PushStyleColor(ImGuiCol_Text, kTextPri);
+        ImGui::TextUnformatted(msg.senderName.c_str());
+        ImGui::PopStyleColor();
+        PopMgrFont(g_ManagerFontBold);
+        PushMgrFont(g_ManagerFontSmall);
+        ImGui::PushStyleColor(ImGuiCol_Text, kTextDim);
+        ImGui::TextUnformatted(FormatDateDisplay(msg.gameDate).c_str());
+        ImGui::PopStyleColor();
+        PopMgrFont(g_ManagerFontSmall);
+        ImGui::EndGroup();
+      }
+
+      ImGui::Dummy(ImVec2(0.0f, 10.0f));
+      ImGui::SetCursorPosX(kP);
+
+      // Subject
+      PushMgrFont(g_ManagerFontBold);
+      ImGui::PushStyleColor(ImGuiCol_Text, kTextPri);
+      ImGui::PushTextWrapPos(kP + kInnerW);
+      ImGui::TextUnformatted(msg.subject.c_str());
+      ImGui::PopTextWrapPos();
+      ImGui::PopStyleColor();
+      PopMgrFont(g_ManagerFontBold);
+
+      ImGui::Dummy(ImVec2(0.0f, 14.0f));
+      ImGui::SetCursorPosX(kP);
+
+      // Divider
+      {
+        ImVec2 dp = ImGui::GetCursorScreenPos();
+        rdl->AddLine(dp, ImVec2(dp.x + kInnerW, dp.y), C32(kBorder), 1.0f);
+        ImGui::Dummy(ImVec2(0.0f, 14.0f));
+      }
+
+      // Body — scrollable, 17px font
+      {
+        ImGui::SetCursorPosX(kP);
+        float bodyH = ImGui::GetContentRegionAvail().y;
+        if (bodyH < 40.0f) bodyH = 40.0f;
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+        ImGui::BeginChild("##inbx_body", ImVec2(kInnerW, bodyH), false, 0);
+        ImGui::PopStyleColor();
+        PushMgrFont(g_ManagerFontRegular);
+        ImGui::PushStyleColor(ImGuiCol_Text, kTextPri);
+        ImGui::PushTextWrapPos(kInnerW);
+        ImGui::TextUnformatted(msg.body.c_str());
+        ImGui::PopTextWrapPos();
+        ImGui::PopStyleColor();
+        PopMgrFont(g_ManagerFontRegular);
+        ImGui::EndChild();
+      }
+    }
+  }
+  ImGui::EndChild(); // inbx_R
 }
 
 // ---- DrawSquadPage ------------------------------------------------------
@@ -7691,6 +8084,7 @@ static void DrawWorkspace(float contentW, float workH) {
 
   switch (g_activePage) {
     case PAGE_HOME:          DrawHomePage(contentW, workH);          break;
+    case PAGE_INBOX:         DrawInboxPage(contentW, workH);         break;
     case PAGE_SQUAD:         DrawSquadPage(contentW, workH);         break;
     case PAGE_TACTICS:       DrawTacticsPage(contentW, workH);       break;
     case PAGE_CALENDAR:      DrawCalendarPage(contentW, workH);      break;
