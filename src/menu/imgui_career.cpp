@@ -5702,6 +5702,45 @@ static void DrawTacticsPage(float w, float h) {
   ImGui::EndGroup();
 }
 
+// ---- Media texture loader (path relative to build/, no prefix) -----------
+
+static GLuint LoadMediaTex(const std::string &relPath) {
+  if (relPath.empty()) return 0;
+  auto it = s_BadgeCache.find(relPath);
+  if (it != s_BadgeCache.end()) return it->second;
+  SDL_Surface *surf = IMG_Load(relPath.c_str());
+  if (!surf) { s_BadgeCache[relPath] = 0; return 0; }
+  SDL_Surface *rgba = SDL_ConvertSurfaceFormat(surf, SDL_PIXELFORMAT_RGBA32, 0);
+  SDL_FreeSurface(surf);
+  if (!rgba) { s_BadgeCache[relPath] = 0; return 0; }
+  GLuint tex = 0;
+  glGenTextures(1, &tex);
+  glBindTexture(GL_TEXTURE_2D, tex);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, rgba->w, rgba->h, 0,
+               GL_RGBA, GL_UNSIGNED_BYTE, rgba->pixels);
+  glBindTexture(GL_TEXTURE_2D, 0);
+  SDL_FreeSurface(rgba);
+  s_BadgeCache[relPath] = tex;
+  return tex;
+}
+
+static GLuint GetStaffPlaceholderTex(const std::string &role) {
+  if (role == "Psychologist" || role == "Scout")
+    return LoadMediaTex("media/textures/faces/Men Default faces /Extra persons - New colorways/Extra_person13.png");
+  if (role == "Physio")
+    return LoadMediaTex("media/textures/faces/Men Default faces /None - New colorways/None - No brand/none-grey.png");
+  // Fitness Coach, Youth Coach
+  return LoadMediaTex("media/textures/faces/Men Default faces /Manager - New colorways/Manager11-Grey.png");
+}
+
+// ---- Staff market filter state ------------------------------------------
+static int s_mktFilterRating  = 0;  // 0 = any, 1-5 = min stars
+static int s_mktFilterMaxWage = 0;  // 0 = unlimited
+
 // ---- Staff DB helpers ---------------------------------------------------
 
 static void HireStaff(int managerId, int staffId) {
@@ -5751,6 +5790,147 @@ static void LoadStaffMarket(int managerId, const std::string &role) {
   s_staffMarketLoaded = true;
 }
 
+// ---- Staff card shared helper -------------------------------------------
+// Draws a single staff card (hired or empty) into dl at (ox,oy) with size (cw,ch).
+// Returns true if "Fire" was clicked (hired cards) or "Hire" was clicked (market cards).
+// mode: 0=staff-page hired, 1=staff-page empty, 2=market card
+
+static void DrawStaffCard_Hired(ImDrawList *dl, float ox, float oy, float cw, float ch,
+                                const CareerHubState::StaffMember &sm, int uid) {
+  const ImU32 kColWhite = IM_COL32(255, 255, 255, 230);
+  const ImU32 kColSub   = IM_COL32(160, 175, 210, 180);
+  const ImU32 kColWage  = IM_COL32(100, 215, 120, 230);
+  const float kRad      = 10.0f;
+
+  // Card bg + border
+  dl->AddRectFilled(ImVec2(ox, oy), ImVec2(ox+cw, oy+ch), C32(kBgCard), kRad);
+  dl->AddRect(ImVec2(ox, oy), ImVec2(ox+cw, oy+ch), C32(kBorder), kRad, 0, 1.0f);
+
+  // Face image (top-center, circular clip via stencil approach — just square for now)
+  const float kImgSz = 56.0f;
+  float imgX = ox + (cw - kImgSz) * 0.5f;
+  float imgY = oy + 14.0f;
+  GLuint face = GetStaffPlaceholderTex(sm.role);
+  if (face) {
+    // Circular clip: draw circle bg first, then image on top
+    float cx = imgX + kImgSz * 0.5f, cy = imgY + kImgSz * 0.5f;
+    dl->AddCircleFilled(ImVec2(cx, cy), kImgSz * 0.5f + 2.0f,
+                        IM_COL32((int)(kAccent.x*255*0.4f),(int)(kAccent.y*255*0.4f),(int)(kAccent.z*255*0.4f),180), 32);
+    ImGui::SetCursorScreenPos(ImVec2(imgX, imgY));
+    ImGui::Image((ImTextureID)(intptr_t)face, ImVec2(kImgSz, kImgSz));
+  } else {
+    float cx = imgX + kImgSz*0.5f, cy = imgY + kImgSz*0.5f;
+    dl->AddCircleFilled(ImVec2(cx,cy), kImgSz*0.5f, IM_COL32(40,55,90,200), 32);
+  }
+
+  float textY = imgY + kImgSz + 10.0f;
+
+  // Role pill
+  PushMgrFont(g_ManagerFontSmall);
+  ImVec2 roleSize = ImGui::CalcTextSize(sm.role.c_str());
+  float pillW = roleSize.x + 12.0f, pillH = roleSize.y + 4.0f;
+  float pillX = ox + (cw - pillW) * 0.5f;
+  dl->AddRectFilled(ImVec2(pillX, textY), ImVec2(pillX+pillW, textY+pillH),
+                    IM_COL32((int)(kAccent.x*255*0.25f),(int)(kAccent.y*255*0.25f),(int)(kAccent.z*255*0.25f),200), 5.0f);
+  dl->AddText(ImVec2(pillX+6.0f, textY+2.0f), C32(kAccent), sm.role.c_str());
+  PopMgrFont(g_ManagerFontSmall);
+  textY += pillH + 8.0f;
+
+  // Name (centered)
+  std::string fullName = sm.firstName + " " + sm.lastName;
+  PushMgrFont(g_ManagerFontBold);
+  ImVec2 nameSize = ImGui::CalcTextSize(fullName.c_str());
+  float nameX = ox + (cw - nameSize.x) * 0.5f;
+  if (nameX < ox + 4.0f) nameX = ox + 4.0f;
+  dl->AddText(ImVec2(nameX, textY), kColWhite, fullName.c_str());
+  PopMgrFont(g_ManagerFontBold);
+  textY += nameSize.y + 4.0f;
+
+  // Age · Nationality (centered)
+  char subBuf[64];
+  snprintf(subBuf, sizeof(subBuf), "%d  ·  %s", sm.age, sm.nationality.c_str());
+  PushMgrFont(g_ManagerFontSmall);
+  ImVec2 subSize = ImGui::CalcTextSize(subBuf);
+  dl->AddText(ImVec2(ox + (cw - subSize.x)*0.5f, textY), kColSub, subBuf);
+  PopMgrFont(g_ManagerFontSmall);
+  textY += subSize.y + 6.0f;
+
+  // Stars (centered)
+  const float kStarW = 9.0f, kGap = 2.0f;
+  float starsRowW = 5.0f * (kStarW + kGap) - kGap;
+  ImGui::SetCursorScreenPos(ImVec2(ox + (cw - starsRowW) * 0.5f, textY));
+  DrawStars((float)sm.rating, 5.0f, C32(kAccent));
+  textY += ImGui::GetTextLineHeight() + 4.0f;
+
+  // Wage (centered)
+  char wageBuf[32];
+  snprintf(wageBuf, sizeof(wageBuf), "\xC2\xA3%d / wk", sm.weeklywage);
+  PushMgrFont(g_ManagerFontSmall);
+  ImVec2 wageSize = ImGui::CalcTextSize(wageBuf);
+  dl->AddText(ImVec2(ox + (cw - wageSize.x)*0.5f, textY), kColWage, wageBuf);
+  PopMgrFont(g_ManagerFontSmall);
+
+  // Fire button (bottom)
+  const float kBtnH = 26.0f, kBtnMargin = 10.0f;
+  float btnY = oy + ch - kBtnH - kBtnMargin;
+  float btnW = cw - kBtnMargin * 2.0f;
+  char fireBtnId[32];
+  snprintf(fireBtnId, sizeof(fireBtnId), "Release##sf_%d", uid);
+  ImGui::SetCursorScreenPos(ImVec2(ox + kBtnMargin, btnY));
+  ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(140, 35, 35, 210));
+  ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(190, 55, 55, 230));
+  ImGui::PushStyleColor(ImGuiCol_ButtonActive,  IM_COL32(110, 20, 20, 255));
+  ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
+  if (ImGui::Button(fireBtnId, ImVec2(btnW, kBtnH)))
+    FireStaff(g_CareerHub.managerId, sm.id);
+  ImGui::PopStyleVar();
+  ImGui::PopStyleColor(3);
+}
+
+static void DrawStaffCard_Empty(ImDrawList *dl, float ox, float oy, float cw, float ch,
+                                const char *role, int ri) {
+  const float kRad = 10.0f;
+  // Darker dashed-looking bg
+  dl->AddRectFilled(ImVec2(ox,oy), ImVec2(ox+cw,oy+ch),
+                    IM_COL32(12,18,36,220), kRad);
+  dl->AddRect(ImVec2(ox,oy), ImVec2(ox+cw,oy+ch),
+              IM_COL32(50,65,100,130), kRad, 0, 1.0f);
+
+  // Role label (centered, muted)
+  float midY = oy + ch * 0.32f;
+  PushMgrFont(g_ManagerFontSmall);
+  ImVec2 rlSz = ImGui::CalcTextSize(role);
+  dl->AddText(ImVec2(ox+(cw-rlSz.x)*0.5f, midY), C32(kTextDim), role);
+  PopMgrFont(g_ManagerFontSmall);
+
+  // + icon
+  float plusY = midY + rlSz.y + 6.0f;
+  PushMgrFont(g_ManagerFontBold);
+  ImVec2 plusSz = ImGui::CalcTextSize("+");
+  dl->AddText(ImVec2(ox+(cw-plusSz.x)*0.5f, plusY),
+              IM_COL32((int)(kAccent.x*255),(int)(kAccent.y*255),(int)(kAccent.z*255),160), "+");
+  PopMgrFont(g_ManagerFontBold);
+
+  // Hire button
+  const float kBtnH = 28.0f, kBtnMargin = 10.0f;
+  float btnY = oy + ch - kBtnH - kBtnMargin;
+  float btnW = cw - kBtnMargin * 2.0f;
+  char hireBtnId[64];
+  snprintf(hireBtnId, sizeof(hireBtnId), "Hire##se_%d", ri);
+  ImGui::SetCursorScreenPos(ImVec2(ox + kBtnMargin, btnY));
+  ImGui::PushStyleColor(ImGuiCol_Button,        C32(kAccent));
+  ImGui::PushStyleColor(ImGuiCol_ButtonHovered, C32(kAccentH));
+  ImGui::PushStyleColor(ImGuiCol_ButtonActive,  C32(kAccentA));
+  ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
+  if (ImGui::Button(hireBtnId, ImVec2(btnW, kBtnH))) {
+    s_staffMarketRole   = role;
+    s_staffMarketLoaded = false;
+    NavPush(PAGE_STAFF_MARKET);
+  }
+  ImGui::PopStyleVar();
+  ImGui::PopStyleColor(3);
+}
+
 // ---- DrawStaffPage ------------------------------------------------------
 
 static const char *kStaffRoles[] = {
@@ -5759,225 +5939,249 @@ static const char *kStaffRoles[] = {
 static const int kNumStaffRoles = 5;
 
 static void DrawStaffPage(float w, float h) {
-  const float kPad      = 14.0f;
-  const float kCardRad  = 8.0f;
-  const float kCardH    = 100.0f;
-  const float kSpacing  = 10.0f;
-  const ImU32 kColWhite = IM_COL32(255, 255, 255, 230);
-  const ImU32 kColSub   = IM_COL32(160, 175, 210, 200);
-  const ImU32 kColWage  = IM_COL32(120, 220, 130, 230);
+  const float kPad     = 14.0f;
+  const float kGap     = 10.0f;
+  const float kCardH   = 240.0f;
+
+  float cw      = w - kPad * 2.0f;
+  float colW    = (cw - kGap * 4.0f) / 5.0f;
 
   ImGui::SetCursorPos(ImVec2(kPad, 8.0f));
-  float cw = w - kPad * 2.0f;
-
-  // Page title
   PushMgrFont(g_ManagerFontBold);
   ImGui::TextUnformatted("Staff");
   PopMgrFont(g_ManagerFontBold);
   ImGui::Spacing();
 
-  ImGui::SetNextWindowContentSize(ImVec2(cw, 0.0f));
-  ImGui::BeginChild("##staff_scroll", ImVec2(cw, h - 48.0f), false,
+  ImGui::BeginChild("##staff_grid", ImVec2(cw, h - 48.0f), false,
                     ImGuiWindowFlags_NoScrollbar);
 
-  ImDrawList *dl = ImGui::GetWindowDrawList();
-  float cx = ImGui::GetCursorScreenPos().x;
-  float cy = ImGui::GetCursorScreenPos().y;
-  float cardW = cw;
+  ImDrawList *dl  = ImGui::GetWindowDrawList();
+  ImVec2 origin   = ImGui::GetCursorScreenPos();
 
   for (int ri = 0; ri < kNumStaffRoles; ri++) {
     const char *role = kStaffRoles[ri];
+    float ox = origin.x + ri * (colW + kGap);
+    float oy = origin.y + 4.0f;
 
-    // Find hired staff for this role (may be nullptr)
     const CareerHubState::StaffMember *hired = nullptr;
-    for (const auto &sm : g_CareerHub.staff) {
+    for (const auto &sm : g_CareerHub.staff)
       if (sm.role == role) { hired = &sm; break; }
-    }
 
-    // Card background
-    ImVec2 cMin(cx, cy);
-    ImVec2 cMax(cx + cardW, cy + kCardH);
-    dl->AddRectFilled(cMin, cMax, C32(kBgCard), kCardRad);
-    dl->AddRect(cMin, cMax, C32(kBorder), kCardRad, 0, 1.0f);
-
-    // Role label
-    ImVec2 tlPos(cx + 12.0f, cy + 10.0f);
-    PushMgrFont(g_ManagerFontSmall);
-    dl->AddText(tlPos, C32(kTextDim), role);
-    PopMgrFont(g_ManagerFontSmall);
-
-    if (hired) {
-      // Name
-      std::string fullName = hired->firstName + " " + hired->lastName;
-      ImVec2 namePos(cx + 12.0f, cy + 28.0f);
-      PushMgrFont(g_ManagerFontBold);
-      dl->AddText(namePos, kColWhite, fullName.c_str());
-      PopMgrFont(g_ManagerFontBold);
-
-      // Sub-line: age · nationality
-      char subBuf[64];
-      snprintf(subBuf, sizeof(subBuf), "%d yrs  ·  %s", hired->age, hired->nationality.c_str());
-      ImVec2 subPos(cx + 12.0f, cy + 50.0f);
-      PushMgrFont(g_ManagerFontSmall);
-      dl->AddText(subPos, kColSub, subBuf);
-      PopMgrFont(g_ManagerFontSmall);
-
-      // Stars (rating out of 5)
-      ImGui::SetCursorScreenPos(ImVec2(cx + 12.0f, cy + 68.0f));
-      DrawStars((float)hired->rating, 5.0f, C32(kAccent));
-
-      // Weekly wage
-      char wageBuf[32];
-      snprintf(wageBuf, sizeof(wageBuf), "£%d/wk", hired->weeklywage);
-      PushMgrFont(g_ManagerFontSmall);
-      ImVec2 wageSize = ImGui::CalcTextSize(wageBuf);
-      dl->AddText(ImVec2(cx + cardW - wageSize.x - 12.0f, cy + 68.0f), kColWage, wageBuf);
-      PopMgrFont(g_ManagerFontSmall);
-
-      // Fire button
-      char fireBtnId[32];
-      snprintf(fireBtnId, sizeof(fireBtnId), "Fire##staff_%d", hired->id);
-      float btnW = 72.0f, btnH = 24.0f;
-      ImVec2 btnPos(cx + cardW - btnW - 12.0f, cy + 10.0f);
-      ImGui::SetCursorScreenPos(btnPos);
-      ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(160,  40,  40, 200));
-      ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(200,  60,  60, 230));
-      ImGui::PushStyleColor(ImGuiCol_ButtonActive,  IM_COL32(120,  20,  20, 255));
-      ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
-      if (ImGui::Button(fireBtnId, ImVec2(btnW, btnH))) {
-        FireStaff(g_CareerHub.managerId, hired->id);
-      }
-      ImGui::PopStyleVar();
-      ImGui::PopStyleColor(3);
-    } else {
-      // No staff — show "Hire <Role>" button centred in the card
-      char hireBtnId[64];
-      snprintf(hireBtnId, sizeof(hireBtnId), "  +  Hire %s  ##hire_%d", role, ri);
-      float btnW = 180.0f, btnH = 32.0f;
-      ImVec2 btnPos(cx + (cardW - btnW) * 0.5f, cy + (kCardH - btnH) * 0.5f);
-      ImGui::SetCursorScreenPos(btnPos);
-      ImGui::PushStyleColor(ImGuiCol_Button,        C32(kAccent));
-      ImGui::PushStyleColor(ImGuiCol_ButtonHovered, C32(kAccentH));
-      ImGui::PushStyleColor(ImGuiCol_ButtonActive,  C32(kAccentA));
-      ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
-      if (ImGui::Button(hireBtnId, ImVec2(btnW, btnH))) {
-        s_staffMarketRole   = role;
-        s_staffMarketLoaded = false;
-        NavPush(PAGE_STAFF_MARKET);
-      }
-      ImGui::PopStyleVar();
-      ImGui::PopStyleColor(3);
-    }
-
-    // Advance cursor for next card
-    cy += kCardH + kSpacing;
-    ImGui::SetCursorScreenPos(ImVec2(cx, cy));
+    if (hired)
+      DrawStaffCard_Hired(dl, ox, oy, colW, kCardH, *hired, hired->id);
+    else
+      DrawStaffCard_Empty(dl, ox, oy, colW, kCardH, role, ri);
   }
 
-  ImGui::Dummy(ImVec2(0, 8.0f));
+  // Advance past the cards so the child window has the right height
+  ImGui::Dummy(ImVec2(cw, kCardH + 8.0f));
   ImGui::EndChild();
 }
 
 // ---- DrawStaffMarketPage ------------------------------------------------
 
-static void DrawStaffMarketPage(float w, float h) {
-  const float kPad      = 14.0f;
-  const float kRowH     = 70.0f;
-  const float kSpacing  = 8.0f;
+static void DrawStaffMarketCard(ImDrawList *dl, float ox, float oy, float cw, float ch,
+                                const StaffMarketEntry &e) {
   const ImU32 kColWhite = IM_COL32(255, 255, 255, 230);
-  const ImU32 kColSub   = IM_COL32(160, 175, 210, 200);
-  const ImU32 kColWage  = IM_COL32(120, 220, 130, 230);
+  const ImU32 kColSub   = IM_COL32(160, 175, 210, 180);
+  const ImU32 kColWage  = IM_COL32(100, 215, 120, 230);
+  const float kRad      = 10.0f;
 
-  if (!s_staffMarketLoaded) {
-    LoadStaffMarket(g_CareerHub.managerId, s_staffMarketRole);
+  dl->AddRectFilled(ImVec2(ox,oy), ImVec2(ox+cw,oy+ch), C32(kBgCard), kRad);
+  dl->AddRect(ImVec2(ox,oy), ImVec2(ox+cw,oy+ch), C32(kBorder), kRad, 0, 1.0f);
+
+  // Face image
+  const float kImgSz = 52.0f;
+  float imgX = ox + (cw - kImgSz) * 0.5f, imgY = oy + 12.0f;
+  GLuint face = GetStaffPlaceholderTex(e.role);
+  if (face) {
+    float cx = imgX + kImgSz*0.5f, cy2 = imgY + kImgSz*0.5f;
+    dl->AddCircleFilled(ImVec2(cx,cy2), kImgSz*0.5f+2.0f,
+                        IM_COL32((int)(kAccent.x*255*0.35f),(int)(kAccent.y*255*0.35f),(int)(kAccent.z*255*0.35f),160), 32);
+    ImGui::SetCursorScreenPos(ImVec2(imgX, imgY));
+    ImGui::Image((ImTextureID)(intptr_t)face, ImVec2(kImgSz,kImgSz));
+  } else {
+    float cx=imgX+kImgSz*0.5f,cy2=imgY+kImgSz*0.5f;
+    dl->AddCircleFilled(ImVec2(cx,cy2),kImgSz*0.5f,IM_COL32(40,55,90,200),32);
   }
 
-  float cw = w - kPad * 2.0f;
+  float textY = imgY + kImgSz + 8.0f;
+
+  // Name
+  std::string fullName = e.firstName + " " + e.lastName;
+  PushMgrFont(g_ManagerFontBold);
+  ImVec2 nSz = ImGui::CalcTextSize(fullName.c_str());
+  float nameX = ox + (cw - nSz.x)*0.5f;
+  if (nameX < ox+3.0f) nameX = ox+3.0f;
+  dl->AddText(ImVec2(nameX, textY), kColWhite, fullName.c_str());
+  PopMgrFont(g_ManagerFontBold);
+  textY += nSz.y + 3.0f;
+
+  // Age · Nationality
+  char subBuf[48];
+  snprintf(subBuf, sizeof(subBuf), "%d  ·  %s", e.age, e.nationality.c_str());
+  PushMgrFont(g_ManagerFontSmall);
+  ImVec2 sSz = ImGui::CalcTextSize(subBuf);
+  dl->AddText(ImVec2(ox+(cw-sSz.x)*0.5f, textY), kColSub, subBuf);
+  PopMgrFont(g_ManagerFontSmall);
+  textY += sSz.y + 5.0f;
+
+  // Stars
+  const float kStarW = 9.0f, kGapS = 2.0f;
+  float starsW = 5.0f*(kStarW+kGapS)-kGapS;
+  ImGui::SetCursorScreenPos(ImVec2(ox+(cw-starsW)*0.5f, textY));
+  DrawStars((float)e.rating, 5.0f, C32(kAccent));
+  textY += ImGui::GetTextLineHeight() + 4.0f;
+
+  // Wage
+  char wageBuf[32];
+  snprintf(wageBuf, sizeof(wageBuf), "\xC2\xA3%d / wk", e.weeklywage);
+  PushMgrFont(g_ManagerFontSmall);
+  ImVec2 wSz = ImGui::CalcTextSize(wageBuf);
+  dl->AddText(ImVec2(ox+(cw-wSz.x)*0.5f, textY), kColWage, wageBuf);
+  PopMgrFont(g_ManagerFontSmall);
+
+  // Hire button
+  const float kBtnH = 26.0f, kBtnMg = 8.0f;
+  float btnY = oy + ch - kBtnH - kBtnMg;
+  float btnW = cw - kBtnMg * 2.0f;
+  char btnId[32];
+  snprintf(btnId, sizeof(btnId), "Hire##mk_%d", e.id);
+  ImGui::SetCursorScreenPos(ImVec2(ox+kBtnMg, btnY));
+  ImGui::PushStyleColor(ImGuiCol_Button,        C32(kAccent));
+  ImGui::PushStyleColor(ImGuiCol_ButtonHovered, C32(kAccentH));
+  ImGui::PushStyleColor(ImGuiCol_ButtonActive,  C32(kAccentA));
+  ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
+  if (ImGui::Button(btnId, ImVec2(btnW, kBtnH))) {
+    HireStaff(g_CareerHub.managerId, e.id);
+    s_staffMarketLoaded = false;
+    NavBack();
+  }
+  ImGui::PopStyleVar();
+  ImGui::PopStyleColor(3);
+}
+
+static void DrawStaffMarketPage(float w, float h) {
+  const float kPad  = 14.0f;
+  const float kGap  = 10.0f;
+  const float kCardH = 230.0f;
+
+  if (!s_staffMarketLoaded)
+    LoadStaffMarket(g_CareerHub.managerId, s_staffMarketRole);
+
+  float cw   = w - kPad * 2.0f;
+  float colW = (cw - kGap * 4.0f) / 5.0f;
+
   ImGui::SetCursorPos(ImVec2(kPad, 8.0f));
 
-  // Header: back button + title
-  if (ImGui::Button("< Back")) {
-    NavBack();
-    return;
-  }
-  ImGui::SameLine();
+  // Title
   PushMgrFont(g_ManagerFontBold);
-  std::string title = "Staff Market  " + s_staffMarketRole;
+  std::string title = s_staffMarketRole + " Market";
   ImGui::TextUnformatted(title.c_str());
   PopMgrFont(g_ManagerFontBold);
   ImGui::Spacing();
 
-  if (s_staffMarketList.empty()) {
-    ImGui::SetCursorPos(ImVec2(kPad, 80.0f));
-    ImGui::TextUnformatted("No available staff for this role.");
+  // ---- Filter bar -------------------------------------------------------
+  // Rating filter: "Any" + star buttons 1-5
+  ImGui::SetCursorPosX(kPad);
+  ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,   ImVec2(4.0f, 4.0f));
+
+  // "Rating:" label
+  ImGui::AlignTextToFramePadding();
+  PushMgrFont(g_ManagerFontSmall);
+  ImGui::TextUnformatted("Rating:");
+  PopMgrFont(g_ManagerFontSmall);
+  ImGui::SameLine();
+
+  auto ratingBtn = [&](const char *label, int val) {
+    bool active = (s_mktFilterRating == val);
+    if (active) {
+      ImGui::PushStyleColor(ImGuiCol_Button,        C32(kAccent));
+      ImGui::PushStyleColor(ImGuiCol_ButtonHovered, C32(kAccentH));
+      ImGui::PushStyleColor(ImGuiCol_ButtonActive,  C32(kAccentA));
+    } else {
+      ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(25,35,60,200));
+      ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(40,55,90,230));
+      ImGui::PushStyleColor(ImGuiCol_ButtonActive,  IM_COL32(20,28,50,255));
+    }
+    if (ImGui::Button(label, ImVec2(38.0f, 24.0f)))
+      s_mktFilterRating = val;
+    ImGui::PopStyleColor(3);
+    ImGui::SameLine();
+  };
+  ratingBtn("Any", 0);
+  ratingBtn("1+",  1);
+  ratingBtn("2+",  2);
+  ratingBtn("3+",  3);
+  ratingBtn("4+",  4);
+  ratingBtn("5",   5);
+
+  // Wage filter
+  ImGui::SameLine(0.0f, 20.0f);
+  ImGui::AlignTextToFramePadding();
+  PushMgrFont(g_ManagerFontSmall);
+  ImGui::TextUnformatted("Max wage:");
+  PopMgrFont(g_ManagerFontSmall);
+  ImGui::SameLine();
+  ImGui::SetNextItemWidth(90.0f);
+  ImGui::InputInt("##maxwage", &s_mktFilterMaxWage, 500, 1000);
+  if (s_mktFilterMaxWage < 0) s_mktFilterMaxWage = 0;
+  ImGui::SameLine();
+  if (s_mktFilterMaxWage > 0) {
+    PushMgrFont(g_ManagerFontSmall);
+    char capBuf[32]; snprintf(capBuf, sizeof(capBuf), "\xC2\xA3%d/wk", s_mktFilterMaxWage);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(capBuf);
+    PopMgrFont(g_ManagerFontSmall);
+    ImGui::SameLine();
+  }
+  // Clear wage button
+  if (s_mktFilterMaxWage > 0) {
+    ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(25,35,60,200));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(40,55,90,230));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  IM_COL32(20,28,50,255));
+    if (ImGui::Button("Clear##wclr", ImVec2(44.0f, 24.0f)))
+      s_mktFilterMaxWage = 0;
+    ImGui::PopStyleColor(3);
+  }
+
+  ImGui::PopStyleVar(2);
+  ImGui::Spacing();
+
+  // ---- Build filtered list ----------------------------------------------
+  std::vector<const StaffMarketEntry*> filtered;
+  for (const auto &e : s_staffMarketList) {
+    if (s_mktFilterRating > 0 && e.rating < s_mktFilterRating) continue;
+    if (s_mktFilterMaxWage > 0 && e.weeklywage > s_mktFilterMaxWage) continue;
+    filtered.push_back(&e);
+  }
+
+  if (filtered.empty()) {
+    ImGui::TextUnformatted("No staff match your filters.");
     return;
   }
 
-  ImGui::SetCursorPos(ImVec2(kPad, ImGui::GetCursorPos().y));
-  ImGui::BeginChild("##market_scroll", ImVec2(cw, h - 80.0f), false,
-                    ImGuiWindowFlags_NoScrollbar);
+  // ---- Grid -------------------------------------------------------------
+  float scrollH = h - ImGui::GetCursorPos().y - 8.0f;
+  ImGui::BeginChild("##mkt_grid", ImVec2(cw, scrollH), false, 0);
 
   ImDrawList *dl = ImGui::GetWindowDrawList();
-  float cx = ImGui::GetCursorScreenPos().x;
-  float cy = ImGui::GetCursorScreenPos().y;
-  float cardW = cw;
+  ImVec2 origin  = ImGui::GetCursorScreenPos();
 
-  for (int i = 0; i < (int)s_staffMarketList.size(); i++) {
-    const StaffMarketEntry &e = s_staffMarketList[i];
+  int cols   = 5;
+  int rows   = ((int)filtered.size() + cols - 1) / cols;
+  float rowGap = kGap;
 
-    ImVec2 cMin(cx, cy);
-    ImVec2 cMax(cx + cardW, cy + kRowH);
-    ImU32 rowBg = (i % 2 == 0) ? C32(kBgCard) : C32(kBgCardAlt);
-    dl->AddRectFilled(cMin, cMax, rowBg, 6.0f);
-    dl->AddRect(cMin, cMax, C32(kBorder), 6.0f, 0, 1.0f);
-
-    // Name
-    std::string fullName = e.firstName + " " + e.lastName;
-    PushMgrFont(g_ManagerFontBold);
-    dl->AddText(ImVec2(cx + 12.0f, cy + 8.0f), kColWhite, fullName.c_str());
-    PopMgrFont(g_ManagerFontBold);
-
-    // Sub: age · nationality
-    char subBuf[64];
-    snprintf(subBuf, sizeof(subBuf), "%d yrs  ·  %s", e.age, e.nationality.c_str());
-    PushMgrFont(g_ManagerFontSmall);
-    dl->AddText(ImVec2(cx + 12.0f, cy + 28.0f), kColSub, subBuf);
-    PopMgrFont(g_ManagerFontSmall);
-
-    // Stars
-    ImGui::SetCursorScreenPos(ImVec2(cx + 12.0f, cy + 46.0f));
-    DrawStars((float)e.rating, 5.0f, C32(kAccent));
-
-    // Wage
-    char wageBuf[32];
-    snprintf(wageBuf, sizeof(wageBuf), "£%d/wk", e.weeklywage);
-    PushMgrFont(g_ManagerFontSmall);
-    ImVec2 wageSize = ImGui::CalcTextSize(wageBuf);
-    dl->AddText(ImVec2(cx + cardW - wageSize.x - 100.0f, cy + 46.0f), kColWage, wageBuf);
-    PopMgrFont(g_ManagerFontSmall);
-
-    // Hire button
-    char hireBtnId[32];
-    snprintf(hireBtnId, sizeof(hireBtnId), "Hire##mkt_%d", e.id);
-    float btnW = 80.0f, btnH = 28.0f;
-    ImGui::SetCursorScreenPos(ImVec2(cx + cardW - btnW - 12.0f, cy + (kRowH - btnH) * 0.5f));
-    ImGui::PushStyleColor(ImGuiCol_Button,        C32(kAccent));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, C32(kAccentH));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  C32(kAccentA));
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
-    if (ImGui::Button(hireBtnId, ImVec2(btnW, btnH))) {
-      HireStaff(g_CareerHub.managerId, e.id);
-      s_staffMarketLoaded = false; // refresh market list
-      NavBack();
-    }
-    ImGui::PopStyleVar();
-    ImGui::PopStyleColor(3);
-
-    cy += kRowH + kSpacing;
-    ImGui::SetCursorScreenPos(ImVec2(cx, cy));
+  for (int i = 0; i < (int)filtered.size(); i++) {
+    int col = i % cols;
+    int row = i / cols;
+    float ox = origin.x + col * (colW + kGap);
+    float oy = origin.y + row * (kCardH + rowGap);
+    DrawStaffMarketCard(dl, ox, oy, colW, kCardH, *filtered[i]);
   }
 
-  ImGui::Dummy(ImVec2(0, 8.0f));
+  ImGui::Dummy(ImVec2(cw, rows * (kCardH + rowGap) + 8.0f));
   ImGui::EndChild();
 }
 
