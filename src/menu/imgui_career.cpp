@@ -186,6 +186,7 @@ void CareerHubState::Clear() {
   standings.clear();
   tactics.clear();
   staff.clear();
+  finances = {};
   ClearBadgeCache();
   ResetNavState();
 }
@@ -208,6 +209,76 @@ static std::string FormatDateDisplay(const std::string &iso) {
 static ImVec4 kAccent  = ImVec4(0.741f, 0.102f, 0.788f, 1.0f);
 static ImVec4 kAccentH = ImVec4(0.863f, 0.318f, 0.918f, 1.0f);
 static ImVec4 kAccentA = ImVec4(0.576f, 0.047f, 0.620f, 1.0f);
+
+// ---- League finance parameters ------------------------------------------
+// Starting balance scales between minBalance (worst club, rep≈5) and
+// maxBalance (best club, rep≈19) using the club's average player reputation.
+// Weekly TV also gets a small merit uplift for stronger clubs (+/- 15%).
+// Everything else (operating, matchday, prizes) stays league-fixed.
+struct LeagueFP {
+  int       id;
+  long long minBalance;    // £ — weakest club in this league tier
+  long long maxBalance;    // £ — strongest club in this league tier
+  long long weeklyTV;      // base weekly TV rights (merit-scaled ±15% at runtime)
+  long long weeklyOperating;
+  long long matchdayHome;  // per home game (bigger clubs attract bigger gates)
+  long long prize[6];      // by finishing position, index 0=1st
+};
+//
+// Tier calibration (real-world rough anchors):
+//   PL:          bottom club (e.g. Luton) ~£15M, top (Man City) ~£200M
+//   Bundesliga:  Bochum ~£8M, Bayern ~£120M
+//   Eredivisie:  Go Ahead Eagles ~£3M, Ajax/PSV ~£20M
+//   La Liga:     Getafe ~£10M, Real Madrid ~£180M
+//   Unknown:     treated as a mid-tier domestic league (Liga Portugal tier)
+//
+static const LeagueFP kLeagueFinanceParams[] = {
+  // Premier League
+  { 1,  15000000LL, 200000000LL, 1500000LL, 150000LL, 3000000LL,
+    { 120000000LL, 90000000LL, 75000000LL, 65000000LL, 58000000LL, 52000000LL } },
+  // Bundesliga
+  { 2,   8000000LL, 120000000LL,  900000LL, 100000LL, 2000000LL,
+    {  50000000LL, 35000000LL, 28000000LL, 22000000LL, 18000000LL, 15000000LL } },
+  // Eredivisie
+  { 3,   1500000LL,  20000000LL,  200000LL,  50000LL,  500000LL,
+    {   5000000LL,  3000000LL,  2000000LL,  1500000LL,  1000000LL,   800000LL } },
+  // La Liga
+  { 4,  10000000LL, 180000000LL, 1200000LL, 120000LL, 2500000LL,
+    {  80000000LL, 55000000LL, 42000000LL, 33000000LL, 27000000LL, 22000000LL } },
+};
+static const int kLFPCount = 4;
+
+// Fallback for leagues not in the table (Liga Portugal, Championship, etc.)
+// Calibrated as a mid-lower domestic league: Benfica-tier top ~£18M, AVS-tier ~£1.5M
+static const LeagueFP kLeagueFPDefault = {
+  0,   1500000LL,  18000000LL,  150000LL,  40000LL,  300000LL,
+  {   4000000LL,  2500000LL,  1800000LL,  1200000LL,   800000LL,   500000LL }
+};
+
+static const LeagueFP *GetLeagueFP(int leagueId) {
+  for (int i = 0; i < kLFPCount; i++)
+    if (kLeagueFinanceParams[i].id == leagueId) return &kLeagueFinanceParams[i];
+  return &kLeagueFPDefault;
+}
+
+// Returns 0.0–1.0 quality factor from average reputation of the club's top-11 players.
+// reputation is on a 1–20 scale; we normalise against a practical range of 4–19.
+static float CalcClubQualityFactor(const std::vector<CareerHubState::Player> &squad) {
+  if (squad.empty()) return 0.35f; // mid-table default
+  std::vector<float> reps;
+  reps.reserve(squad.size());
+  for (const auto &p : squad) reps.push_back(p.reputation);
+  std::sort(reps.rbegin(), reps.rend());
+  int n = std::min((int)reps.size(), 11);
+  float sum = 0.0f;
+  for (int i = 0; i < n; i++) sum += reps[i];
+  float avg = sum / (float)n;
+  // Map practical rep range [4, 19] → [0.0, 1.0]
+  float factor = (avg - 4.0f) / (19.0f - 4.0f);
+  if (factor < 0.0f) factor = 0.0f;
+  if (factor > 1.0f) factor = 1.0f;
+  return factor;
+}
 
 void CareerHubState::LoadFromDB(int mgrId, int cId) {
   active = false;
@@ -534,6 +605,319 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
       staff.push_back(sm);
     }
     delete r;
+  }
+
+  // ---- Finance system ---------------------------------------------------
+
+  const LeagueFP *lfp = GetLeagueFP(club.leagueId);
+
+  // Ensure finance tables exist
+  {
+    DatabaseResult *r = GetDB()->Query(
+      "CREATE TABLE IF NOT EXISTS career_finances ("
+      "  manager_id         INTEGER PRIMARY KEY,"
+      "  club_id            INTEGER NOT NULL,"
+      "  balance            INTEGER DEFAULT 0,"
+      "  last_weekly_date   TEXT,"
+      "  season_prize_paid  INTEGER DEFAULT 0"
+      ");");
+    delete r;
+    r = GetDB()->Query(
+      "CREATE TABLE IF NOT EXISTS finance_transactions ("
+      "  id          INTEGER PRIMARY KEY AUTOINCREMENT,"
+      "  manager_id  INTEGER NOT NULL,"
+      "  date        TEXT NOT NULL,"
+      "  category    TEXT NOT NULL,"
+      "  description TEXT,"
+      "  amount      INTEGER NOT NULL"
+      ");");
+    delete r;
+  }
+
+  // Insert initial finances row if this manager has none
+  {
+    std::stringstream ck;
+    ck << "SELECT balance FROM career_finances WHERE manager_id=" << mgrId << ";";
+    DatabaseResult *cr = GetDB()->Query(ck.str());
+    bool noRow = (cr->data.empty());
+    delete cr;
+    if (noRow) {
+      // Scale starting balance by club quality within the league range
+      float quality      = CalcClubQualityFactor(players);
+      long long startBal = lfp->minBalance +
+          (long long)((double)(lfp->maxBalance - lfp->minBalance) * quality);
+      printf("[FINANCE] Init balance: league=%d quality=%.2f start=%lld\n",
+             club.leagueId, quality, startBal);
+
+      std::stringstream ins;
+      ins << "INSERT INTO career_finances (manager_id, club_id, balance, season_prize_paid)"
+          << " VALUES (" << mgrId << "," << cId << "," << startBal << ",0);";
+      DatabaseResult *ir = GetDB()->Query(ins.str());
+      delete ir;
+      // Record starting balance as a transaction
+      std::stringstream tx;
+      tx << "INSERT INTO finance_transactions (manager_id, date, category, description, amount)"
+         << " VALUES (" << mgrId << ",'" << currentDate << "',"
+         << "'balance','Starting club budget'," << startBal << ");";
+      DatabaseResult *tr = GetDB()->Query(tx.str());
+      delete tr;
+    }
+  }
+
+  // Helper: insert a finance transaction and update balance atomically
+  auto InsertTx = [&](const std::string &date, const std::string &cat,
+                      const std::string &desc, long long amount) {
+    std::stringstream tx;
+    tx << "INSERT INTO finance_transactions (manager_id, date, category, description, amount)"
+       << " VALUES (" << mgrId << ",'" << date << "','" << cat << "','"
+       << desc << "'," << amount << ");";
+    DatabaseResult *r = GetDB()->Query(tx.str());
+    delete r;
+    std::stringstream bq;
+    bq << "UPDATE career_finances SET balance = balance + " << amount
+       << " WHERE manager_id=" << mgrId << ";";
+    r = GetDB()->Query(bq.str());
+    delete r;
+  };
+
+  // Calculate weekly wage bill from loaded players + staff
+  long long wageBill = 0;
+  for (const auto &p : players) wageBill += p.weeklywage;
+  for (const auto &sm : staff)  wageBill += sm.weeklywage;
+
+  // Process weekly finances if at least 7 game-days have passed
+  if (!currentDate.empty()) {
+    std::stringstream lwq;
+    lwq << "SELECT last_weekly_date FROM career_finances WHERE manager_id=" << mgrId << ";";
+    DatabaseResult *lwr = GetDB()->Query(lwq.str());
+    std::string lastWeekly = (lwr->data.size() > 0) ? DBCell(lwr, 0, 0) : "";
+    delete lwr;
+
+    bool doWeekly = lastWeekly.empty();
+    if (!doWeekly && !currentDate.empty()) {
+      std::stringstream dq;
+      dq << "SELECT julianday('" << currentDate << "') - julianday('" << lastWeekly << "') >= 7;";
+      DatabaseResult *dr = GetDB()->Query(dq.str());
+      if (dr->data.size() > 0) doWeekly = (DBCell(dr, 0, 0) == "1");
+      delete dr;
+    }
+
+    if (doWeekly) {
+      // TV merit: top clubs get +15%, bottom clubs -15%
+      float qual     = CalcClubQualityFactor(players);
+      long long tv   = (long long)(lfp->weeklyTV * (0.85f + qual * 0.30f));
+      InsertTx(currentDate, "tv_rights", "Weekly TV rights distribution", tv);
+      if (wageBill > 0)
+        InsertTx(currentDate, "wages",    "Weekly player & staff wages",   -wageBill);
+      InsertTx(currentDate, "operating", "Weekly club operating costs",    -lfp->weeklyOperating);
+
+      std::stringstream upd;
+      upd << "UPDATE career_finances SET last_weekly_date='" << currentDate
+          << "' WHERE manager_id=" << mgrId << ";";
+      DatabaseResult *ur = GetDB()->Query(upd.str());
+      delete ur;
+      printf("[FINANCE] Weekly processed date=%s wages=-%lld TV=+%lld op=-%lld\n",
+             currentDate.c_str(), wageBill, lfp->weeklyTV, lfp->weeklyOperating);
+    }
+
+    // Matchday income: scan all played fixtures involving this club (home or away).
+    // Home games: full gate receipts.  Away games: 30% allocation (league revenue share).
+    if (seasonYear > 0 && cId > 0) {
+      float qual2 = CalcClubQualityFactor(players);
+      // Dedup subquery: find fixture IDs already paid (stored as "H:<id>" or "A:<id>")
+      std::string alreadyPaid =
+        "SELECT CAST(SUBSTR(description,3) AS INTEGER) FROM finance_transactions"
+        " WHERE manager_id=" + std::to_string(mgrId) + " AND category='matchday'"
+        " AND (description GLOB 'H:[0-9]*' OR description GLOB 'A:[0-9]*')";
+
+      // Helper: get team quality factor (avg reputation of top-11 players, normalised 0-1)
+      auto TeamQuality = [&](int teamId) -> float {
+        std::stringstream tq;
+        tq << "SELECT reputation FROM players WHERE team_id=" << teamId
+           << " ORDER BY reputation DESC LIMIT 11;";
+        DatabaseResult *tr = GetDB()->Query(tq.str());
+        float sum = 0.0f; int n = 0;
+        for (unsigned int k = 0; k < tr->data.size(); k++) {
+          float r = atof(DBCell(tr, k, 0).c_str()); sum += r; n++;
+        }
+        delete tr;
+        if (n == 0) return 0.35f;
+        float avg = sum / (float)n;
+        float f = (avg - 4.0f) / (19.0f - 4.0f);
+        if (f < 0.0f) f = 0.0f;
+        if (f > 1.0f) f = 1.0f;
+        return f;
+      };
+
+      // Helper: league position factor for a team (0=best/1st, 1=worst/last)
+      auto LeaguePosFactor = [&](int teamId) -> float {
+        std::stringstream pq;
+        pq << "SELECT team_id FROM standings WHERE manager_id=" << mgrId
+           << " AND league_id=(SELECT league_id FROM teams WHERE id=" << teamId << " LIMIT 1)"
+           << " ORDER BY points DESC, goal_difference DESC, goals_for DESC;";
+        DatabaseResult *pr = GetDB()->Query(pq.str());
+        int pos = 1, total = (int)pr->data.size();
+        for (int k = 0; k < total; k++) {
+          if (atoi(DBCell(pr, k, 0).c_str()) == teamId) { pos = k + 1; break; }
+        }
+        delete pr;
+        if (total <= 1) return 0.5f;
+        return (float)(pos - 1) / (float)(total - 1); // 0=1st, 1=last
+      };
+
+      // Matchday income = lerp between min and max based on combined attractiveness
+      // attractiveness: 60% from opponent quality, 20% from user's league position (top=good), 20% user quality
+      auto CalcMatchdayAmt = [&](int opponentId, bool isHome) -> long long {
+        float oppQ   = TeamQuality(opponentId);
+        float oppPos = 1.0f - LeaguePosFactor(opponentId); // 1=1st, 0=last
+        float usrPos = 1.0f - LeaguePosFactor(cId);
+        float attract = oppQ * 0.50f + oppPos * 0.25f + usrPos * 0.15f + qual2 * 0.10f;
+        if (attract < 0.0f) attract = 0.0f;
+        if (attract > 1.0f) attract = 1.0f;
+        long long mdMin = (long long)(lfp->matchdayHome * 0.25f);
+        long long mdMax = (long long)(lfp->matchdayHome * (0.80f + qual2 * 1.20f));
+        long long md    = mdMin + (long long)((double)(mdMax - mdMin) * attract);
+        if (!isHome) md = (long long)(md * 0.30);
+        return md;
+      };
+
+      // Home fixtures
+      {
+        std::stringstream mq;
+        mq << "SELECT id, fixture_date, away_team_id FROM fixtures"
+           << " WHERE manager_id=" << mgrId
+           << " AND season_year=" << seasonYear
+           << " AND home_team_id=" << cId
+           << " AND status='played'"
+           << " AND id NOT IN (" << alreadyPaid << ");";
+        DatabaseResult *mr = GetDB()->Query(mq.str());
+        for (unsigned int i = 0; i < mr->data.size(); i++) {
+          int fxId       = atoi(DBCell(mr, i, 0).c_str());
+          std::string fxDate = DBCell(mr, i, 1);
+          int oppId      = atoi(DBCell(mr, i, 2).c_str());
+          long long md   = CalcMatchdayAmt(oppId, true);
+          std::stringstream tx2;
+          tx2 << "INSERT INTO finance_transactions (manager_id, date, category, description, amount)"
+              << " VALUES (" << mgrId << ",'" << fxDate << "',"
+              << "'matchday','H:" << fxId << "'," << md << ");";
+          DatabaseResult *tr2 = GetDB()->Query(tx2.str()); delete tr2;
+          std::stringstream bq2;
+          bq2 << "UPDATE career_finances SET balance = balance + " << md
+              << " WHERE manager_id=" << mgrId << ";";
+          DatabaseResult *br2 = GetDB()->Query(bq2.str()); delete br2;
+          printf("[FINANCE] Matchday home fixture=%d opp=%d date=%s amount=%lld\n", fxId, oppId, fxDate.c_str(), md);
+        }
+        delete mr;
+      }
+
+      // Away fixtures: 30% of attractiveness-based rate
+      {
+        std::stringstream mq;
+        mq << "SELECT id, fixture_date, home_team_id FROM fixtures"
+           << " WHERE manager_id=" << mgrId
+           << " AND season_year=" << seasonYear
+           << " AND away_team_id=" << cId
+           << " AND status='played'"
+           << " AND id NOT IN (" << alreadyPaid << ");";
+        DatabaseResult *mr = GetDB()->Query(mq.str());
+        for (unsigned int i = 0; i < mr->data.size(); i++) {
+          int fxId       = atoi(DBCell(mr, i, 0).c_str());
+          std::string fxDate = DBCell(mr, i, 1);
+          int oppId      = atoi(DBCell(mr, i, 2).c_str());
+          long long md   = CalcMatchdayAmt(oppId, false);
+          std::stringstream tx2;
+          tx2 << "INSERT INTO finance_transactions (manager_id, date, category, description, amount)"
+              << " VALUES (" << mgrId << ",'" << fxDate << "',"
+              << "'matchday','A:" << fxId << "'," << md << ");";
+          DatabaseResult *tr2 = GetDB()->Query(tx2.str()); delete tr2;
+          std::stringstream bq2;
+          bq2 << "UPDATE career_finances SET balance = balance + " << md
+              << " WHERE manager_id=" << mgrId << ";";
+          DatabaseResult *br2 = GetDB()->Query(bq2.str()); delete br2;
+          printf("[FINANCE] Matchday away fixture=%d opp=%d date=%s amount=%lld\n", fxId, oppId, fxDate.c_str(), md);
+        }
+        delete mr;
+      }
+    }
+
+    // Season-end prize money (pay once per season_year)
+    if (hasSeasonEnded && seasonYear > 0) {
+      std::stringstream ppq;
+      ppq << "SELECT season_prize_paid FROM career_finances WHERE manager_id=" << mgrId << ";";
+      DatabaseResult *ppr = GetDB()->Query(ppq.str());
+      int prizePaid = (ppr->data.size() > 0 && !DBCell(ppr, 0, 0).empty())
+                      ? atoi(DBCell(ppr, 0, 0).c_str()) : 0;
+      delete ppr;
+
+      if (prizePaid != seasonYear) {
+        // Determine user club's finishing position in their league
+        std::stringstream posq;
+        posq << "SELECT team_id FROM standings"
+             << " WHERE manager_id=" << mgrId << " AND league_id=" << club.leagueId
+             << " ORDER BY points DESC, goal_difference DESC, goals_for DESC;";
+        DatabaseResult *posr = GetDB()->Query(posq.str());
+        int position = 1;
+        for (unsigned int i = 0; i < posr->data.size(); i++) {
+          if (atoi(DBCell(posr, i, 0).c_str()) == cId) { position = (int)i + 1; break; }
+        }
+        delete posr;
+
+        int prizeIdx = (position - 1);
+        if (prizeIdx < 0) prizeIdx = 0;
+        if (prizeIdx > 5) prizeIdx = 5;
+        long long prizeAmt = lfp->prize[prizeIdx];
+        char prizeDesc[64];
+        snprintf(prizeDesc, sizeof(prizeDesc), "Season %d prize - %d%s place",
+                 seasonYear, position,
+                 position == 1 ? "st" : position == 2 ? "nd" : position == 3 ? "rd" : "th");
+        InsertTx(currentDate, "prize", prizeDesc, prizeAmt);
+
+        std::stringstream ppu;
+        ppu << "UPDATE career_finances SET season_prize_paid=" << seasonYear
+            << " WHERE manager_id=" << mgrId << ";";
+        DatabaseResult *ppud = GetDB()->Query(ppu.str());
+        delete ppud;
+        printf("[FINANCE] Prize paid position=%d amount=%lld season=%d\n",
+               position, prizeAmt, seasonYear);
+      }
+    }
+  }
+
+  // Load finance state into CareerHubState
+  {
+    std::stringstream bq;
+    bq << "SELECT balance FROM career_finances WHERE manager_id=" << mgrId << ";";
+    DatabaseResult *br = GetDB()->Query(bq.str());
+    finances.balance = (br->data.size() > 0 && !DBCell(br, 0, 0).empty())
+                        ? atoll(DBCell(br, 0, 0).c_str()) : 0LL;
+    delete br;
+
+    float qualityForDisplay  = CalcClubQualityFactor(players);
+    finances.weeklyTV        = (long long)(lfp->weeklyTV * (0.85f + qualityForDisplay * 0.30f));
+    finances.weeklyWages     = wageBill;
+    finances.weeklyOperating = lfp->weeklyOperating;
+    // Matchday range: min = weak opponent + poor form, max = strong opponent + top of table
+    finances.matchdayMin     = (long long)(lfp->matchdayHome * 0.25f);
+    finances.matchdayMax     = (long long)(lfp->matchdayHome * (0.80f + qualityForDisplay * 1.20f));
+    finances.seasonPrize1st  = lfp->prize[0];
+    finances.seasonPrize2nd  = lfp->prize[1];
+
+    finances.recent.clear();
+    std::stringstream rq;
+    rq << "SELECT date, category, description, amount"
+       << " FROM finance_transactions WHERE manager_id=" << mgrId
+       << " ORDER BY id DESC LIMIT 40;";
+    DatabaseResult *rr = GetDB()->Query(rq.str());
+    for (unsigned int i = 0; i < rr->data.size(); i++) {
+      FinanceTransaction ft;
+      ft.date        = DBCell(rr, i, 0);
+      ft.category    = DBCell(rr, i, 1);
+      ft.description = DBCell(rr, i, 2);
+      std::string am = DBCell(rr, i, 3);
+      ft.amount      = am.empty() ? 0LL : atoll(am.c_str());
+      finances.recent.push_back(ft);
+    }
+    delete rr;
   }
 
   active = true;
@@ -6185,6 +6569,330 @@ static void DrawStaffMarketPage(float w, float h) {
   ImGui::EndChild();
 }
 
+// ---- Finance page helpers -----------------------------------------------
+
+static std::string FmtMoney(long long v) {
+  bool neg = v < 0;
+  long long abs = neg ? -v : v;
+  char buf[32];
+  if      (abs >= 1000000000LL) snprintf(buf, sizeof(buf), "%s\xC2\xA3%.2fB", neg?"-":"", abs/1e9);
+  else if (abs >= 1000000LL)    snprintf(buf, sizeof(buf), "%s\xC2\xA3%.1fM", neg?"-":"", abs/1e6);
+  else if (abs >= 1000LL)       snprintf(buf, sizeof(buf), "%s\xC2\xA3%.0fK", neg?"-":"", abs/1e3);
+  else                          snprintf(buf, sizeof(buf), "%s\xC2\xA3%lld",  neg?"-":"", abs);
+  return buf;
+}
+
+static std::string FmtMoneyFull(long long v) {
+  bool neg = v < 0;
+  long long abs = neg ? -v : v;
+  char buf[48];
+  // Insert commas manually for thousands
+  char plain[24]; snprintf(plain, sizeof(plain), "%lld", abs);
+  std::string s(plain);
+  int ins = (int)s.size() - 3;
+  while (ins > 0) { s.insert(ins, ","); ins -= 3; }
+  snprintf(buf, sizeof(buf), "%s\xC2\xA3%s", neg ? "-" : "", s.c_str());
+  return buf;
+}
+
+static std::string FinanceCatLabel(const std::string &cat) {
+  if (cat == "tv_rights")  return "TV Rights";
+  if (cat == "matchday")   return "Match Day";
+  if (cat == "wages")      return "Wages";
+  if (cat == "operating")  return "Operating";
+  if (cat == "prize")      return "Prize Money";
+  if (cat == "balance")    return "Starting Budget";
+  if (cat == "transfer_in")  return "Transfer In";
+  if (cat == "transfer_out") return "Transfer Out";
+  return cat;
+}
+
+static ImU32 FinanceCatColor(const std::string &cat) {
+  if (cat == "tv_rights")    return IM_COL32( 80, 180, 240, 230);
+  if (cat == "matchday")     return IM_COL32(100, 220, 140, 230);
+  if (cat == "prize")        return IM_COL32(255, 200,  50, 230);
+  if (cat == "balance")      return IM_COL32(160, 160, 200, 200);
+  if (cat == "wages")        return IM_COL32(230,  80,  80, 230);
+  if (cat == "operating")    return IM_COL32(200, 120,  60, 230);
+  if (cat == "transfer_out") return IM_COL32(230,  80,  80, 230);
+  if (cat == "transfer_in")  return IM_COL32(100, 220, 140, 230);
+  return IM_COL32(180, 180, 180, 200);
+}
+
+
+static void DrawFinancesPage(float w, float h) {
+  const float kPad  = 16.0f;
+  const float kGap  = 12.0f;
+  float cw          = w - kPad * 2.0f;
+
+  const CareerHubState::FinanceState &fi = g_CareerHub.finances;
+
+  ImGui::SetCursorPos(ImVec2(kPad, 8.0f));
+  ImDrawList *dl   = ImGui::GetWindowDrawList();
+  ImVec2 win0      = ImGui::GetWindowPos();
+  float scrollY    = ImGui::GetScrollY();
+
+  float headerTop  = ImGui::GetCursorPos().y;
+
+  // ── Row 1: three summary cards ──────────────────────────────────────────
+  float cardH1  = 88.0f;
+  float card3W  = (cw - kGap * 2.0f) / 3.0f;
+  float baseY   = win0.y - scrollY + headerTop;
+  ImVec2 origin = ImVec2(win0.x + kPad, baseY);
+
+  // Card helper lambda — ox is absolute screen X, sy is absolute screen Y
+  auto SummaryCard = [&](float ox, float sy, const char *title, const std::string &value,
+                          ImU32 valCol, const char *sub = nullptr, const char *sub2 = nullptr) {
+    ImVec2 p0(ox, sy), p1(ox+card3W, sy+cardH1);
+    dl->AddRectFilled(p0, p1, C32(kBgCard), 10.0f);
+    dl->AddRect(p0, p1, C32(kBorder), 10.0f, 0, 1.0f);
+    PushMgrFont(g_ManagerFontSmall);
+    dl->AddText(ImVec2(ox+12.0f, sy+10.0f), C32(kTextDim), title);
+    PopMgrFont(g_ManagerFontSmall);
+    PushMgrFont(g_ManagerFontTitle);
+    dl->AddText(ImVec2(ox+12.0f, sy+26.0f), valCol, value.c_str());
+    PopMgrFont(g_ManagerFontTitle);
+    float subY = sy + 58.0f;
+    if (sub) {
+      PushMgrFont(g_ManagerFontSmall);
+      dl->AddText(ImVec2(ox+12.0f, subY), C32(kTextDim), sub);
+      PopMgrFont(g_ManagerFontSmall);
+      subY += ImGui::GetTextLineHeight() + 2.0f;
+    }
+    if (sub2) {
+      PushMgrFont(g_ManagerFontSmall);
+      dl->AddText(ImVec2(ox+12.0f, subY), C32(kTextDim), sub2);
+      PopMgrFont(g_ManagerFontSmall);
+    }
+  };
+
+  // Balance card
+  long long bal = fi.balance;
+  ImU32 balCol  = bal >= 0 ? IM_COL32(80, 215, 115, 255) : IM_COL32(220, 70, 70, 255);
+  SummaryCard(origin.x, origin.y, "CURRENT BALANCE", FmtMoney(bal), balCol,
+              FmtMoneyFull(bal).c_str());
+
+  // Weekly net card
+  long long weekIncome  = fi.weeklyTV;
+  long long weekExpense = fi.weeklyWages + fi.weeklyOperating;
+  long long weekNet     = weekIncome - weekExpense;
+  ImU32 netCol = weekNet >= 0 ? IM_COL32(80, 215, 115, 255) : IM_COL32(220, 70, 70, 255);
+  std::string netStr = (weekNet >= 0 ? "+" : "") + FmtMoney(weekNet) + " / wk";
+  SummaryCard(origin.x + card3W + kGap, origin.y, "WEEKLY CASHFLOW", netStr, netCol);
+
+  // Season projection: remaining weeks cashflow + remaining matchday estimate
+  long long remainingWeeks = 30;
+  if (!g_CareerHub.currentDate.empty() && g_CareerHub.seasonYear > 0) {
+    int curM = atoi(g_CareerHub.currentDate.substr(5,2).c_str());
+    int curY = atoi(g_CareerHub.currentDate.substr(0,4).c_str());
+    int endM = 6, endY = g_CareerHub.seasonYear + 1;
+    int months = (endY - curY) * 12 + (endM - curM);
+    if (months < 0) months = 0;
+    remainingWeeks = (long long)months * 4;
+  }
+  // Count remaining home and away fixtures for matchday estimate
+  int remHome = 0, remAway = 0;
+  for (const auto &f : g_CareerHub.fixtures) {
+    if (f.status != "scheduled") continue;
+    if (f.home == g_CareerHub.club.shortName) remHome++;
+    else if (f.away == g_CareerHub.club.shortName) remAway++;
+  }
+  long long mdAvg    = (fi.matchdayMin + fi.matchdayMax) / 2;
+  long long mdEstimate = (long long)remHome * mdAvg + (long long)remAway * mdAvg * 30 / 100;
+  long long projBal  = bal + remainingWeeks * weekNet + mdEstimate;
+  ImU32 projCol = projBal >= 0 ? IM_COL32(80, 215, 115, 220) : IM_COL32(220, 70, 70, 220);
+  SummaryCard(origin.x + (card3W + kGap)*2.0f, origin.y, "SEASON PROJECTION",
+              FmtMoney(projBal), projCol,
+              "approx. end-of-season (excl. competitions prizes)");
+
+  // ── Row 2: Income / Expenses breakdown ──────────────────────────────────
+  float row2Y  = headerTop + cardH1 + kGap;
+  float col2W  = (cw - kGap) / 2.0f;
+  float row2H  = 180.0f;
+  ImVec2 scr2  = ImVec2(win0.x + kPad, win0.y - scrollY + row2Y);
+
+  // Income panel
+  {
+    ImVec2 p0(scr2.x, scr2.y), p1(scr2.x+col2W, scr2.y+row2H);
+    dl->AddRectFilled(p0, p1, C32(kBgCard), 8.0f);
+    dl->AddRect(p0, p1, C32(kBorder), 8.0f, 0, 1.0f);
+    float ty = scr2.y + 10.0f;
+    const float ix = scr2.x + 12.0f;
+    const float iRight = scr2.x + col2W - 12.0f;
+    const float kBarW = col2W - 24.0f, kBarH = 6.0f;
+
+    PushMgrFont(g_ManagerFontBold);
+    dl->AddText(ImVec2(ix, ty), IM_COL32(80,215,115,230), "INCOME");
+    PopMgrFont(g_ManagerFontBold);
+    ty += ImGui::GetTextLineHeight() + 8.0f;
+
+    // TV Rights — weekly recurring
+    {
+      PushMgrFont(g_ManagerFontSmall);
+      dl->AddText(ImVec2(ix, ty), IM_COL32(200,215,230,210), "TV Rights");
+      std::string vs = FmtMoney(fi.weeklyTV) + "/wk";
+      ImVec2 vsz = ImGui::CalcTextSize(vs.c_str());
+      dl->AddText(ImVec2(iRight - vsz.x, ty), IM_COL32(80,215,115,230), vs.c_str());
+      PopMgrFont(g_ManagerFontSmall);
+      float barY = ty + ImGui::GetTextLineHeight() + 2.0f;
+      float fillF = 1.0f; // TV rights is the baseline
+      dl->AddRectFilled(ImVec2(ix,barY), ImVec2(ix+kBarW,barY+kBarH), IM_COL32(20,28,50,200), 3.0f);
+      dl->AddRectFilled(ImVec2(ix,barY), ImVec2(ix+kBarW*fillF,barY+kBarH), IM_COL32(80,200,110,200), 3.0f);
+      ty += ImGui::GetTextLineHeight() + kBarH + 10.0f;
+    }
+
+    // Match Day — per-game range (min–max per match)
+    {
+      PushMgrFont(g_ManagerFontSmall);
+      dl->AddText(ImVec2(ix, ty), IM_COL32(200,215,230,210), "Match Day");
+      std::string vs = FmtMoney(fi.matchdayMin) + " - " + FmtMoney(fi.matchdayMax) + "/game";
+      ImVec2 vsz = ImGui::CalcTextSize(vs.c_str());
+      dl->AddText(ImVec2(iRight - vsz.x, ty), IM_COL32(80,215,115,230), vs.c_str());
+      PopMgrFont(g_ManagerFontSmall);
+      // Bar shows mid-point as fill fraction relative to TV * 4 (rough 4-game month)
+      float barY = ty + ImGui::GetTextLineHeight() + 2.0f;
+      long long midVal = (fi.matchdayMin + fi.matchdayMax) / 2;
+      long long refVal = fi.weeklyTV > 0 ? fi.weeklyTV : 1;
+      float fillF = std::min(1.0f, (float)midVal / (float)refVal);
+      dl->AddRectFilled(ImVec2(ix,barY), ImVec2(ix+kBarW,barY+kBarH), IM_COL32(20,28,50,200), 3.0f);
+      dl->AddRectFilled(ImVec2(ix,barY), ImVec2(ix+kBarW*fillF,barY+kBarH), IM_COL32(80,200,110,200), 3.0f);
+      ty += ImGui::GetTextLineHeight() + kBarH + 10.0f;
+    }
+  }
+
+  // Expenses panel
+  {
+    float ex = scr2.x + col2W + kGap;
+    ImVec2 p0(ex, scr2.y), p1(ex+col2W, scr2.y+row2H);
+    dl->AddRectFilled(p0, p1, C32(kBgCard), 8.0f);
+    dl->AddRect(p0, p1, C32(kBorder), 8.0f, 0, 1.0f);
+    float ty = scr2.y + 10.0f;
+    PushMgrFont(g_ManagerFontBold);
+    dl->AddText(ImVec2(ex+12.0f, ty), IM_COL32(220,80,80,230), "EXPENSES");
+    PopMgrFont(g_ManagerFontBold);
+    ty += ImGui::GetTextLineHeight() + 6.0f;
+
+    struct ExpRow { const char *label; long long weekly; };
+    ExpRow rows[] = {
+      { "Player & Staff Wages", fi.weeklyWages     },
+      { "Club Operating Costs", fi.weeklyOperating },
+    };
+    long long maxExp = (fi.weeklyWages + fi.weeklyOperating) > 0
+                       ? (fi.weeklyWages + fi.weeklyOperating) : 1;
+    const float kBarW = col2W * 0.3f, kBarH = 7.0f;
+    for (const auto &row : rows) {
+      float fillF = std::min(1.0f, (float)row.weekly / (float)maxExp);
+      PushMgrFont(g_ManagerFontSmall);
+      dl->AddText(ImVec2(ex+12.0f, ty), IM_COL32(200,215,230,210), row.label);
+      std::string vs = FmtMoney(row.weekly) + "/wk";
+      ImVec2 vsz = ImGui::CalcTextSize(vs.c_str());
+      dl->AddText(ImVec2(ex+col2W-vsz.x-12.0f, ty), IM_COL32(220,80,80,230), vs.c_str());
+      PopMgrFont(g_ManagerFontSmall);
+      float barX = ex + 12.0f;
+      float barY = ty + ImGui::GetTextLineHeight() + 2.0f;
+      dl->AddRectFilled(ImVec2(barX,barY), ImVec2(barX+kBarW,barY+kBarH),
+                        IM_COL32(20,28,50,200), 3.0f);
+      dl->AddRectFilled(ImVec2(barX,barY), ImVec2(barX+kBarW*fillF,barY+kBarH),
+                        IM_COL32(200,80,80,200), 3.0f);
+      ty += ImGui::GetTextLineHeight() + kBarH + 8.0f;
+    }
+
+    // Annual wage vs TV rights comparison bar
+    ty += 4.0f;
+    PushMgrFont(g_ManagerFontSmall);
+    long long annualWages = fi.weeklyWages * 52;
+    long long annualTV    = fi.weeklyTV    * 52;
+    long long annualOp    = fi.weeklyOperating * 52;
+    std::string wageStr = "Annual wage bill: " + FmtMoney(annualWages);
+    dl->AddText(ImVec2(ex+12.0f, ty), IM_COL32(180,180,200,180), wageStr.c_str());
+    PopMgrFont(g_ManagerFontSmall);
+    (void)annualTV; (void)annualOp; // suppress unused warning
+  }
+
+  // ── Ledger ────────────────────────────────────────────────────────────
+  float ledgerTop = row2Y + row2H + kGap;
+  float ledgerH   = h - ledgerTop - 8.0f;
+  if (ledgerH < 60.0f) ledgerH = 60.0f;
+
+  // Header row
+  float hdrH = 22.0f;
+  ImVec2 scr4 = ImVec2(win0.x + kPad, win0.y - scrollY + ledgerTop);
+  {
+    dl->AddRectFilled(scr4, ImVec2(scr4.x+cw, scr4.y+hdrH),
+                      IM_COL32(15,22,42,220), 0.0f);
+    PushMgrFont(g_ManagerFontSmall);
+    float dateW = 90.0f, catW = 110.0f;
+    dl->AddText(ImVec2(scr4.x+6.0f,        scr4.y+4.0f), C32(kTextDim), "Date");
+    dl->AddText(ImVec2(scr4.x+dateW,        scr4.y+4.0f), C32(kTextDim), "Category");
+    dl->AddText(ImVec2(scr4.x+dateW+catW,   scr4.y+4.0f), C32(kTextDim), "Description");
+    ImVec2 amtLbl = ImGui::CalcTextSize("Amount");
+    dl->AddText(ImVec2(scr4.x+cw-amtLbl.x-6.0f, scr4.y+4.0f), C32(kTextDim), "Amount");
+    PopMgrFont(g_ManagerFontSmall);
+    ledgerH -= hdrH;
+  }
+  ImGui::SetCursorPos(ImVec2(kPad, ledgerTop + hdrH));
+
+  ImGui::BeginChild("##fin_ledger", ImVec2(cw, ledgerH), false, 0);
+  ImDrawList *ldl = ImGui::GetWindowDrawList();
+  float lx = ImGui::GetCursorScreenPos().x;
+  float ly = ImGui::GetCursorScreenPos().y;
+  float rowH = 22.0f;
+  float dateW = 90.0f, catW = 110.0f, amtW = 100.0f;
+
+  for (int i = 0; i < (int)fi.recent.size(); i++) {
+    const auto &tx = fi.recent[i];
+    ImVec2 r0(lx, ly), r1(lx+cw, ly+rowH);
+    ImU32 rowBg = (i%2==0) ? IM_COL32(12,18,36,200) : IM_COL32(18,26,50,200);
+    ldl->AddRectFilled(r0, r1, rowBg, 0.0f);
+
+    // Highlight income/expense with left-edge accent strip
+    ImU32 stripCol = tx.amount >= 0 ? IM_COL32(60,180,90,200) : IM_COL32(180,60,60,200);
+    ldl->AddRectFilled(ImVec2(lx,ly), ImVec2(lx+3.0f,ly+rowH), stripCol, 0.0f);
+
+    std::string desc = tx.description;
+    if (tx.category == "matchday") {
+      if (desc.size() > 2 && desc[0] == 'H' && desc[1] == ':') desc = "Home gate receipts";
+      else if (desc.size() > 2 && desc[0] == 'A' && desc[1] == ':') desc = "Away allocation";
+      else { // legacy numeric-only descriptions
+        bool allDigits = !desc.empty();
+        for (char c : desc) if (!isdigit((unsigned char)c)) { allDigits = false; break; }
+        if (allDigits) desc = "Home gate receipts";
+      }
+    }
+
+    PushMgrFont(g_ManagerFontSmall);
+    // Date
+    std::string dispDate = tx.date.size() >= 10 ? FormatDateDisplay(tx.date) : tx.date;
+    ldl->AddText(ImVec2(lx+6.0f, ly+4.0f), IM_COL32(160,175,210,200), dispDate.c_str());
+    // Category pill
+    ImU32 catCol = FinanceCatColor(tx.category);
+    std::string catLbl = FinanceCatLabel(tx.category);
+    ldl->AddText(ImVec2(lx+dateW, ly+4.0f), catCol, catLbl.c_str());
+    // Description
+    ldl->AddText(ImVec2(lx+dateW+catW, ly+4.0f),
+                 IM_COL32(200,210,230,200), desc.c_str());
+    // Amount
+    std::string amtStr = (tx.amount >= 0 ? "+" : "") + FmtMoney(tx.amount);
+    ImU32 amtCol = tx.amount >= 0 ? IM_COL32(80,215,110,230) : IM_COL32(215,80,80,230);
+    ImVec2 amtSz = ImGui::CalcTextSize(amtStr.c_str());
+    ldl->AddText(ImVec2(lx+cw-amtSz.x-6.0f, ly+4.0f), amtCol, amtStr.c_str());
+    PopMgrFont(g_ManagerFontSmall);
+
+    ly += rowH;
+    ImGui::SetCursorScreenPos(ImVec2(lx, ly));
+  }
+
+  if (fi.recent.empty()) {
+    PushMgrFont(g_ManagerFontSmall);
+    ImGui::SetCursorScreenPos(ImVec2(lx+12.0f, ly+8.0f));
+    ImGui::TextUnformatted("No transactions yet.");
+    PopMgrFont(g_ManagerFontSmall);
+  }
+
+  ImGui::Dummy(ImVec2(cw, 8.0f));
+  ImGui::EndChild();
+}
+
 // ---- DrawComingSoonPage -------------------------------------------------
 
 static void DrawComingSoonPage(float w, float h, const char *section) {
@@ -6247,6 +6955,7 @@ static void DrawWorkspace(float contentW, float workH) {
     case PAGE_PLAYER_DETAIL: DrawPlayerDetailPage(contentW, workH);  break;
     case PAGE_STAFF:         DrawStaffPage(contentW, workH);         break;
     case PAGE_STAFF_MARKET:  DrawStaffMarketPage(contentW, workH);   break;
+    case PAGE_FINANCES:      DrawFinancesPage(contentW, workH);      break;
     default:
       DrawComingSoonPage(contentW, workH, kPageNames[g_activePage]);
       break;

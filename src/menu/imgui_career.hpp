@@ -105,6 +105,25 @@ struct CareerHubState {
   };
   std::vector<StaffMember> staff; // currently hired staff for this manager
 
+  struct FinanceTransaction {
+    std::string date;
+    std::string category;   // 'tv_rights','matchday','wages','operating','prize'
+    std::string description;
+    long long   amount = 0; // £ — positive=income, negative=expense
+  };
+
+  struct FinanceState {
+    long long balance          = 0;
+    long long weeklyTV         = 0;  // income per week
+    long long weeklyWages      = 0;  // expense per week (players + staff)
+    long long weeklyOperating  = 0;  // expense per week (fixed)
+    long long matchdayMin      = 0;  // per match, worst case (weak opponent, poor form)
+    long long matchdayMax      = 0;  // per match, best case (strong opponent, top of table)
+    long long seasonPrize1st   = 0;  // prize for 1st in user's league
+    long long seasonPrize2nd   = 0;
+    std::vector<FinanceTransaction> recent; // last 40 transactions
+  } finances;
+
   void Clear();
   void LoadFromDB(int managerId, int clubId);
 };
