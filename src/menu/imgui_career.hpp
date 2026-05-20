@@ -96,6 +96,15 @@ struct CareerHubState {
 
   std::map<std::string, float> tactics; // tactic key → current value (0.0-1.0)
 
+  struct StaffMember {
+    int         id         = 0;
+    std::string firstName, lastName, nationality, role;
+    int         age        = 0;
+    int         rating     = 0; // 1-5
+    int         weeklywage = 0;
+  };
+  std::vector<StaffMember> staff; // currently hired staff for this manager
+
   void Clear();
   void LoadFromDB(int managerId, int clubId);
 };

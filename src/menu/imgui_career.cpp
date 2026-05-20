@@ -185,6 +185,7 @@ void CareerHubState::Clear() {
   fixtures.clear();
   standings.clear();
   tactics.clear();
+  staff.clear();
   ClearBadgeCache();
   ResetNavState();
 }
@@ -495,6 +496,46 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
     delete tr;
   }
 
+  // Ensure career_staff table exists (created once per save)
+  {
+    DatabaseResult *r = GetDB()->Query(
+      "CREATE TABLE IF NOT EXISTS career_staff ("
+      "  manager_id INTEGER NOT NULL,"
+      "  staff_id   INTEGER NOT NULL,"
+      "  PRIMARY KEY (manager_id, staff_id),"
+      "  FOREIGN KEY (staff_id) REFERENCES staff_list(staff_id)"
+      ");");
+    delete r;
+  }
+
+  // Load hired staff for this manager
+  staff.clear();
+  {
+    std::stringstream q;
+    q << "SELECT sl.staff_id, sl.firstname, sl.lastname, sl.nationality, sl.role,"
+      << " (CAST(strftime('%Y', 'now') AS INTEGER) - CAST(strftime('%Y', sl.\"date-of-birth\") AS INTEGER)) as age,"
+      << " sl.rating, sl.weekly_wage"
+      << " FROM career_staff cs"
+      << " JOIN staff_list sl ON cs.staff_id = sl.staff_id"
+      << " WHERE cs.manager_id = " << managerId
+      << " ORDER BY sl.role ASC;";
+    DatabaseResult *r = GetDB()->Query(q.str());
+    for (unsigned int i = 0; i < r->data.size(); i++) {
+      StaffMember sm;
+      sm.id          = atoi(DBCell(r, i, 0).c_str());
+      sm.firstName   = DBCell(r, i, 1);
+      sm.lastName    = DBCell(r, i, 2);
+      sm.nationality = DBCell(r, i, 3);
+      sm.role        = DBCell(r, i, 4);
+      std::string ag = DBCell(r, i, 5);
+      sm.age         = ag.empty() ? 0 : atoi(ag.c_str());
+      sm.rating      = atoi(DBCell(r, i, 6).c_str());
+      sm.weeklywage  = atoi(DBCell(r, i, 7).c_str());
+      staff.push_back(sm);
+    }
+    delete r;
+  }
+
   active = true;
 }
 
@@ -518,13 +559,14 @@ enum e_ManagerPage {
   PAGE_TEAMS,
   PAGE_SETTINGS,
   PAGE_PLAYER_DETAIL,
+  PAGE_STAFF_MARKET,
   PAGE_COUNT
 };
 
 static const char *kPageNames[PAGE_COUNT] = {
   "Home", "Inbox", "News", "Schedule",
   "Squad", "Tactics", "Training", "Staff", "Scouting", "Finances", "Transfers",
-  "Competitions", "Fixtures", "Players", "Teams", "Settings", "Player"
+  "Competitions", "Fixtures", "Players", "Teams", "Settings", "Player", "Staff Market"
 };
 
 static e_ManagerPage g_activePage = PAGE_HOME;
@@ -557,6 +599,21 @@ static ImVec2 s_searchDropdownPos;
 static float  s_searchDropdownW             = 360.0f;
 static bool   s_detailOverrideActive        = false;
 static CareerHubState::Player s_detailPlayerOverride;
+static std::string s_detailClubName;
+static std::string s_detailClubLogo;
+static std::string s_detailClubShortName;
+
+// ---- Staff market state --------------------------------------------------
+struct StaffMarketEntry {
+  int         id         = 0;
+  std::string firstName, lastName, nationality, role;
+  int         age        = 0;
+  int         rating     = 0;
+  int         weeklywage = 0;
+};
+static std::string              s_staffMarketRole;
+static std::vector<StaffMarketEntry> s_staffMarketList;
+static bool                     s_staffMarketLoaded = false;
 
 // Navigate to a new page — pushes current to back stack, clears forward stack.
 static void NavPush(e_ManagerPage page) {
@@ -598,9 +655,10 @@ static void ResetNavState() {
   s_compLeague    = -1;
   s_schedInit     = false;
   s_schedClubInit = false;
-  s_schedCountry  = -1;
-  s_schedLeague   = -1;
-  s_schedClub     = -1;
+  s_schedCountry      = -1;
+  s_schedLeague       = -1;
+  s_schedClub         = -1;
+  s_staffMarketLoaded = false;
 }
 
 // ---- Color palette ------------------------------------------------------
@@ -2674,10 +2732,18 @@ static void RunPlayerSearch(const char *raw) {
   delete r;
 }
 
+// Returns true for ~90% of stat indices for a given player — deterministic, never re-rolls.
+static bool IsHiddenStat(int playerId, int statIdx) {
+  unsigned int h = (unsigned int)playerId * 2654435761u ^ (unsigned int)statIdx * 2246822519u;
+  h ^= h >> 16;
+  return (h % 100) < 90;
+}
+
 // Draws a section title + bar-based stat rows, all via DrawList (no ImGui tables).
+// ownPlayer=true → show all stats; false → apply scouting fog of war.
 static void DrawStatSection(const char *title, ImU32 titleColor,
                             const StatDef *stats, int count,
-                            int playerId, float baseStat) {
+                            int playerId, float baseStat, bool ownPlayer = true) {
   ImDrawList *dl = ImGui::GetWindowDrawList();
   float secW     = ImGui::GetContentRegionAvail().x;
   const float kFs   = 15.0f;  // readable stat font size
@@ -2697,50 +2763,60 @@ static void DrawStatSection(const char *title, ImU32 titleColor,
 
   // Stat rows
   for (int i = 0; i < count; i++) {
+    bool  hidden = !ownPlayer && IsHiddenStat(playerId, stats[i].idx);
     int   val    = DerivedStat(playerId, stats[i].idx, baseStat);
-    ImU32 valCol = StatValueColor(val);
+    ImU32 valCol = hidden ? IM_COL32(60, 68, 90, 180) : StatValueColor(val);
     ImVec2 rp    = ImGui::GetCursorScreenPos();
 
     // Alternating row tint
     ImU32 rowBg = (i % 2 == 0) ? IM_COL32(15, 22, 46, 130) : IM_COL32(10, 16, 34, 60);
     dl->AddRectFilled(ImVec2(rp.x, rp.y), ImVec2(rp.x + secW, rp.y + kRowH), rowBg);
 
-    // Accent left edge on excellent stats (16+)
-    if (val >= 16)
+    // Accent left edge on excellent stats (only for known stats)
+    if (!hidden && val >= 16)
       dl->AddRectFilled(ImVec2(rp.x, rp.y), ImVec2(rp.x + 3.0f, rp.y + kRowH),
                         IM_COL32(80, 215, 105, 200));
 
-    // Stat name
+    // Stat name — dimmer when hidden
     PushMgrFont(g_ManagerFontSmall);
+    ImU32 labelCol = hidden ? IM_COL32(110, 118, 145, 160) : IM_COL32(192, 202, 226, 240);
     dl->AddText(g_ManagerFontSmall, kFs,
                 ImVec2(rp.x + 6.0f, rp.y + (kRowH - kFs) * 0.5f),
-                IM_COL32(192, 202, 226, 240), stats[i].label);
+                labelCol, stats[i].label);
     PopMgrFont(g_ManagerFontSmall);
 
     // Fill bar
     float bX0 = rp.x + secW * 0.60f;
     float bX1 = rp.x + secW - 24.0f;
     if (bX1 > bX0 + 4.0f) {
-      const float bH   = 9.0f;
-      const float bY   = rp.y + (kRowH - bH) * 0.5f;
-      const float fill = (bX1 - bX0) * (val / 20.0f);
-      int vr = valCol & 0xFF, vg = (valCol >> 8) & 0xFF, vb = (valCol >> 16) & 0xFF;
+      const float bH = 9.0f;
+      const float bY = rp.y + (kRowH - bH) * 0.5f;
       dl->AddRectFilled(ImVec2(bX0, bY), ImVec2(bX1, bY + bH),
                         IM_COL32(22, 30, 58, 210), 3.0f);
-      if (fill > 0.5f)
-        dl->AddRectFilled(ImVec2(bX0, bY), ImVec2(bX0 + fill, bY + bH),
-                          IM_COL32(vr, vg, vb, 175), 3.0f);
+      if (!hidden) {
+        const float fill = (bX1 - bX0) * (val / 20.0f);
+        int vr = valCol & 0xFF, vg = (valCol >> 8) & 0xFF, vb = (valCol >> 16) & 0xFF;
+        if (fill > 0.5f)
+          dl->AddRectFilled(ImVec2(bX0, bY), ImVec2(bX0 + fill, bY + bH),
+                            IM_COL32(vr, vg, vb, 175), 3.0f);
+      } else {
+        // Fog of war: gray hatched fill to signal "unknown"
+        dl->AddRectFilled(ImVec2(bX0, bY), ImVec2(bX1, bY + bH),
+                          IM_COL32(35, 42, 65, 140), 3.0f);
+      }
     }
 
-    // Number — right-aligned, value-colored
-    char vbuf[4]; snprintf(vbuf, sizeof(vbuf), "%d", val);
+    // Number — "?" when hidden
+    const char *vbuf = hidden ? "?" : nullptr;
+    char numbuf[4];
+    if (!hidden) { snprintf(numbuf, sizeof(numbuf), "%d", val); vbuf = numbuf; }
     PushMgrFont(g_ManagerFontSmall);
     ImVec2 vsz = g_ManagerFontSmall
         ? g_ManagerFontSmall->CalcTextSizeA(kFs, FLT_MAX, 0, vbuf)
         : ImGui::CalcTextSize(vbuf);
     dl->AddText(g_ManagerFontSmall, kFs,
                 ImVec2(rp.x + secW - vsz.x - 4.0f, rp.y + (kRowH - kFs) * 0.5f),
-                valCol, vbuf);
+                hidden ? IM_COL32(60, 68, 90, 160) : valCol, vbuf);
     PopMgrFont(g_ManagerFontSmall);
 
     ImGui::Dummy(ImVec2(secW, kRowH));
@@ -2766,7 +2842,8 @@ static void DrawPlayerDetailPage(float w, float h) {
     PopMgrFont(g_ManagerFontSmall);
     return;
   }
-  const auto &pl = *pPlayer;
+  const auto &pl      = *pPlayer;
+  const bool ownPlayer = !s_detailOverrideActive; // false = scouting fog applies
 
   if (s_playerDetailLastId != s_playerDetailId) {
     s_plTab              = 0;
@@ -2855,15 +2932,20 @@ static void DrawPlayerDetailPage(float w, float h) {
   }
 
   // Right section: club badge + info
+  // Use the player's actual club (override if from search, own club if squad player)
+  const std::string &dispClubLogo  = ownPlayer ? g_CareerHub.club.logoPath  : s_detailClubLogo;
+  const std::string &dispClubShort = ownPlayer ? g_CareerHub.club.shortName : s_detailClubShortName;
+  const std::string &dispClubName  = ownPlayer ? g_CareerHub.club.name      : s_detailClubName;
+
   float rx = hdrOrg.x + usW * 0.50f;
   ImGui::SetCursorScreenPos(ImVec2(rx, hdrOrg.y + (kHdrH - 60.0f) * 0.5f));
-  DrawTeamBadge(g_CareerHub.club.logoPath, g_CareerHub.club.shortName, 60.0f);
+  DrawTeamBadge(dispClubLogo, dispClubShort, 60.0f);
 
   float infoX = rx + 70.0f, infoY = hdrOrg.y + 14.0f;
   PushMgrFont(g_ManagerFontSmall);
   // Club name — slightly larger/brighter
   hdl->AddText(g_ManagerFontSmall, 18.0f, ImVec2(infoX, infoY),
-               IM_COL32(205, 215, 238, 240), g_CareerHub.club.name.c_str());
+               IM_COL32(205, 215, 238, 240), dispClubName.c_str());
   {
     char wb[48];
     if (pl.weeklywage >= 1000)
@@ -3006,9 +3088,9 @@ static void DrawPlayerDetailPage(float w, float h) {
   ImGui::BeginChild("##pdc0", ImVec2(c0W, colH), false,
                     ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
   DrawStatSection("Technical",  IM_COL32(130,185,130,230),
-                  kTechStats,  10, pl.id, pl.baseStat);
+                  kTechStats,  10, pl.id, pl.baseStat, ownPlayer);
   DrawStatSection("Set Pieces", IM_COL32(130,185,130,160),
-                  kSetStats,    4, pl.id, pl.baseStat);
+                  kSetStats,    4, pl.id, pl.baseStat, ownPlayer);
   ImGui::EndChild();
   ImGui::SameLine(0, 2.0f);
 
@@ -3016,7 +3098,7 @@ static void DrawPlayerDetailPage(float w, float h) {
   ImGui::BeginChild("##pdc1", ImVec2(c1W, colH), false,
                     ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
   DrawStatSection("Mental", IM_COL32(130,150,220,230),
-                  kMentStats, 14, pl.id, pl.baseStat);
+                  kMentStats, 14, pl.id, pl.baseStat, ownPlayer);
   ImGui::EndChild();
   ImGui::SameLine(0, 2.0f);
 
@@ -3024,9 +3106,9 @@ static void DrawPlayerDetailPage(float w, float h) {
   ImGui::BeginChild("##pdc2", ImVec2(c2W, colH), false,
                     ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
   DrawStatSection("Physical",    IM_COL32(220,140,100,230),
-                  kPhysStats,  8, pl.id, pl.baseStat);
+                  kPhysStats,  8, pl.id, pl.baseStat, ownPlayer);
   DrawStatSection("Goalkeeping", IM_COL32(220,140,100,160),
-                  kGKStats,    1, pl.id, pl.baseStat);
+                  kGKStats,    1, pl.id, pl.baseStat, ownPlayer);
   ImGui::EndChild();
   ImGui::SameLine(0, 2.0f);
 
@@ -3509,6 +3591,7 @@ static void DrawSquadPage(float w, float h) {
         if (nclicked && !s_escMenuOpen) {
           s_playerDetailId       = p.id;
           s_detailOverrideActive = false; // squad player — no override needed
+          s_detailClubName = s_detailClubLogo = s_detailClubShortName = "";
           NavPush(PAGE_PLAYER_DETAIL);
         }
       }
@@ -5619,6 +5702,285 @@ static void DrawTacticsPage(float w, float h) {
   ImGui::EndGroup();
 }
 
+// ---- Staff DB helpers ---------------------------------------------------
+
+static void HireStaff(int managerId, int staffId) {
+  std::stringstream q;
+  q << "INSERT OR IGNORE INTO career_staff (manager_id, staff_id) VALUES ("
+    << managerId << ", " << staffId << ");";
+  DatabaseResult *r = GetDB()->Query(q.str());
+  delete r;
+  // Reload hired staff list
+  g_CareerHub.LoadFromDB(managerId, g_CareerHub.clubId);
+}
+
+static void FireStaff(int managerId, int staffId) {
+  std::stringstream q;
+  q << "DELETE FROM career_staff WHERE manager_id=" << managerId
+    << " AND staff_id=" << staffId << ";";
+  DatabaseResult *r = GetDB()->Query(q.str());
+  delete r;
+  g_CareerHub.LoadFromDB(managerId, g_CareerHub.clubId);
+}
+
+static void LoadStaffMarket(int managerId, const std::string &role) {
+  s_staffMarketList.clear();
+  std::stringstream q;
+  q << "SELECT sl.staff_id, sl.firstname, sl.lastname, sl.nationality, sl.role,"
+    << " (CAST(strftime('%Y', 'now') AS INTEGER) - CAST(strftime('%Y', sl.\"date-of-birth\") AS INTEGER)) as age,"
+    << " sl.rating, sl.weekly_wage"
+    << " FROM staff_list sl"
+    << " WHERE sl.role='" << role << "'"
+    << " AND sl.staff_id NOT IN (SELECT staff_id FROM career_staff WHERE manager_id=" << managerId << ")"
+    << " ORDER BY sl.rating DESC, sl.weekly_wage ASC;";
+  DatabaseResult *r = GetDB()->Query(q.str());
+  for (unsigned int i = 0; i < r->data.size(); i++) {
+    StaffMarketEntry e;
+    e.id          = atoi(r->data[i][0].c_str());
+    e.firstName   = r->data[i][1];
+    e.lastName    = r->data[i][2];
+    e.nationality = r->data[i][3];
+    e.role        = r->data[i][4];
+    std::string ag = r->data[i][5];
+    e.age         = ag.empty() ? 0 : atoi(ag.c_str());
+    e.rating      = atoi(r->data[i][6].c_str());
+    e.weeklywage  = atoi(r->data[i][7].c_str());
+    s_staffMarketList.push_back(e);
+  }
+  delete r;
+  s_staffMarketLoaded = true;
+}
+
+// ---- DrawStaffPage ------------------------------------------------------
+
+static const char *kStaffRoles[] = {
+  "Scout", "Physio", "Psychologist", "Fitness Coach", "Youth Coach"
+};
+static const int kNumStaffRoles = 5;
+
+static void DrawStaffPage(float w, float h) {
+  const float kPad      = 14.0f;
+  const float kCardRad  = 8.0f;
+  const float kCardH    = 100.0f;
+  const float kSpacing  = 10.0f;
+  const ImU32 kColWhite = IM_COL32(255, 255, 255, 230);
+  const ImU32 kColSub   = IM_COL32(160, 175, 210, 200);
+  const ImU32 kColWage  = IM_COL32(120, 220, 130, 230);
+
+  ImGui::SetCursorPos(ImVec2(kPad, 8.0f));
+  float cw = w - kPad * 2.0f;
+
+  // Page title
+  PushMgrFont(g_ManagerFontBold);
+  ImGui::TextUnformatted("Staff");
+  PopMgrFont(g_ManagerFontBold);
+  ImGui::Spacing();
+
+  ImGui::SetNextWindowContentSize(ImVec2(cw, 0.0f));
+  ImGui::BeginChild("##staff_scroll", ImVec2(cw, h - 48.0f), false,
+                    ImGuiWindowFlags_NoScrollbar);
+
+  ImDrawList *dl = ImGui::GetWindowDrawList();
+  float cx = ImGui::GetCursorScreenPos().x;
+  float cy = ImGui::GetCursorScreenPos().y;
+  float cardW = cw;
+
+  for (int ri = 0; ri < kNumStaffRoles; ri++) {
+    const char *role = kStaffRoles[ri];
+
+    // Find hired staff for this role (may be nullptr)
+    const CareerHubState::StaffMember *hired = nullptr;
+    for (const auto &sm : g_CareerHub.staff) {
+      if (sm.role == role) { hired = &sm; break; }
+    }
+
+    // Card background
+    ImVec2 cMin(cx, cy);
+    ImVec2 cMax(cx + cardW, cy + kCardH);
+    dl->AddRectFilled(cMin, cMax, C32(kBgCard), kCardRad);
+    dl->AddRect(cMin, cMax, C32(kBorder), kCardRad, 0, 1.0f);
+
+    // Role label
+    ImVec2 tlPos(cx + 12.0f, cy + 10.0f);
+    PushMgrFont(g_ManagerFontSmall);
+    dl->AddText(tlPos, C32(kTextDim), role);
+    PopMgrFont(g_ManagerFontSmall);
+
+    if (hired) {
+      // Name
+      std::string fullName = hired->firstName + " " + hired->lastName;
+      ImVec2 namePos(cx + 12.0f, cy + 28.0f);
+      PushMgrFont(g_ManagerFontBold);
+      dl->AddText(namePos, kColWhite, fullName.c_str());
+      PopMgrFont(g_ManagerFontBold);
+
+      // Sub-line: age · nationality
+      char subBuf[64];
+      snprintf(subBuf, sizeof(subBuf), "%d yrs  ·  %s", hired->age, hired->nationality.c_str());
+      ImVec2 subPos(cx + 12.0f, cy + 50.0f);
+      PushMgrFont(g_ManagerFontSmall);
+      dl->AddText(subPos, kColSub, subBuf);
+      PopMgrFont(g_ManagerFontSmall);
+
+      // Stars (rating out of 5)
+      ImGui::SetCursorScreenPos(ImVec2(cx + 12.0f, cy + 68.0f));
+      DrawStars((float)hired->rating, 5.0f, C32(kAccent));
+
+      // Weekly wage
+      char wageBuf[32];
+      snprintf(wageBuf, sizeof(wageBuf), "£%d/wk", hired->weeklywage);
+      PushMgrFont(g_ManagerFontSmall);
+      ImVec2 wageSize = ImGui::CalcTextSize(wageBuf);
+      dl->AddText(ImVec2(cx + cardW - wageSize.x - 12.0f, cy + 68.0f), kColWage, wageBuf);
+      PopMgrFont(g_ManagerFontSmall);
+
+      // Fire button
+      char fireBtnId[32];
+      snprintf(fireBtnId, sizeof(fireBtnId), "Fire##staff_%d", hired->id);
+      float btnW = 72.0f, btnH = 24.0f;
+      ImVec2 btnPos(cx + cardW - btnW - 12.0f, cy + 10.0f);
+      ImGui::SetCursorScreenPos(btnPos);
+      ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(160,  40,  40, 200));
+      ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(200,  60,  60, 230));
+      ImGui::PushStyleColor(ImGuiCol_ButtonActive,  IM_COL32(120,  20,  20, 255));
+      ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
+      if (ImGui::Button(fireBtnId, ImVec2(btnW, btnH))) {
+        FireStaff(g_CareerHub.managerId, hired->id);
+      }
+      ImGui::PopStyleVar();
+      ImGui::PopStyleColor(3);
+    } else {
+      // No staff — show "Hire <Role>" button centred in the card
+      char hireBtnId[64];
+      snprintf(hireBtnId, sizeof(hireBtnId), "  +  Hire %s  ##hire_%d", role, ri);
+      float btnW = 180.0f, btnH = 32.0f;
+      ImVec2 btnPos(cx + (cardW - btnW) * 0.5f, cy + (kCardH - btnH) * 0.5f);
+      ImGui::SetCursorScreenPos(btnPos);
+      ImGui::PushStyleColor(ImGuiCol_Button,        C32(kAccent));
+      ImGui::PushStyleColor(ImGuiCol_ButtonHovered, C32(kAccentH));
+      ImGui::PushStyleColor(ImGuiCol_ButtonActive,  C32(kAccentA));
+      ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
+      if (ImGui::Button(hireBtnId, ImVec2(btnW, btnH))) {
+        s_staffMarketRole   = role;
+        s_staffMarketLoaded = false;
+        NavPush(PAGE_STAFF_MARKET);
+      }
+      ImGui::PopStyleVar();
+      ImGui::PopStyleColor(3);
+    }
+
+    // Advance cursor for next card
+    cy += kCardH + kSpacing;
+    ImGui::SetCursorScreenPos(ImVec2(cx, cy));
+  }
+
+  ImGui::Dummy(ImVec2(0, 8.0f));
+  ImGui::EndChild();
+}
+
+// ---- DrawStaffMarketPage ------------------------------------------------
+
+static void DrawStaffMarketPage(float w, float h) {
+  const float kPad      = 14.0f;
+  const float kRowH     = 70.0f;
+  const float kSpacing  = 8.0f;
+  const ImU32 kColWhite = IM_COL32(255, 255, 255, 230);
+  const ImU32 kColSub   = IM_COL32(160, 175, 210, 200);
+  const ImU32 kColWage  = IM_COL32(120, 220, 130, 230);
+
+  if (!s_staffMarketLoaded) {
+    LoadStaffMarket(g_CareerHub.managerId, s_staffMarketRole);
+  }
+
+  float cw = w - kPad * 2.0f;
+  ImGui::SetCursorPos(ImVec2(kPad, 8.0f));
+
+  // Header: back button + title
+  if (ImGui::Button("< Back")) {
+    NavBack();
+    return;
+  }
+  ImGui::SameLine();
+  PushMgrFont(g_ManagerFontBold);
+  std::string title = "Staff Market  " + s_staffMarketRole;
+  ImGui::TextUnformatted(title.c_str());
+  PopMgrFont(g_ManagerFontBold);
+  ImGui::Spacing();
+
+  if (s_staffMarketList.empty()) {
+    ImGui::SetCursorPos(ImVec2(kPad, 80.0f));
+    ImGui::TextUnformatted("No available staff for this role.");
+    return;
+  }
+
+  ImGui::SetCursorPos(ImVec2(kPad, ImGui::GetCursorPos().y));
+  ImGui::BeginChild("##market_scroll", ImVec2(cw, h - 80.0f), false,
+                    ImGuiWindowFlags_NoScrollbar);
+
+  ImDrawList *dl = ImGui::GetWindowDrawList();
+  float cx = ImGui::GetCursorScreenPos().x;
+  float cy = ImGui::GetCursorScreenPos().y;
+  float cardW = cw;
+
+  for (int i = 0; i < (int)s_staffMarketList.size(); i++) {
+    const StaffMarketEntry &e = s_staffMarketList[i];
+
+    ImVec2 cMin(cx, cy);
+    ImVec2 cMax(cx + cardW, cy + kRowH);
+    ImU32 rowBg = (i % 2 == 0) ? C32(kBgCard) : C32(kBgCardAlt);
+    dl->AddRectFilled(cMin, cMax, rowBg, 6.0f);
+    dl->AddRect(cMin, cMax, C32(kBorder), 6.0f, 0, 1.0f);
+
+    // Name
+    std::string fullName = e.firstName + " " + e.lastName;
+    PushMgrFont(g_ManagerFontBold);
+    dl->AddText(ImVec2(cx + 12.0f, cy + 8.0f), kColWhite, fullName.c_str());
+    PopMgrFont(g_ManagerFontBold);
+
+    // Sub: age · nationality
+    char subBuf[64];
+    snprintf(subBuf, sizeof(subBuf), "%d yrs  ·  %s", e.age, e.nationality.c_str());
+    PushMgrFont(g_ManagerFontSmall);
+    dl->AddText(ImVec2(cx + 12.0f, cy + 28.0f), kColSub, subBuf);
+    PopMgrFont(g_ManagerFontSmall);
+
+    // Stars
+    ImGui::SetCursorScreenPos(ImVec2(cx + 12.0f, cy + 46.0f));
+    DrawStars((float)e.rating, 5.0f, C32(kAccent));
+
+    // Wage
+    char wageBuf[32];
+    snprintf(wageBuf, sizeof(wageBuf), "£%d/wk", e.weeklywage);
+    PushMgrFont(g_ManagerFontSmall);
+    ImVec2 wageSize = ImGui::CalcTextSize(wageBuf);
+    dl->AddText(ImVec2(cx + cardW - wageSize.x - 100.0f, cy + 46.0f), kColWage, wageBuf);
+    PopMgrFont(g_ManagerFontSmall);
+
+    // Hire button
+    char hireBtnId[32];
+    snprintf(hireBtnId, sizeof(hireBtnId), "Hire##mkt_%d", e.id);
+    float btnW = 80.0f, btnH = 28.0f;
+    ImGui::SetCursorScreenPos(ImVec2(cx + cardW - btnW - 12.0f, cy + (kRowH - btnH) * 0.5f));
+    ImGui::PushStyleColor(ImGuiCol_Button,        C32(kAccent));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, C32(kAccentH));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  C32(kAccentA));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
+    if (ImGui::Button(hireBtnId, ImVec2(btnW, btnH))) {
+      HireStaff(g_CareerHub.managerId, e.id);
+      s_staffMarketLoaded = false; // refresh market list
+      NavBack();
+    }
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor(3);
+
+    cy += kRowH + kSpacing;
+    ImGui::SetCursorScreenPos(ImVec2(cx, cy));
+  }
+
+  ImGui::Dummy(ImVec2(0, 8.0f));
+  ImGui::EndChild();
+}
+
 // ---- DrawComingSoonPage -------------------------------------------------
 
 static void DrawComingSoonPage(float w, float h, const char *section) {
@@ -5666,6 +6028,8 @@ static void DrawWorkspace(float contentW, float workH) {
     }
     if (s_prevPage == PAGE_COMPETITIONS)
       s_compInit = false;
+    if (s_prevPage == PAGE_STAFF_MARKET)
+      s_staffMarketLoaded = false;
   }
   s_prevPage = g_activePage;
 
@@ -5677,6 +6041,8 @@ static void DrawWorkspace(float contentW, float workH) {
     case PAGE_SCHEDULE:      DrawSchedulePage(contentW, workH);      break;
     case PAGE_COMPETITIONS:  DrawCompetitionsPage(contentW, workH);  break;
     case PAGE_PLAYER_DETAIL: DrawPlayerDetailPage(contentW, workH);  break;
+    case PAGE_STAFF:         DrawStaffPage(contentW, workH);         break;
+    case PAGE_STAFF_MARKET:  DrawStaffMarketPage(contentW, workH);   break;
     default:
       DrawComingSoonPage(contentW, workH, kPageNames[g_activePage]);
       break;
@@ -5910,6 +6276,9 @@ static void DrawSearchDropdown() {
     s_detailPlayerOverride       = op;
     s_detailOverrideActive       = true;
     s_playerDetailId             = sr.id;
+    s_detailClubName             = sr.clubName;
+    s_detailClubLogo             = sr.clubLogoPath;
+    s_detailClubShortName        = sr.clubShortName;
     // Clear search
     s_searchBuf[0]   = '\0';
     s_searchActive   = false;
