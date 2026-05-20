@@ -4093,6 +4093,44 @@ static void DrawPlayerDetailPage(float w, float h) {
   EndModernCard(); // ##pldstats
 }
 
+// ---- DrawInboxPage helpers -----------------------------------------------
+
+// Returns an image path to use as the message avatar, or "" for the fallback circle.
+static std::string GetInboxAvatarPath(const std::string &senderType) {
+  if (senderType == "board")
+    return g_CareerHub.club.logoPath;
+  if (senderType == "competition") {
+    int lid = g_CareerHub.club.leagueId;
+    for (const auto &f : g_CareerHub.fixtures)
+      if (f.leagueId == lid && !f.leagueLogo.empty())
+        return f.leagueLogo;
+  }
+  return "";
+}
+
+// Draw a square avatar: image if available, coloured circle+initial otherwise.
+// cx/cy = centre, r = half-size (image drawn as 2r x 2r square).
+static void DrawInboxAvatar(ImDrawList *dl, float cx, float cy, float r,
+                            const std::string &senderType, ImFont *font, float fsIni) {
+  std::string path = GetInboxAvatarPath(senderType);
+  GLuint tex = path.empty() ? 0 : LoadBadgeTex(path);
+  if (tex) {
+    dl->AddImageRounded((ImTextureID)(intptr_t)tex,
+                        ImVec2(cx - r, cy - r), ImVec2(cx + r, cy + r),
+                        ImVec2(0,0), ImVec2(1,1),
+                        IM_COL32(255,255,255,255), r * 0.25f);
+  } else {
+    dl->AddCircleFilled(ImVec2(cx, cy), r, SenderTypeColor(senderType));
+    if (font && !senderType.empty()) {
+      char ini[2] = { (char)::toupper((unsigned char)senderType[0]), 0 };
+      ImVec2 isz = font->CalcTextSizeA(fsIni, FLT_MAX, 0.0f, ini);
+      dl->AddText(font, fsIni,
+                  ImVec2(cx - isz.x*0.5f, cy - isz.y*0.5f),
+                  IM_COL32(255,255,255,230), ini);
+    }
+  }
+}
+
 // ---- DrawInboxPage ------------------------------------------------------
 
 static void DrawInboxPage(float w, float h) {
@@ -4217,16 +4255,9 @@ static void DrawInboxPage(float w, float h) {
         ldl->AddCircleFilled(ImVec2(rP.x + 5.0f, rP.y + kRowH * 0.5f),
                              5.0f, IM_COL32(kAR, kAG, kAB, 240));
 
-      // Avatar circle + initial
+      // Avatar
       float avCX = rP.x + kLPad + kAvR, avCY = rP.y + kRowH * 0.5f;
-      ldl->AddCircleFilled(ImVec2(avCX, avCY), kAvR, SenderTypeColor(msg.senderType));
-      if (g_ManagerFontSmall && !msg.senderType.empty()) {
-        char ini[2] = { (char)::toupper((unsigned char)msg.senderType[0]), 0 };
-        ImVec2 isz = g_ManagerFontSmall->CalcTextSizeA(kFsIni, FLT_MAX, 0.0f, ini);
-        ldl->AddText(g_ManagerFontSmall, kFsIni,
-                     ImVec2(avCX - isz.x*0.5f, avCY - isz.y*0.5f),
-                     IM_COL32(255,255,255,230), ini);
-      }
+      DrawInboxAvatar(ldl, avCX, avCY, kAvR, msg.senderType, g_ManagerFontSmall, kFsIni);
 
       // Text area (sender name + subject)
       float tx  = rP.x + kLPad + kAvR*2.0f + 12.0f;
@@ -4326,15 +4357,8 @@ static void DrawInboxPage(float w, float h) {
         const float kAvDiam = kAvR2 * 2.0f;
         ImVec2 avP = ImGui::GetCursorScreenPos();
 
-        rdl->AddCircleFilled(ImVec2(avP.x + kAvR2, avP.y + kAvR2),
-                             kAvR2, SenderTypeColor(msg.senderType));
-        if (g_ManagerFontBold && !msg.senderType.empty()) {
-          char ini[2] = { (char)::toupper((unsigned char)msg.senderType[0]), 0 };
-          ImVec2 isz = g_ManagerFontBold->CalcTextSizeA(kFsIni2, FLT_MAX, 0.0f, ini);
-          rdl->AddText(g_ManagerFontBold, kFsIni2,
-                       ImVec2(avP.x + kAvR2 - isz.x*0.5f, avP.y + kAvR2 - isz.y*0.5f),
-                       IM_COL32(255,255,255,230), ini);
-        }
+        DrawInboxAvatar(rdl, avP.x + kAvR2, avP.y + kAvR2, kAvR2,
+                        msg.senderType, g_ManagerFontBold, kFsIni2);
 
         // Reserve avatar footprint then place text beside it
         ImGui::Dummy(ImVec2(kAvDiam + 14.0f, kAvDiam));
