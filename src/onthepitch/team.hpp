@@ -38,6 +38,11 @@ class Team {
     void GetAllPlayers(std::vector<Player*> &allPlayers) { allPlayers.insert(allPlayers.end(), players.begin(), players.end()); }
     void GetActivePlayers(std::vector<Player*> &activePlayers);
     int GetActivePlayerCount() const { return activePlayerCount; }
+    int GetSubsMade()         const { return subsMade; }
+
+    // Make a mid-match substitution. offIdx is a players[] index that is active (0-10);
+    // onIdx is a players[] index on the bench (11+). Call under matchRenderMutex while paused.
+    bool SubstitutePlayer(int offIdx, int onIdx);
 
     unsigned int GetHumanGamerCount() const { return humanGamers.size(); }
     void AddHumanGamer(IHIDevice *hid, e_PlayerColor color);
@@ -101,6 +106,7 @@ class Team {
 
     std::vector<Player*> players;
     int activePlayerCount;
+    int subsMade = 0;
 
     boost::intrusive_ptr<Node> teamNode;
     boost::intrusive_ptr<Node> playerNode;

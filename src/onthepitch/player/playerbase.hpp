@@ -28,6 +28,8 @@ class PlayerBase {
     virtual void Activate(boost::intrusive_ptr<Node> humanoidSourceNode, boost::intrusive_ptr<Node> fullbodySourceNode, std::map<Vector3, Vector3> &colorCoords, boost::intrusive_ptr < Resource<Surface> > kit, boost::shared_ptr<AnimCollection> animCollection) = 0;
     // go back to bench/take a shower
     virtual void Deactivate();
+    // hide without destroying resources — safe to call mid-match from game thread
+    void SetBench();
 
     void SetKit(boost::intrusive_ptr < Resource<Surface> > newKit) { humanoid->SetKit(newKit); }
 

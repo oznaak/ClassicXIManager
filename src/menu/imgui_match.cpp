@@ -32,6 +32,8 @@ bool g_ImGuiIngamePauseMenuActive = false;
 // Written by GL render thread on button click, read+cleared by IngamePage::Process() on main thread.
 int  g_ImGuiPausePendingAction    = 0;
 
+PendingSub g_PendingSub;
+
 // ---------------------------------------------------------------------------
 // Per-match cached state
 
@@ -346,6 +348,12 @@ struct PausePlayer {
   float ny = 0.f;   // [0,1] screen y — 0=top(attack), 1=bottom(GK)
 };
 
+struct BenchPlayer {
+  std::string lastName;
+  std::string role;
+  int         playersIdx; // index in team->GetAllPlayers()
+};
+
 static bool                      s_pauseInitialized   = false;
 static std::string               s_pauseTeamName;
 static std::vector<PausePlayer>  s_pausePlayers;
@@ -356,12 +364,26 @@ static std::vector<PausePlayer>  s_pauseAwayPlayers;
 static ImU32                     s_pauseOppColor       = IM_COL32(0, 40, 220, 255);
 static ImU32                     s_pauseOppTextColor   = IM_COL32(255, 255, 255, 255);
 
+// Substitution panel state
+static std::vector<BenchPlayer>  s_benchPlayers;
+static int                       s_subUserTeamIdx   = 0;
+static bool                      s_subPanelActive   = false;
+static int                       s_subOffSelected   = -1; // players[] index of starter going off
+static int                       s_subOnSelected    = -1; // players[] index of bench player coming on
+static int                       s_subsMadeCount    = 0;  // UI-side counter (mirrors Team::subsMade)
+
 static void ResetPauseCache() {
   s_pauseInitialized = false;
   s_pauseTeamName.clear();
   s_pausePlayers.clear();
   s_pauseAwayTeamName.clear();
   s_pauseAwayPlayers.clear();
+  s_benchPlayers.clear();
+  s_subPanelActive  = false;
+  s_subOffSelected  = -1;
+  s_subOnSelected   = -1;
+  s_subsMadeCount   = 0;
+  g_PendingSub.pending = false;
 }
 
 static float Clamp01(float v) { return v < 0.f ? 0.f : (v > 1.f ? 1.f : v); }
@@ -496,6 +518,234 @@ static void DrawFormationPanel(
   }
 }
 
+static void DrawSubstitutionPanel(float px, float py, float pw, float ph) {
+  const ImU32 kBgPanel   = IM_COL32(14, 20, 38, 250);
+  const ImU32 kBgRow     = IM_COL32(22, 32, 60, 255);
+  const ImU32 kBgRowSel  = s_pauseUserColor;
+  const ImU32 kHeader    = IM_COL32(180, 200, 240, 200);
+  const ImU32 kText      = IM_COL32(220, 230, 255, 255);
+  const ImU32 kDim       = IM_COL32(120, 140, 180, 160);
+  const ImU32 kBtnConf   = IM_COL32(50, 200, 80, 255);
+  const ImU32 kBtnConfDis= IM_COL32(40, 60, 40, 200);
+  const ImU32 kBtnCancel = IM_COL32(180, 50, 50, 255);
+  const float kRound     = 6.0f;
+  const float kRowH      = 34.0f;
+  const float kFooterH   = 56.0f;
+  const float kHeaderH   = 42.0f;
+  const float kColW      = (pw - 2.0f) * 0.5f;
+  const float kListH     = ph - kHeaderH - kFooterH;
+
+  ImGui::SetNextWindowPos(ImVec2(px, py), ImGuiCond_Always);
+  ImGui::SetNextWindowSize(ImVec2(pw, ph), ImGuiCond_Always);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,  ImVec2(0, 0));
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f);
+  ImGui::PushStyleColor(ImGuiCol_WindowBg, kBgPanel);
+  ImGui::Begin("##sub_panel", nullptr,
+    ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+    ImGuiWindowFlags_NoMove     | ImGuiWindowFlags_NoScrollbar |
+    ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav);
+
+  ImDrawList *dl    = ImGui::GetWindowDrawList();
+  ImVec2      origin= ImGui::GetWindowPos();
+
+  // ---- Header ---------------------------------------------------------------
+  int subsLeft = 3 - s_subsMadeCount;
+  char hdr[64];
+  snprintf(hdr, sizeof(hdr), "SUBSTITUTIONS  —  %d / 3 used", s_subsMadeCount);
+  ImVec2 hMin = ImVec2(origin.x, origin.y);
+  ImVec2 hMax = ImVec2(origin.x + pw, origin.y + kHeaderH);
+  dl->AddRectFilled(hMin, hMax, IM_COL32(18, 28, 52, 255));
+  AddTextCentered(dl, g_ManagerFontBold, 15.0f, hMin, hMax, kHeader, hdr);
+  // Separator
+  dl->AddLine(ImVec2(origin.x, origin.y + kHeaderH),
+              ImVec2(origin.x + pw, origin.y + kHeaderH),
+              IM_COL32(50, 65, 110, 200), 1.0f);
+
+  // ---- Two-column list area -------------------------------------------------
+  float listTop = origin.y + kHeaderH;
+
+  // Column headers
+  const float kColHdrH = 26.0f;
+  dl->AddRectFilled(ImVec2(origin.x,          listTop),
+                    ImVec2(origin.x + kColW,   listTop + kColHdrH),
+                    IM_COL32(20, 32, 60, 255));
+  dl->AddRectFilled(ImVec2(origin.x + kColW + 2.0f, listTop),
+                    ImVec2(origin.x + pw,              listTop + kColHdrH),
+                    IM_COL32(20, 32, 60, 255));
+  AddTextCentered(dl, g_ManagerFontBold, 13.0f,
+                  ImVec2(origin.x, listTop), ImVec2(origin.x + kColW, listTop + kColHdrH),
+                  kDim, "ON PITCH");
+  AddTextCentered(dl, g_ManagerFontBold, 13.0f,
+                  ImVec2(origin.x + kColW + 2.0f, listTop),
+                  ImVec2(origin.x + pw, listTop + kColHdrH),
+                  kDim, "BENCH");
+
+  listTop += kColHdrH;
+  const float scrollAreaH = kListH - kColHdrH;
+
+  // Left scroll (starters)
+  ImGui::SetNextWindowPos(ImVec2(origin.x, listTop), ImGuiCond_Always);
+  ImGui::SetCursorScreenPos(ImVec2(origin.x, listTop));
+  ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(18, 28, 52, 255));
+  ImGui::BeginChild("##sub_starters", ImVec2(kColW, scrollAreaH), false, 0);
+  {
+    ImDrawList *ld = ImGui::GetWindowDrawList();
+    ImVec2 cp = ImGui::GetWindowPos();
+    for (int i = 0; i < (int)s_pausePlayers.size(); i++) {
+      const PausePlayer &pp = s_pausePlayers[i];
+      bool selected = (s_subOffSelected == i);
+      ImVec2 rMin = ImVec2(cp.x, cp.y + i * kRowH);
+      ImVec2 rMax = ImVec2(cp.x + kColW, rMin.y + kRowH - 1.0f);
+      ImGui::SetCursorScreenPos(rMin);
+      ImGui::PushID(10000 + i);
+      if (ImGui::InvisibleButton("##off", ImVec2(kColW, kRowH - 1.0f)))
+        s_subOffSelected = (s_subOffSelected == i) ? -1 : i;
+      ImGui::PopID();
+      ld->AddRectFilled(rMin, rMax, selected ? kBgRowSel : kBgRow, 3.0f);
+      // Role badge
+      ImVec2 badgeMin = ImVec2(rMin.x + 6, rMin.y + (kRowH - 18.0f) * 0.5f);
+      ImVec2 badgeMax = ImVec2(badgeMin.x + 32, badgeMin.y + 18.0f);
+      ld->AddRectFilled(badgeMin, badgeMax, IM_COL32(40, 60, 100, 200), 3.0f);
+      AddTextCentered(ld, g_ManagerFontSmall, 11.0f, badgeMin, badgeMax,
+                      IM_COL32(180, 200, 240, 255), pp.role.c_str());
+      // Name
+      if (g_ManagerFontSmall)
+        ld->AddText(g_ManagerFontSmall, 13.0f,
+                    ImVec2(badgeMax.x + 6, rMin.y + (kRowH - g_ManagerFontSmall->FontSize) * 0.5f),
+                    selected ? IM_COL32(15, 15, 15, 255) : kText, pp.lastName.c_str());
+      // Divider
+      ld->AddLine(ImVec2(rMin.x, rMax.y), ImVec2(rMax.x, rMax.y),
+                  IM_COL32(30, 45, 80, 160), 1.0f);
+    }
+    ImGui::Dummy(ImVec2(kColW, s_pausePlayers.size() * kRowH));
+  }
+  ImGui::EndChild();
+  ImGui::PopStyleColor();
+
+  // Vertical divider between columns
+  dl->AddLine(ImVec2(origin.x + kColW, listTop),
+              ImVec2(origin.x + kColW, listTop + scrollAreaH),
+              IM_COL32(50, 65, 110, 200), 2.0f);
+
+  // Right scroll (bench)
+  ImGui::SetCursorScreenPos(ImVec2(origin.x + kColW + 2.0f, listTop));
+  ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(18, 28, 52, 255));
+  ImGui::BeginChild("##sub_bench", ImVec2(kColW - 2.0f, scrollAreaH), false, 0);
+  {
+    ImDrawList *rd = ImGui::GetWindowDrawList();
+    ImVec2 cp = ImGui::GetWindowPos();
+    for (int i = 0; i < (int)s_benchPlayers.size(); i++) {
+      const BenchPlayer &bp = s_benchPlayers[i];
+      bool selected = (s_subOnSelected == bp.playersIdx);
+      ImVec2 rMin = ImVec2(cp.x, cp.y + i * kRowH);
+      ImVec2 rMax = ImVec2(cp.x + kColW - 2.0f, rMin.y + kRowH - 1.0f);
+      ImGui::SetCursorScreenPos(rMin);
+      ImGui::PushID(20000 + i);
+      if (ImGui::InvisibleButton("##on", ImVec2(kColW - 2.0f, kRowH - 1.0f)))
+        s_subOnSelected = (s_subOnSelected == bp.playersIdx) ? -1 : bp.playersIdx;
+      ImGui::PopID();
+      rd->AddRectFilled(rMin, rMax, selected ? kBgRowSel : kBgRow, 3.0f);
+      ImVec2 badgeMin = ImVec2(rMin.x + 6, rMin.y + (kRowH - 18.0f) * 0.5f);
+      ImVec2 badgeMax = ImVec2(badgeMin.x + 32, badgeMin.y + 18.0f);
+      rd->AddRectFilled(badgeMin, badgeMax, IM_COL32(40, 60, 100, 200), 3.0f);
+      AddTextCentered(rd, g_ManagerFontSmall, 11.0f, badgeMin, badgeMax,
+                      IM_COL32(180, 200, 240, 255), bp.role.c_str());
+      if (g_ManagerFontSmall)
+        rd->AddText(g_ManagerFontSmall, 13.0f,
+                    ImVec2(badgeMax.x + 6, rMin.y + (kRowH - g_ManagerFontSmall->FontSize) * 0.5f),
+                    selected ? IM_COL32(15, 15, 15, 255) : kText, bp.lastName.c_str());
+      rd->AddLine(ImVec2(rMin.x, rMax.y), ImVec2(rMax.x, rMax.y),
+                  IM_COL32(30, 45, 80, 160), 1.0f);
+    }
+    ImGui::Dummy(ImVec2(kColW - 2.0f, s_benchPlayers.size() * kRowH));
+  }
+  ImGui::EndChild();
+  ImGui::PopStyleColor();
+
+  // ---- Footer: sub summary + confirm/cancel ---------------------------------
+  float fY = origin.y + kHeaderH + kListH;
+  dl->AddRectFilled(ImVec2(origin.x, fY), ImVec2(origin.x + pw, fY + kFooterH),
+                    IM_COL32(12, 18, 32, 255));
+  dl->AddLine(ImVec2(origin.x, fY), ImVec2(origin.x + pw, fY),
+              IM_COL32(50, 65, 110, 200), 1.0f);
+
+  // Summary text
+  if (s_subOffSelected >= 0 && s_subOffSelected < (int)s_pausePlayers.size() &&
+      s_subOnSelected  >= 0) {
+    // Find bench player name for s_subOnSelected
+    std::string onName;
+    for (const auto &bp : s_benchPlayers)
+      if (bp.playersIdx == s_subOnSelected) { onName = bp.lastName; break; }
+    char summary[128];
+    snprintf(summary, sizeof(summary), "%s  →  %s",
+             s_pausePlayers[s_subOffSelected].lastName.c_str(), onName.c_str());
+    float tY = fY + (kFooterH - 14.0f) * 0.5f;
+    if (g_ManagerFontSmall)
+      dl->AddText(g_ManagerFontSmall, 13.0f, ImVec2(origin.x + 16.0f, tY),
+                  kDim, summary);
+  }
+
+  // Buttons
+  const float btnW  = 110.0f;
+  const float btnH  = 30.0f;
+  const float btnY  = fY + (kFooterH - btnH) * 0.5f;
+  bool canConfirm   = (s_subOffSelected >= 0 && s_subOnSelected >= 0 && subsLeft > 0);
+
+  // Confirm
+  ImVec2 confMin = ImVec2(origin.x + pw - btnW * 2.0f - 24.0f, btnY);
+  ImVec2 confMax = ImVec2(confMin.x + btnW, btnY + btnH);
+  ImGui::SetCursorScreenPos(confMin);
+  ImGui::PushID(30001);
+  bool confClicked = ImGui::InvisibleButton("##sub_confirm", ImVec2(btnW, btnH)) && canConfirm;
+  ImGui::PopID();
+  dl->AddRectFilled(confMin, confMax, canConfirm ? kBtnConf : kBtnConfDis, kRound);
+  AddTextCentered(dl, g_ManagerFontBold, 13.0f, confMin, confMax,
+                  IM_COL32(255, 255, 255, canConfirm ? 255 : 100), "CONFIRM");
+  if (confClicked) {
+    g_PendingSub.pending  = true;
+    g_PendingSub.teamIdx  = s_subUserTeamIdx;
+    g_PendingSub.offIdx   = s_subOffSelected;
+    g_PendingSub.onIdx    = s_subOnSelected;
+    // Remove the confirmed starter from the display list and add the bench player
+    // so the UI updates immediately for a 2nd sub selection
+    BenchPlayer incoming;
+    for (auto it = s_benchPlayers.begin(); it != s_benchPlayers.end(); ++it) {
+      if (it->playersIdx == s_subOnSelected) { incoming = *it; s_benchPlayers.erase(it); break; }
+    }
+    if (s_subOffSelected < (int)s_pausePlayers.size())
+      s_pausePlayers.erase(s_pausePlayers.begin() + s_subOffSelected);
+    // Add incoming player back as a starter entry (with their role)
+    PausePlayer newPP;
+    newPP.lastName = incoming.lastName;
+    newPP.role     = incoming.role;
+    newPP.nx = 0.5f; newPP.ny = 0.5f; // approximate centre — formation panel will be stale anyway
+    s_pausePlayers.push_back(newPP);
+    s_subsMadeCount++;
+    s_subOffSelected = -1;
+    s_subOnSelected  = -1;
+  }
+
+  // Cancel
+  ImVec2 cancMin = ImVec2(origin.x + pw - btnW - 8.0f, btnY);
+  ImVec2 cancMax = ImVec2(cancMin.x + btnW, btnY + btnH);
+  ImGui::SetCursorScreenPos(cancMin);
+  ImGui::PushID(30002);
+  bool cancClicked = ImGui::InvisibleButton("##sub_cancel", ImVec2(btnW, btnH));
+  ImGui::PopID();
+  dl->AddRectFilled(cancMin, cancMax, kBtnCancel, kRound);
+  AddTextCentered(dl, g_ManagerFontBold, 13.0f, cancMin, cancMax,
+                  IM_COL32(255, 255, 255, 255), "< BACK");
+  if (cancClicked) {
+    s_subOffSelected = -1;
+    s_subOnSelected  = -1;
+    s_subPanelActive = false;
+  }
+
+  ImGui::End();
+  ImGui::PopStyleColor();
+  ImGui::PopStyleVar(2);
+}
+
 void RenderImGuiMatchPauseOverlay() {
   if (!g_ImGuiIngamePauseMenuActive) return;
   if (g_ImGuiPausePendingAction != 0) return;
@@ -527,6 +777,19 @@ void RenderImGuiMatchPauseOverlay() {
           int n = std::min(td->GetPlayerNum(), 11);
           for (int i = 0; i < n; i++)
             s_pausePlayers.push_back(MakePausePlayer(td, i));
+          // Bench players (index 11+)
+          s_subUserTeamIdx = teamIdx;
+          int total = td->GetPlayerNum();
+          for (int i = 11; i < total; i++) {
+            BenchPlayer bp;
+            PlayerData *pd = td->GetPlayerData(i);
+            bp.lastName   = pd->GetLastName();
+            // Formation entries only exist for indices 0-10; derive role from PlayerData
+            const std::vector<e_PlayerRole> &roles = pd->GetRoles();
+            bp.role = roles.empty() ? "SUB" : GetRoleName(roles[0]);
+            bp.playersIdx = i;
+            s_benchPlayers.push_back(bp);
+          }
         }
 
         // Opponent team
@@ -562,6 +825,12 @@ void RenderImGuiMatchPauseOverlay() {
   const float popH = std::min(620.0f,  io.DisplaySize.y - 60.0f);
   const float popX = (io.DisplaySize.x - popW) * 0.5f;
   const float popY = (io.DisplaySize.y - popH) * 0.5f;
+
+  // Sub panel replaces the normal pause layout while active
+  if (s_subPanelActive) {
+    DrawSubstitutionPanel(popX, popY, popW, popH);
+    return;
+  }
 
   // Three-panel widths: left (user formation) | mid (tiles) | right (opp formation)
   const float leftW  = std::floor(popW * 0.265f);
@@ -606,8 +875,13 @@ void RenderImGuiMatchPauseOverlay() {
     ld->AddRectFilled(btnMin, btnMax,
                       gpHov ? IM_COL32(255, 255, 255, 200) : IM_COL32(30, 44, 80, 220));
     ImU32 gpTxt = gpHov ? IM_COL32(15, 15, 15, 255) : IM_COL32(180, 200, 240, 255);
-    AddTextCentered(ld, g_ManagerFontBold, 14.0f, btnMin, btnMax, gpTxt, "GAME PLAN");
-    if (ImGui::IsItemClicked()) g_ImGuiPausePendingAction = 2;
+    const char *subBtnLabel = s_subPanelActive ? "< BACK" : "SUBSTITUTIONS";
+    AddTextCentered(ld, g_ManagerFontBold, 14.0f, btnMin, btnMax, gpTxt, subBtnLabel);
+    if (ImGui::IsItemClicked()) {
+      s_subPanelActive = !s_subPanelActive;
+      s_subOffSelected = -1;
+      s_subOnSelected  = -1;
+    }
   }
   ImGui::EndChild();
   ImGui::PopStyleColor();

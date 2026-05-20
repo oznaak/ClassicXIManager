@@ -122,6 +122,9 @@ class Match {
 
     boost::shared_ptr<AnimCollection> GetAnimCollection() { return anims; }
 
+    boost::intrusive_ptr<Node>  GetFullbodyNode() { return fullbodyNode; }
+    std::map<Vector3, Vector3> &GetColorCoords()  { return colorCoords;  }
+
     const MentalImage *GetMentalImage(int history_ms);
     void UpdateLatestMentalImageBallPredictions();
 

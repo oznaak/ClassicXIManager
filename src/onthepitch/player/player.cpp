@@ -107,6 +107,51 @@ void Player::Activate(boost::intrusive_ptr<Node> humanoidSourceNode, boost::intr
   SetDynamicFormationEntry(GetFormationEntry());
 }
 
+void Player::ActivateBench(boost::intrusive_ptr<Node> humanoidSourceNode, boost::intrusive_ptr<Node> fullbodySourceNode, std::map<Vector3, Vector3> &colorCoords, boost::intrusive_ptr < Resource<Surface> > kit, boost::shared_ptr<AnimCollection> animCollection) {
+  assert(!isActive);
+
+  humanoid = new Humanoid(this, humanoidSourceNode, fullbodySourceNode, colorCoords, animCollection, GetTeam()->GetSceneNode(), kit, GetTeam()->GetID());
+
+  controller = new ElizaController(match);
+  CastController()->SetPlayer(this);
+  CastController()->LoadStrategies();
+
+  buf_nameCaptionShowCondition = false;
+  buf_debugCaptionShowCondition = false;
+  nameCaption = 0;
+  debugCaption = 0;
+
+  // hide immediately — no formation lookup needed (bench indices 11+ are out of range)
+  SetBench();
+}
+
+void Player::SetActive() {
+  assert(!isActive);
+  assert(humanoid); // must have been ActivateBench'd
+
+  isActive = true;
+
+  CastController()->Reset();
+  CastController()->LoadStrategies();
+
+  buf_nameCaptionShowCondition = false;
+  buf_debugCaptionShowCondition = false;
+  if (GetDebugMode() != e_DebugMode_Off) buf_nameCaptionShowCondition = true;
+  if (GetDebugMode() != e_DebugMode_Off) buf_debugCaptionShowCondition = true;
+
+  // Create captions — Put2D/Hide2D assert these exist for all active players.
+  nameCaption = new Gui2Caption(GetMenuTask()->GetWindowManager(), "game_player_name_" + int_to_str(id), 0, 0, 1, 2.0, playerData->GetLastName());
+  nameCaption->SetTransparency(0.3f);
+  GetMenuTask()->GetWindowManager()->GetRoot()->AddView(nameCaption);
+  debugCaption = new Gui2Caption(GetMenuTask()->GetWindowManager(), "game_player_debug_" + int_to_str(id), 0, 0, 1, 1.6, "debug");
+  GetMenuTask()->GetWindowManager()->GetRoot()->AddView(debugCaption);
+
+  // After std::swap in SubstitutePlayer, this player sits at a valid 0-10 formation index
+  FormationEntry fe = GetFormationEntry();
+  CastHumanoid()->ResetPosition(fe.position * 25 * Vector3(-team->GetSide(), -team->GetSide(), 0), Vector3(0));
+  SetDynamicFormationEntry(fe);
+}
+
 void Player::Deactivate() {
   ResetSituation(GetPosition());
 
@@ -458,7 +503,7 @@ void Player::Put2D() {
     nameCaption->SetCaption(fetchedbuf_nameCaption);
     nameCaption->Show();
   } else {
-    nameCaption->Hide();
+    if (nameCaption) nameCaption->Hide();
   }
 
   if (fetchedbuf_debugCaptionShowCondition) {
@@ -471,19 +516,13 @@ void Player::Put2D() {
     debugCaption->SetColor(fetchedbuf_debugCaptionColor);
     debugCaption->Show();
   } else {
-    debugCaption->Hide();
+    if (debugCaption) debugCaption->Hide();
   }
 }
 
 void Player::Hide2D() {
-  if (fetchedbuf_nameCaptionShowCondition) {
-    assert(nameCaption);
-    nameCaption->Hide();
-  }
-  if (fetchedbuf_debugCaptionShowCondition) {
-    assert(debugCaption);
-    debugCaption->Hide();
-  }
+  if (fetchedbuf_nameCaptionShowCondition && nameCaption) nameCaption->Hide();
+  if (fetchedbuf_debugCaptionShowCondition && debugCaption) debugCaption->Hide();
 }
 
 void Player::SendOff() {

@@ -55,6 +55,8 @@ PlayerBase::PlayerBase(Match *match, PlayerData *playerData) : match(match), pla
 PlayerBase::~PlayerBase() {
   if (Verbose()) printf("exiting playerbase.. ");
   if (isActive) Deactivate();
+  // bench players: ActivateBench created controller but Deactivate was never called
+  if (controller) { delete controller; controller = nullptr; }
   if (Verbose()) printf("deleting humanoid.. ");
   if (humanoid) delete humanoid;
   if (Verbose()) printf("done\n");
@@ -69,6 +71,12 @@ void PlayerBase::Deactivate() {
 
   if (externalController) externalController = 0;
   delete controller;
+  controller = nullptr;
+}
+
+void PlayerBase::SetBench() {
+  isActive = false;
+  if (humanoid) humanoid->Hide();
 }
 
 IController *PlayerBase::GetController() {

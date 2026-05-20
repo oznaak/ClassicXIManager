@@ -156,6 +156,10 @@ void Team::InitPlayers(boost::intrusive_ptr<Node> fullbodyNode, std::map<Vector3
       }
       kit = ResourceManagerPool::GetInstance().GetManager<Surface>(e_ResourceType_Surface)->Fetch(kitFilename);
       player->Activate(playerNode, fullbodyNode, colorCoords, kit, match->GetAnimCollection());
+    } else {
+      // pre-create humanoid for bench player on GL thread; hides immediately
+      // kit is whatever was set for the last starting player — acceptable for bench
+      player->ActivateBench(playerNode, fullbodyNode, colorCoords, kit, match->GetAnimCollection());
     }
   }
 
@@ -638,4 +642,26 @@ void Team::SetKitNumber(int num) {
   }
 
   kit = newKit;
+}
+
+bool Team::SubstitutePlayer(int offIdx, int onIdx) {
+  if (offIdx < 0 || offIdx >= (int)players.size()) return false;
+  if (onIdx  < 0 || onIdx  >= (int)players.size()) return false;
+  if (!players[offIdx]->IsActive())  return false;
+  if ( players[onIdx ]->IsActive())  return false;
+
+  // Deactivate outgoing player (hides humanoid, deletes controller, cleans captions)
+  players[offIdx]->Deactivate();
+
+  // Swap so the incoming player sits at offIdx — a valid formation-entry index (0–10).
+  // After the swap, GetFormationEntry() on the incoming player returns the correct slot.
+  std::swap(players[offIdx], players[onIdx]);
+
+  // Make the incoming player active — uses its pre-created humanoid, no GL work on this thread.
+  players[offIdx]->SetActive();
+
+  subsMade++;
+  printf("[SUB] Team %d: players[%d] off → players[%d] on (sub #%d)\n",
+         id, offIdx, onIdx, subsMade);
+  return true;
 }

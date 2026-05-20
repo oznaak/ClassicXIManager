@@ -35,8 +35,12 @@ class Player : public PlayerBase {
     int GetTeamID() const;
     Team *GetTeam();
 
-    // get ready for some action
+    // get ready for some action (starting XI — includes formation-entry position lookup)
     virtual void Activate(boost::intrusive_ptr<Node> humanoidSourceNode, boost::intrusive_ptr<Node> fullbodySourceNode, std::map<Vector3, Vector3> &colorCoords, boost::intrusive_ptr < Resource<Surface> > kit, boost::shared_ptr<AnimCollection> animCollection);
+    // pre-create humanoid for bench player during InitPlayers (no formation lookup, immediately hidden)
+    void ActivateBench(boost::intrusive_ptr<Node> humanoidSourceNode, boost::intrusive_ptr<Node> fullbodySourceNode, std::map<Vector3, Vector3> &colorCoords, boost::intrusive_ptr < Resource<Surface> > kit, boost::shared_ptr<AnimCollection> animCollection);
+    // reactivate a pre-built bench player after a substitution (must be called after std::swap in players[])
+    void SetActive();
     // go back to bench/take a shower
     virtual void Deactivate();
 
