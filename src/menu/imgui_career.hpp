@@ -108,7 +108,9 @@ struct CareerHubState {
 
   struct ScoutQueueEntry {
     int         playerId    = 0;
-    std::string firstName, lastName, clubName;
+    std::string firstName, lastName;
+    std::string role, age;
+    std::string clubName, clubLogoPath, clubShortName;
     std::string dueDate;    // YYYY-MM-DD when report arrives
     int         scoutRating = 1;
   };
@@ -116,7 +118,9 @@ struct CareerHubState {
 
   struct ScoutReport {
     int         playerId  = 0;
-    std::string firstName, lastName, clubName;
+    std::string firstName, lastName;
+    std::string role, age;
+    std::string clubName, clubLogoPath, clubShortName;
     float       revealPct = 0.0f; // 0.0-1.0 fraction of stats revealed
   };
   std::vector<ScoutReport> scoutReports;

@@ -926,45 +926,63 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
     delete rr;
   }
 
-  // Load scout queue (in-progress scouting)
+  // Load scout queue (in-progress scouting) — join players + teams for richer display
   scoutQueue.clear();
   {
     std::stringstream q;
-    q << "SELECT player_id, firstname, lastname, club_name, due_date, scout_rating"
-      << " FROM scout_queue WHERE manager_id=" << mgrId
-      << " ORDER BY due_date ASC;";
+    q << "SELECT sq.player_id, sq.firstname, sq.lastname, sq.club_name, sq.due_date, sq.scout_rating,"
+      << " p.role, p.age, t.logo_url, t.shortname"
+      << " FROM scout_queue sq"
+      << " LEFT JOIN players p ON p.id = sq.player_id"
+      << " LEFT JOIN teams   t ON t.name = sq.club_name"
+      << " WHERE sq.manager_id=" << mgrId
+      << " ORDER BY sq.due_date ASC;";
     DatabaseResult *r = GetDB()->Query(q.str());
     if (r) {
       for (unsigned int i = 0; i < r->data.size(); i++) {
+        auto &row = r->data[i];
         ScoutQueueEntry e;
-        e.playerId    = atoi(r->data[i][0].c_str());
-        e.firstName   = r->data[i].size() > 1 ? r->data[i][1] : "";
-        e.lastName    = r->data[i].size() > 2 ? r->data[i][2] : "";
-        e.clubName    = r->data[i].size() > 3 ? r->data[i][3] : "";
-        e.dueDate     = r->data[i].size() > 4 ? r->data[i][4] : "";
-        e.scoutRating = r->data[i].size() > 5 ? atoi(r->data[i][5].c_str()) : 1;
+        e.playerId      = atoi(row[0].c_str());
+        e.firstName     = row.size() > 1 ? row[1] : "";
+        e.lastName      = row.size() > 2 ? row[2] : "";
+        e.clubName      = row.size() > 3 ? row[3] : "";
+        e.dueDate       = row.size() > 4 ? row[4] : "";
+        e.scoutRating   = row.size() > 5 ? atoi(row[5].c_str()) : 1;
+        e.role          = row.size() > 6 ? row[6] : "";
+        e.age           = row.size() > 7 ? row[7] : "";
+        e.clubLogoPath  = row.size() > 8 ? row[8] : "";
+        e.clubShortName = row.size() > 9 ? row[9] : e.clubName;
         scoutQueue.push_back(e);
       }
       delete r;
     }
   }
 
-  // Load completed scout reports
+  // Load completed scout reports — join players + teams for richer display
   scoutReports.clear();
   {
     std::stringstream q;
-    q << "SELECT player_id, firstname, lastname, club_name, reveal_pct"
-      << " FROM scout_reports WHERE manager_id=" << mgrId
-      << " ORDER BY id DESC;";
+    q << "SELECT sr.player_id, sr.firstname, sr.lastname, sr.club_name, sr.reveal_pct,"
+      << " p.role, p.age, t.logo_url, t.shortname"
+      << " FROM scout_reports sr"
+      << " LEFT JOIN players p ON p.id = sr.player_id"
+      << " LEFT JOIN teams   t ON t.name = sr.club_name"
+      << " WHERE sr.manager_id=" << mgrId
+      << " ORDER BY sr.id DESC;";
     DatabaseResult *r = GetDB()->Query(q.str());
     if (r) {
       for (unsigned int i = 0; i < r->data.size(); i++) {
+        auto &row = r->data[i];
         ScoutReport sr;
-        sr.playerId  = atoi(r->data[i][0].c_str());
-        sr.firstName = r->data[i].size() > 1 ? r->data[i][1] : "";
-        sr.lastName  = r->data[i].size() > 2 ? r->data[i][2] : "";
-        sr.clubName  = r->data[i].size() > 3 ? r->data[i][3] : "";
-        sr.revealPct = r->data[i].size() > 4 ? (float)atof(r->data[i][4].c_str()) : 0.0f;
+        sr.playerId      = atoi(row[0].c_str());
+        sr.firstName     = row.size() > 1 ? row[1] : "";
+        sr.lastName      = row.size() > 2 ? row[2] : "";
+        sr.clubName      = row.size() > 3 ? row[3] : "";
+        sr.revealPct     = row.size() > 4 ? (float)atof(row[4].c_str()) : 0.0f;
+        sr.role          = row.size() > 5 ? row[5] : "";
+        sr.age           = row.size() > 6 ? row[6] : "";
+        sr.clubLogoPath  = row.size() > 7 ? row[7] : "";
+        sr.clubShortName = row.size() > 8 ? row[8] : sr.clubName;
         scoutReports.push_back(sr);
       }
       delete r;
@@ -7102,40 +7120,253 @@ static void DrawFinancesPage(float w, float h) {
 
 // ---- DrawScoutingPage ---------------------------------------------------
 
+// Shared helper: draws one scout card (report or queue).
+// Returns true if the "View" button was clicked (only for report cards).
+static bool DrawScoutCard(ImDrawList *dl, float ox, float oy, float cw, float ch,
+                          const std::string &firstName, const std::string &lastName,
+                          const std::string &role,      const std::string &age,
+                          const std::string &clubName,  const std::string &clubLogoPath,
+                          const std::string &clubShortName,
+                          int uid,
+                          // report-only fields (revealPct >= 0 means it's a report card)
+                          float revealPct,
+                          // queue-only
+                          const std::string &dueDate,
+                          bool *cancelClicked) {
+  const float kRad  = 10.0f;
+  const float kFaceW = 66.0f;
+  const float kFaceH = ch - 16.0f; // fill most of the card height
+
+  // ---- Card background ----
+  dl->AddRectFilled(ImVec2(ox, oy), ImVec2(ox+cw, oy+ch), C32(kBgCard), kRad);
+  dl->AddRect(ImVec2(ox, oy), ImVec2(ox+cw, oy+ch), C32(kBorder), kRad, 0, 1.0f);
+  // Subtle top highlight line
+  dl->AddLine(ImVec2(ox+kRad, oy+1), ImVec2(ox+cw-kRad, oy+1),
+              IM_COL32(255,255,255,8), 1.0f);
+
+  // ---- Facecard (left) ----
+  float fx = ox + 12.0f;
+  float fy = oy + (ch - kFaceH) * 0.5f;
+  GLuint face = GetDefaultFaceTex();
+  if (face) {
+    dl->AddImageRounded((ImTextureID)(intptr_t)face,
+                        ImVec2(fx, fy), ImVec2(fx+kFaceW, fy+kFaceH),
+                        ImVec2(0,0), ImVec2(1,1),
+                        IM_COL32(255,255,255,220), kRad);
+  } else {
+    dl->AddRectFilled(ImVec2(fx, fy), ImVec2(fx+kFaceW, fy+kFaceH),
+                      IM_COL32(22,32,62,240), kRad);
+  }
+  // Face border tinted with accent
+  dl->AddRect(ImVec2(fx, fy), ImVec2(fx+kFaceW, fy+kFaceH),
+              IM_COL32((int)(kAccent.x*255*0.7f),(int)(kAccent.y*255*0.7f),(int)(kAccent.z*255*0.7f),180),
+              kRad, 0, 1.2f);
+
+  // ---- Content area ----
+  float cx2  = fx + kFaceW + 12.0f;
+  float textY = oy + 11.0f;
+
+  // Full name
+  std::string fullName = firstName.empty() ? lastName
+                       : (lastName.empty() ? firstName : firstName + " " + lastName);
+  PushMgrFont(g_ManagerFontBold);
+  dl->AddText(ImVec2(cx2, textY), IM_COL32(230,238,255,245), fullName.c_str());
+  PopMgrFont(g_ManagerFontBold);
+  textY += 19.0f;
+
+  // Position pill + Age
+  if (!role.empty()) {
+    PushMgrFont(g_ManagerFontSmall);
+    ImVec2 rSz = ImGui::CalcTextSize(role.c_str());
+    float pW = rSz.x + 10.0f, pH = rSz.y + 3.0f;
+    dl->AddRectFilled(ImVec2(cx2, textY), ImVec2(cx2+pW, textY+pH),
+                      IM_COL32((int)(kAccent.x*255*0.3f),(int)(kAccent.y*255*0.3f),(int)(kAccent.z*255*0.3f),200),
+                      4.0f);
+    dl->AddRect(ImVec2(cx2, textY), ImVec2(cx2+pW, textY+pH),
+                IM_COL32((int)(kAccent.x*255),(int)(kAccent.y*255),(int)(kAccent.z*255),120),
+                4.0f, 0, 0.8f);
+    dl->AddText(g_ManagerFontSmall, 13.0f,
+                ImVec2(cx2+5.0f, textY+1.5f), C32(kAccent), role.c_str());
+    PopMgrFont(g_ManagerFontSmall);
+
+    if (!age.empty()) {
+      char ageBuf[16]; snprintf(ageBuf, sizeof(ageBuf), "Age %s", age.c_str());
+      PushMgrFont(g_ManagerFontSmall);
+      dl->AddText(g_ManagerFontSmall, 13.0f,
+                  ImVec2(cx2 + pW + 8.0f, textY + 1.0f),
+                  IM_COL32(150,162,195,190), ageBuf);
+      PopMgrFont(g_ManagerFontSmall);
+    }
+    textY += pH + 7.0f;
+  }
+
+  // Club badge + name
+  {
+    GLuint badgeTex = clubLogoPath.empty() ? 0 : LoadBadgeTex(clubLogoPath);
+    const float kBdgSz = 16.0f;
+    if (badgeTex) {
+      dl->AddImage((ImTextureID)(intptr_t)badgeTex,
+                   ImVec2(cx2, textY), ImVec2(cx2+kBdgSz, textY+kBdgSz));
+    } else {
+      // text fallback initials
+      dl->AddRectFilled(ImVec2(cx2, textY), ImVec2(cx2+kBdgSz, textY+kBdgSz),
+                        IM_COL32(30,42,80,220), 3.0f);
+      if (!clubShortName.empty()) {
+        char ini[3] = {clubShortName[0], 0, 0};
+        PushMgrFont(g_ManagerFontSmall);
+        dl->AddText(g_ManagerFontSmall, 10.0f,
+                    ImVec2(cx2+3.0f, textY+2.0f), IM_COL32(200,215,240,220), ini);
+        PopMgrFont(g_ManagerFontSmall);
+      }
+    }
+    PushMgrFont(g_ManagerFontSmall);
+    dl->AddText(g_ManagerFontSmall, 13.0f,
+                ImVec2(cx2 + kBdgSz + 5.0f, textY + 1.0f),
+                IM_COL32(145,160,200,210), clubName.c_str());
+    PopMgrFont(g_ManagerFontSmall);
+  }
+
+  // ---- Right side: reveal bar (report) or due date (queue) ----
+  const float kRightW = 130.0f;
+  float rx2 = ox + cw - kRightW - 10.0f;
+
+  bool viewClicked = false;
+
+  if (revealPct >= 0.0f) {
+    // === REPORT card ===
+    int knownPct = (int)(revealPct * 100.0f);
+    ImU32 barCol = knownPct >= 40 ? IM_COL32(80,215,110,255) :
+                   knownPct >= 20 ? IM_COL32(230,185,50,255)  :
+                                    IM_COL32(200,90,90,255);
+
+    // "X% known" label
+    char pctBuf[20]; snprintf(pctBuf, sizeof(pctBuf), "%d%% known", knownPct);
+    PushMgrFont(g_ManagerFontSmall);
+    ImVec2 pSz = ImGui::CalcTextSize(pctBuf);
+    dl->AddText(ImVec2(rx2 + (kRightW - pSz.x) * 0.5f, oy + 12.0f), barCol, pctBuf);
+    PopMgrFont(g_ManagerFontSmall);
+
+    // Progress bar
+    float bY = oy + 30.0f;
+    float bH = 8.0f;
+    dl->AddRectFilled(ImVec2(rx2, bY), ImVec2(rx2+kRightW, bY+bH),
+                      IM_COL32(18,24,52,220), 4.0f);
+    float fill = kRightW * revealPct;
+    if (fill > 1.0f)
+      dl->AddRectFilled(ImVec2(rx2, bY), ImVec2(rx2+fill, bY+bH), barCol, 4.0f);
+
+    // View button
+    float vBtnW = kRightW, vBtnH = 24.0f;
+    float vBtnY = oy + ch - vBtnH - 10.0f;
+    char viewId[32]; snprintf(viewId, sizeof(viewId), "View##scv_%d", uid);
+    ImGui::SetCursorScreenPos(ImVec2(rx2, vBtnY));
+    ImGui::PushStyleColor(ImGuiCol_Button,        C32(kAccent));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, C32(kAccentH));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  C32(kAccentA));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 5.0f);
+    PushMgrFont(g_ManagerFontSmall);
+    viewClicked = ImGui::Button(viewId, ImVec2(vBtnW, vBtnH));
+    PopMgrFont(g_ManagerFontSmall);
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor(3);
+
+  } else {
+    // === QUEUE card ===
+    // Spinning dots / "Scouting..." label
+    PushMgrFont(g_ManagerFontSmall);
+    const char *scoutingLbl = "Scouting...";
+    ImVec2 slSz = ImGui::CalcTextSize(scoutingLbl);
+    dl->AddText(ImVec2(rx2 + (kRightW - slSz.x)*0.5f, oy + 11.0f),
+                IM_COL32(160,185,230,210), scoutingLbl);
+    PopMgrFont(g_ManagerFontSmall);
+
+    // Due date
+    std::string dispDue = dueDate.size() >= 10 ? FormatDateDisplay(dueDate) : dueDate;
+    char dueBuf[32]; snprintf(dueBuf, sizeof(dueBuf), "Due %s", dispDue.c_str());
+    PushMgrFont(g_ManagerFontSmall);
+    ImVec2 dSz = ImGui::CalcTextSize(dueBuf);
+    dl->AddText(ImVec2(rx2 + (kRightW - dSz.x)*0.5f, oy + 29.0f),
+                IM_COL32(130,155,200,190), dueBuf);
+    PopMgrFont(g_ManagerFontSmall);
+
+    // Scout rating stars
+    float starsY = oy + 50.0f;
+    ImGui::SetCursorScreenPos(ImVec2(rx2 + (kRightW - 60.0f)*0.5f, starsY));
+
+    // Cancel button
+    float cBtnW = kRightW, cBtnH = 24.0f;
+    float cBtnY = oy + ch - cBtnH - 10.0f;
+    char cancelId[32]; snprintf(cancelId, sizeof(cancelId), "Cancel##scq_%d", uid);
+    ImGui::SetCursorScreenPos(ImVec2(rx2, cBtnY));
+    ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(120,30,30,200));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(170,45,45,230));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  IM_COL32(90,20,20,255));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 5.0f);
+    PushMgrFont(g_ManagerFontSmall);
+    if (ImGui::Button(cancelId, ImVec2(cBtnW, cBtnH)) && cancelClicked)
+      *cancelClicked = true;
+    PopMgrFont(g_ManagerFontSmall);
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor(3);
+  }
+
+  // Vertical divider between content and right panel
+  float divX = rx2 - 8.0f;
+  dl->AddLine(ImVec2(divX, oy+12.0f), ImVec2(divX, oy+ch-12.0f),
+              IM_COL32(255,255,255,18), 1.0f);
+
+  return viewClicked;
+}
+
 static void DrawScoutingPage(float w, float h) {
-  const float kPad = 14.0f;
-  const float kGap = 12.0f;
+  const float kPad  = 14.0f;
+  const float kGap  = 14.0f;
+  const float kCardH = 108.0f;
+  const float kCardGap = 8.0f;
+
   ImGui::SetCursorPos(ImVec2(kPad, 8.0f));
-  float usW = w - kPad * 2.0f;
+  float usW  = w - kPad * 2.0f;
   float halfW = (usW - kGap) * 0.5f;
   float colH  = h - 16.0f;
 
   ImDrawList *dl = ImGui::GetWindowDrawList();
   ImVec2 origin  = ImGui::GetCursorScreenPos();
 
-  // ---- Left panel: completed reports ------------------------------------
-  {
-    float px = origin.x;
-    float py = origin.y;
-
-    // Panel header
-    dl->AddRectFilled(ImVec2(px, py), ImVec2(px+halfW, py+28.0f),
-                      IM_COL32(16,28,60,220), 8.0f);
+  // Helper: draw a column header bar
+  auto DrawColHeader = [&](float px, float py, const char *label, int count) {
+    dl->AddRectFilled(ImVec2(px, py), ImVec2(px+halfW, py+34.0f),
+                      IM_COL32(14,22,52,240), 8.0f);
+    dl->AddLine(ImVec2(px+10, py+33), ImVec2(px+halfW-10, py+33),
+                C32(kAccent), 1.5f);
     PushMgrFont(g_ManagerFontSmall);
-    ImVec2 hdrSz = ImGui::CalcTextSize("Scouted Players");
-    dl->AddText(ImVec2(px + (halfW - hdrSz.x) * 0.5f, py + 6.0f),
-                IM_COL32(180,200,240,240), "Scouted Players");
+    dl->AddText(ImVec2(px+14.0f, py+9.0f),
+                IM_COL32(200,215,245,240), label);
+    if (count > 0) {
+      char cntBuf[8]; snprintf(cntBuf, sizeof(cntBuf), "%d", count);
+      ImVec2 cSz = ImGui::CalcTextSize(cntBuf);
+      float pillX = px + halfW - cSz.x - 20.0f;
+      dl->AddRectFilled(ImVec2(pillX-4, py+8), ImVec2(pillX+cSz.x+4, py+8+cSz.y+2),
+                        IM_COL32((int)(kAccent.x*255*0.35f),(int)(kAccent.y*255*0.35f),(int)(kAccent.z*255*0.35f),200), 5.0f);
+      dl->AddText(ImVec2(pillX, py+9.0f), C32(kAccent), cntBuf);
+    }
     PopMgrFont(g_ManagerFontSmall);
+  };
 
-    ImGui::SetCursorScreenPos(ImVec2(px, py + 32.0f));
+  // ---- Left: completed scout reports ------------------------------------
+  {
+    float px = origin.x, py = origin.y;
+    DrawColHeader(px, py, "Scouted Players", (int)g_CareerHub.scoutReports.size());
+
+    ImGui::SetCursorScreenPos(ImVec2(px, py + 38.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0,0));
-    ImGui::BeginChild("##sc_done", ImVec2(halfW, colH - 34.0f), false,
+    ImGui::BeginChild("##sc_done", ImVec2(halfW, colH - 40.0f), false,
                       ImGuiWindowFlags_None);
     ImGui::PopStyleVar();
     ImDrawList *wdl = ImGui::GetWindowDrawList();
 
     if (g_CareerHub.scoutReports.empty()) {
-      ImGui::Dummy(ImVec2(halfW, 20.0f));
+      float avH = ImGui::GetContentRegionAvail().y;
+      ImGui::Dummy(ImVec2(halfW, avH * 0.35f));
       PushMgrFont(g_ManagerFontSmall);
       ImGui::PushStyleColor(ImGuiCol_Text, kTextDim);
       float tw = ImGui::CalcTextSize("No scouted players yet.").x;
@@ -7144,62 +7375,23 @@ static void DrawScoutingPage(float w, float h) {
       ImGui::PopStyleColor();
       PopMgrFont(g_ManagerFontSmall);
     } else {
-      const float kRowH = 54.0f, kRowGap = 4.0f;
-      float cw = ImGui::GetContentRegionAvail().x;
-      float ry = ImGui::GetCursorScreenPos().y;
-      float rx = ImGui::GetCursorScreenPos().x;
+      float cardX = ImGui::GetCursorScreenPos().x + 6.0f;
+      float cardW = ImGui::GetContentRegionAvail().x - 12.0f;
 
       for (unsigned int i = 0; i < g_CareerHub.scoutReports.size(); i++) {
         const auto &sr = g_CareerHub.scoutReports[i];
-        ImU32 rowBg = (i % 2 == 0) ? IM_COL32(16,24,52,200) : IM_COL32(12,18,40,160);
-        wdl->AddRectFilled(ImVec2(rx, ry), ImVec2(rx+cw, ry+kRowH), rowBg, 4.0f);
+        float cardY = ImGui::GetCursorScreenPos().y + 4.0f;
 
-        // Name
-        std::string fullName = sr.firstName.empty() ? sr.lastName
-                             : (sr.lastName.empty() ? sr.firstName
-                             : sr.firstName + " " + sr.lastName);
-        PushMgrFont(g_ManagerFontBold);
-        wdl->AddText(ImVec2(rx+10.0f, ry+6.0f),
-                     IM_COL32(220,228,248,240), fullName.c_str());
-        PopMgrFont(g_ManagerFontBold);
+        bool viewClicked = DrawScoutCard(wdl, cardX, cardY, cardW, kCardH,
+          sr.firstName, sr.lastName, sr.role, sr.age,
+          sr.clubName, sr.clubLogoPath, sr.clubShortName,
+          sr.playerId, sr.revealPct, "", nullptr);
 
-        // Club name
-        PushMgrFont(g_ManagerFontSmall);
-        wdl->AddText(ImVec2(rx+10.0f, ry+24.0f),
-                     IM_COL32(140,155,190,190), sr.clubName.c_str());
-        PopMgrFont(g_ManagerFontSmall);
-
-        // Known% pill (right side)
-        int knownPct = (int)(sr.revealPct * 100.0f);
-        char pctBuf[16]; snprintf(pctBuf, sizeof(pctBuf), "%d%% known", knownPct);
-        ImU32 pctCol = knownPct >= 40 ? IM_COL32(80,215,110,255) :
-                       knownPct >= 20 ? IM_COL32(230,185,50,255)  :
-                                        IM_COL32(200,90,90,255);
-        PushMgrFont(g_ManagerFontSmall);
-        ImVec2 pctSz = ImGui::CalcTextSize(pctBuf);
-        float  pillW = pctSz.x + 12.0f, pillH = pctSz.y + 4.0f;
-        float  pillX = rx + cw - pillW - 10.0f;
-        float  pillY = ry + (kRowH - pillH) * 0.5f;
-        wdl->AddRectFilled(ImVec2(pillX, pillY), ImVec2(pillX+pillW, pillY+pillH),
-                           IM_COL32((pctCol&0xFF)*0/3,(pctCol>>8&0xFF)*0/3,(pctCol>>16&0xFF)*0/3,80), 5.0f);
-        wdl->AddText(ImVec2(pillX+6.0f, pillY+2.0f), pctCol, pctBuf);
-        PopMgrFont(g_ManagerFontSmall);
-
-        // View button
-        char viewId[32]; snprintf(viewId, sizeof(viewId), "View##scv_%d", sr.playerId);
-        float vBtnW = 52.0f, vBtnH = 22.0f;
-        ImGui::SetCursorScreenPos(ImVec2(pillX - vBtnW - 8.0f, ry + (kRowH - vBtnH)*0.5f));
-        ImGui::PushStyleColor(ImGuiCol_Button,        C32(kAccent));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, C32(kAccentH));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  C32(kAccentA));
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
-        PushMgrFont(g_ManagerFontSmall);
-        if (ImGui::Button(viewId, ImVec2(vBtnW, vBtnH))) {
-          // Load player details via search override — query from DB
+        if (viewClicked) {
           std::stringstream pq;
           pq << "SELECT id, firstname, lastname, role, age, base_stat,"
              << " formationorder, weekly_wage, contract_expiry, player_potential,"
-             << " foot, stamina, height, reputation, team_id"
+             << " foot, stamina, height, reputation"
              << " FROM players WHERE id=" << sr.playerId << " LIMIT 1;";
           DatabaseResult *pr = GetDB()->Query(pq.str());
           if (pr && pr->data.size() > 0) {
@@ -7218,52 +7410,39 @@ static void DrawScoutingPage(float w, float h) {
             op.height        = (float)atof(pr->data[0][12].c_str());
             op.reputation    = (float)atof(pr->data[0][13].c_str());
             delete pr;
-            s_detailPlayerOverride  = op;
-            s_detailOverrideActive  = true;
-            s_playerDetailId        = op.id;
-            s_detailClubName        = sr.clubName;
-            s_detailClubLogo        = "";
-            s_detailClubShortName   = sr.clubName;
+            s_detailPlayerOverride = op;
+            s_detailOverrideActive = true;
+            s_playerDetailId       = op.id;
+            s_detailClubName       = sr.clubName;
+            s_detailClubLogo       = sr.clubLogoPath;
+            s_detailClubShortName  = sr.clubShortName;
             NavPush(PAGE_PLAYER_DETAIL);
-          } else {
-            if (pr) delete pr;
-          }
+          } else { if (pr) delete pr; }
         }
-        PopMgrFont(g_ManagerFontSmall);
-        ImGui::PopStyleVar();
-        ImGui::PopStyleColor(3);
 
-        ImGui::SetCursorScreenPos(ImVec2(rx, ry + kRowH + kRowGap));
-        ImGui::Dummy(ImVec2(cw, 0.0f));
-        ry += kRowH + kRowGap;
+        ImGui::SetCursorScreenPos(ImVec2(cardX, cardY + kCardH + kCardGap));
+        ImGui::Dummy(ImVec2(cardW, 0.0f));
       }
-      ImGui::Dummy(ImVec2(cw, 4.0f));
+      ImGui::Dummy(ImVec2(cardW, 8.0f));
     }
     ImGui::EndChild();
   }
 
-  // ---- Right panel: in-progress scouting --------------------------------
+  // ---- Right: in-progress queue -----------------------------------------
   {
-    float px = origin.x + halfW + kGap;
-    float py = origin.y;
+    float px = origin.x + halfW + kGap, py = origin.y;
+    DrawColHeader(px, py, "Awaiting Reports", (int)g_CareerHub.scoutQueue.size());
 
-    dl->AddRectFilled(ImVec2(px, py), ImVec2(px+halfW, py+28.0f),
-                      IM_COL32(16,28,60,220), 8.0f);
-    PushMgrFont(g_ManagerFontSmall);
-    ImVec2 hdrSz = ImGui::CalcTextSize("Awaiting Reports");
-    dl->AddText(ImVec2(px + (halfW - hdrSz.x) * 0.5f, py + 6.0f),
-                IM_COL32(180,200,240,240), "Awaiting Reports");
-    PopMgrFont(g_ManagerFontSmall);
-
-    ImGui::SetCursorScreenPos(ImVec2(px, py + 32.0f));
+    ImGui::SetCursorScreenPos(ImVec2(px, py + 38.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0,0));
-    ImGui::BeginChild("##sc_queue", ImVec2(halfW, colH - 34.0f), false,
+    ImGui::BeginChild("##sc_queue", ImVec2(halfW, colH - 40.0f), false,
                       ImGuiWindowFlags_None);
     ImGui::PopStyleVar();
     ImDrawList *wdl = ImGui::GetWindowDrawList();
 
     if (g_CareerHub.scoutQueue.empty()) {
-      ImGui::Dummy(ImVec2(halfW, 20.0f));
+      float avH = ImGui::GetContentRegionAvail().y;
+      ImGui::Dummy(ImVec2(halfW, avH * 0.35f));
       PushMgrFont(g_ManagerFontSmall);
       ImGui::PushStyleColor(ImGuiCol_Text, kTextDim);
       float tw = ImGui::CalcTextSize("No active scouting missions.").x;
@@ -7272,66 +7451,32 @@ static void DrawScoutingPage(float w, float h) {
       ImGui::PopStyleColor();
       PopMgrFont(g_ManagerFontSmall);
     } else {
-      const float kRowH = 54.0f, kRowGap = 4.0f;
-      float cw = ImGui::GetContentRegionAvail().x;
-      float ry = ImGui::GetCursorScreenPos().y;
-      float rx = ImGui::GetCursorScreenPos().x;
+      float cardX = ImGui::GetCursorScreenPos().x + 6.0f;
+      float cardW = ImGui::GetContentRegionAvail().x - 12.0f;
 
       for (unsigned int i = 0; i < g_CareerHub.scoutQueue.size(); i++) {
         const auto &sq = g_CareerHub.scoutQueue[i];
-        ImU32 rowBg = (i % 2 == 0) ? IM_COL32(16,24,52,200) : IM_COL32(12,18,40,160);
-        wdl->AddRectFilled(ImVec2(rx, ry), ImVec2(rx+cw, ry+kRowH), rowBg, 4.0f);
+        float cardY = ImGui::GetCursorScreenPos().y + 4.0f;
 
-        // Name
-        std::string fullName = sq.firstName.empty() ? sq.lastName
-                             : (sq.lastName.empty() ? sq.firstName
-                             : sq.firstName + " " + sq.lastName);
-        PushMgrFont(g_ManagerFontBold);
-        wdl->AddText(ImVec2(rx+10.0f, ry+6.0f),
-                     IM_COL32(220,228,248,240), fullName.c_str());
-        PopMgrFont(g_ManagerFontBold);
+        bool cancelled = false;
+        DrawScoutCard(wdl, cardX, cardY, cardW, kCardH,
+          sq.firstName, sq.lastName, sq.role, sq.age,
+          sq.clubName, sq.clubLogoPath, sq.clubShortName,
+          sq.playerId, -1.0f, sq.dueDate, &cancelled);
 
-        PushMgrFont(g_ManagerFontSmall);
-        wdl->AddText(ImVec2(rx+10.0f, ry+24.0f),
-                     IM_COL32(140,155,190,190), sq.clubName.c_str());
-        PopMgrFont(g_ManagerFontSmall);
-
-        // Due date
-        std::string dispDue = sq.dueDate.size() >= 10
-                            ? FormatDateDisplay(sq.dueDate) : sq.dueDate;
-        char dueBuf[48]; snprintf(dueBuf, sizeof(dueBuf), "Due: %s", dispDue.c_str());
-        PushMgrFont(g_ManagerFontSmall);
-        ImVec2 dueSz = ImGui::CalcTextSize(dueBuf);
-        wdl->AddText(ImVec2(rx + cw - dueSz.x - 48.0f, ry + (kRowH - 14.0f)*0.5f),
-                     IM_COL32(160,185,230,210), dueBuf);
-        PopMgrFont(g_ManagerFontSmall);
-
-        // Cancel button
-        char cancelId[32]; snprintf(cancelId, sizeof(cancelId), "Cancel##scq_%d", sq.playerId);
-        float cBtnW = 42.0f, cBtnH = 22.0f;
-        ImGui::SetCursorScreenPos(ImVec2(rx + cw - cBtnW - 6.0f, ry + (kRowH - cBtnH)*0.5f));
-        ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(120,30,30,200));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(170,45,45,230));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  IM_COL32(90,20,20,255));
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
-        PushMgrFont(g_ManagerFontSmall);
-        if (ImGui::Button(cancelId, ImVec2(cBtnW, cBtnH)))
+        if (cancelled)
           CancelScouting(g_CareerHub.managerId, sq.playerId);
-        PopMgrFont(g_ManagerFontSmall);
-        ImGui::PopStyleVar();
-        ImGui::PopStyleColor(3);
 
-        ImGui::SetCursorScreenPos(ImVec2(rx, ry + kRowH + kRowGap));
-        ImGui::Dummy(ImVec2(cw, 0.0f));
-        ry += kRowH + kRowGap;
+        ImGui::SetCursorScreenPos(ImVec2(cardX, cardY + kCardH + kCardGap));
+        ImGui::Dummy(ImVec2(cardW, 0.0f));
       }
-      ImGui::Dummy(ImVec2(cw, 4.0f));
+      ImGui::Dummy(ImVec2(cardW, 8.0f));
     }
     ImGui::EndChild();
   }
 
-  // Reserve layout space for the outer window
-  ImGui::SetCursorPos(ImVec2(kPad, 8.0f + (float)colH));
+  // Reserve layout space
+  ImGui::SetCursorPos(ImVec2(kPad, 8.0f + colH));
   ImGui::Dummy(ImVec2(usW, 1.0f));
 }
 
