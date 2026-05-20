@@ -324,7 +324,7 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
 
   {
     std::stringstream q;
-    q << "SELECT teams.name, teams.shortname, teams.logo_url, leagues.name, leagues.id, teams.color1"
+    q << "SELECT teams.name, teams.shortname, teams.logo_url, leagues.name, leagues.id, teams.color1, leagues.currency"
       << " FROM teams JOIN leagues ON teams.league_id = leagues.id"
       << " WHERE teams.id = " << clubId << " LIMIT 1;";
     DatabaseResult *r = GetDB()->Query(q.str());
@@ -333,6 +333,10 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
     club.logoPath   = DBCell(r, 0, 2);
     club.leagueName = DBCell(r, 0, 3);
     club.leagueId   = atoi(DBCell(r, 0, 4).c_str());
+    {
+      std::string cur = DBCell(r, 0, 6);
+      club.currency = cur.empty() ? "\xE2\x82\xAC" : cur;
+    }
     {
       std::string c1 = DBCell(r, 0, 5);
       int ri = 189, gi = 26, bi = 201; // fallback magenta
@@ -3372,6 +3376,7 @@ static void DrawPlayerDetailPage(float w, float h) {
   DrawStars((float)pl.potential, 200.0f, IM_COL32(100, 160, 220, 220), 1.5f);
 
   EndModernCard();
+  ImGui::SetCursorPos(ImVec2(kPad, ImGui::GetCursorPos().y));
   ImGui::Dummy(ImVec2(0, kGap));
 
   // ===========================================================
@@ -3379,6 +3384,7 @@ static void DrawPlayerDetailPage(float w, float h) {
   // ===========================================================
   static const char *kDetailTabs[] = {"Overview", "Personal", "Performance", "Career"};
   const float kTabH = 34.0f;
+  ImGui::SetCursorPos(ImVec2(kPad, ImGui::GetCursorPos().y));
   ImVec2 tabOrg = ImGui::GetCursorScreenPos();
   ImDrawList *tdl = ImGui::GetWindowDrawList();
   {
@@ -3421,6 +3427,7 @@ static void DrawPlayerDetailPage(float w, float h) {
   // ===========================================================
   float statsH = usH - kHdrH - kGap - kTabH - kGap * 2.0f - 8.0f;
   if (statsH < 80.0f) statsH = 80.0f;
+  ImGui::SetCursorPos(ImVec2(kPad, ImGui::GetCursorPos().y));
   BeginModernCard("##pldstats", ImVec2(usW, statsH));
 
   if (s_plTab != 0) {
@@ -3793,6 +3800,7 @@ static void DrawSquadPage(float w, float h) {
   // Table
   float squadH = usH - hdrH - kGap - 4.0f;
   if (squadH < 60.0f) squadH = 60.0f;
+  ImGui::SetCursorPos(ImVec2(kPad, ImGui::GetCursorPos().y));
   BeginModernCard("##sqtbl", ImVec2(usW, squadH));
   float tblH = squadH - 32.0f;
   if (tblH < 30.0f) tblH = 30.0f;
@@ -4249,6 +4257,7 @@ static void DrawCalendarPage(float w, float h) {
   float cellH = (gridH - kDayHdrH) / (float)numWeeks;
   if (cellH < 100.0f) cellH = 100.0f;
 
+  ImGui::SetCursorPos(ImVec2(kPad, ImGui::GetCursorPos().y));
   ImVec2 gridOrigin = ImGui::GetCursorScreenPos();
 
   // Day-of-week header row
@@ -4610,6 +4619,7 @@ static void DrawSchedulePage(float w, float h) {
 
   float schedH = usH - fbarH - kGap - 4.0f;
   if (schedH < 60.0f) schedH = 60.0f;
+  ImGui::SetCursorPos(ImVec2(kPad, ImGui::GetCursorPos().y));
   BeginModernCard("##sched_outer", ImVec2(usW, schedH));
   ImGui::BeginChild("##sc_scroll", ImVec2(0, schedH - 38.0f), false);
 
@@ -4831,6 +4841,7 @@ static void DrawCompetitionsPage(float w, float h) {
 
   float standH = usH - fbarH - kGap - 4.0f;
   if (standH < 60.0f) standH = 60.0f;
+  ImGui::SetCursorPos(ImVec2(kPad, ImGui::GetCursorPos().y));
   BeginModernCard("##comp_outer", ImVec2(usW, standH));
   ImGui::BeginChild("##cp_scroll", ImVec2(0, standH - 38.0f), false);
 
@@ -4995,18 +5006,25 @@ static void DrawTeamInstructionsPanel(float px, float py, float pw, float ph) {
 
   const float kRowH    = 36.0f;
   const float kHdrH    = 22.0f;
-  const float kPadX    = 10.0f;
   const float kPadTop  = 8.0f;
   const float kBtnGap  = 3.0f;
 
+  // Horizontally centre the content: cap content width and pad symmetrically
+  const float kContentMaxW = 880.0f;
+  float innerW = (pw > kContentMaxW) ? kContentMaxW : pw * 0.92f;
+  float kPadX  = (pw - innerW) * 0.5f;
+  if (kPadX < 8.0f) kPadX = 8.0f;
+
   // Scrollable child so long lists don't overflow the pitch area
   ImGui::SetCursorScreenPos(ImVec2(px + kPadX, py + kPadTop));
-  ImGui::BeginChild("##tacInstr", ImVec2(pw - kPadX * 2.0f, ph - kPadTop * 2.0f),
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+  ImGui::BeginChild("##tacInstr", ImVec2(innerW, ph - kPadTop * 2.0f),
                     false, ImGuiWindowFlags_None);
+  ImGui::PopStyleVar();
   ImDrawList *wdl = ImGui::GetWindowDrawList();
+  innerW = ImGui::GetContentRegionAvail().x; // true usable width (handles scrollbar, padding)
 
   const char *lastCat = nullptr;
-  float innerW = pw - kPadX * 2.0f - 12.0f;
 
   for (int ti = 0; ti < kNumTacInstructions; ti++) {
     const TacInstruction &ins = kTacInstructions[ti];
@@ -5949,8 +5967,8 @@ static void DrawTacticsPage(float w, float h) {
 
   dl->PopClipRect();
 
-  // Formation dropdown — top-left corner of pitch
-  {
+  // Formation dropdown — top-left corner of pitch (hidden when Team Instructions active)
+  if (!s_showTeamInstructions) {
     static int s_formationIdx = 0;
     static const char *kFormations[] = { "4-3-3" };
     const float fddW = 80.0f, fddH = 24.0f;
@@ -6190,21 +6208,17 @@ static void DrawStaffCard_Hired(ImDrawList *dl, float ox, float oy, float cw, fl
   dl->AddRectFilled(ImVec2(ox, oy), ImVec2(ox+cw, oy+ch), C32(kBgCard), kRad);
   dl->AddRect(ImVec2(ox, oy), ImVec2(ox+cw, oy+ch), C32(kBorder), kRad, 0, 1.0f);
 
-  // Face image (top-center, circular clip via stencil approach — just square for now)
-  const float kImgSz = 56.0f;
+  // Face image (top-center)
+  const float kImgSz = 80.0f;
   float imgX = ox + (cw - kImgSz) * 0.5f;
-  float imgY = oy + 14.0f;
+  float imgY = oy + 18.0f;
   GLuint face = GetStaffPlaceholderTex(sm.role);
   if (face) {
-    // Circular clip: draw circle bg first, then image on top
-    float cx = imgX + kImgSz * 0.5f, cy = imgY + kImgSz * 0.5f;
-    dl->AddCircleFilled(ImVec2(cx, cy), kImgSz * 0.5f + 2.0f,
-                        IM_COL32((int)(kAccent.x*255*0.4f),(int)(kAccent.y*255*0.4f),(int)(kAccent.z*255*0.4f),180), 32);
     ImGui::SetCursorScreenPos(ImVec2(imgX, imgY));
     ImGui::Image((ImTextureID)(intptr_t)face, ImVec2(kImgSz, kImgSz));
   } else {
-    float cx = imgX + kImgSz*0.5f, cy = imgY + kImgSz*0.5f;
-    dl->AddCircleFilled(ImVec2(cx,cy), kImgSz*0.5f, IM_COL32(40,55,90,200), 32);
+    dl->AddRectFilled(ImVec2(imgX, imgY), ImVec2(imgX+kImgSz, imgY+kImgSz),
+                      IM_COL32(25,35,65,220), 8.0f);
   }
 
   float textY = imgY + kImgSz + 10.0f;
@@ -6248,7 +6262,7 @@ static void DrawStaffCard_Hired(ImDrawList *dl, float ox, float oy, float cw, fl
 
   // Wage (centered)
   char wageBuf[32];
-  snprintf(wageBuf, sizeof(wageBuf), "\xC2\xA3%d / wk", sm.weeklywage);
+  snprintf(wageBuf, sizeof(wageBuf), "%s%d / wk", g_CareerHub.club.currency.empty() ? "\xE2\x82\xAC" : g_CareerHub.club.currency.c_str(), sm.weeklywage);
   PushMgrFont(g_ManagerFontSmall);
   ImVec2 wageSize = ImGui::CalcTextSize(wageBuf);
   dl->AddText(ImVec2(ox + (cw - wageSize.x)*0.5f, textY), kColWage, wageBuf);
@@ -6324,28 +6338,33 @@ static const int kNumStaffRoles = 5;
 
 static void DrawStaffPage(float w, float h) {
   const float kPad     = 14.0f;
-  const float kGap     = 10.0f;
-  const float kCardH   = 240.0f;
+  const float kGap     = 14.0f;
+  const float kCardH   = 290.0f;
+  const int   kNumCols = 3;
 
-  float cw      = w - kPad * 2.0f;
-  float colW    = (cw - kGap * 4.0f) / 5.0f;
+  float cw   = w - kPad * 2.0f;
+  float colW = (cw - kGap * (kNumCols - 1)) / kNumCols;
 
   ImGui::SetCursorPos(ImVec2(kPad, 8.0f));
-  PushMgrFont(g_ManagerFontBold);
-  ImGui::TextUnformatted("Staff");
-  PopMgrFont(g_ManagerFontBold);
-  ImGui::Spacing();
-
-  ImGui::BeginChild("##staff_grid", ImVec2(cw, h - 48.0f), false,
+  ImGui::BeginChild("##staff_grid", ImVec2(cw, h - 16.0f), false,
                     ImGuiWindowFlags_NoScrollbar);
 
-  ImDrawList *dl  = ImGui::GetWindowDrawList();
-  ImVec2 origin   = ImGui::GetCursorScreenPos();
+  ImDrawList *dl = ImGui::GetWindowDrawList();
+  ImVec2 origin  = ImGui::GetCursorScreenPos();
 
   for (int ri = 0; ri < kNumStaffRoles; ri++) {
     const char *role = kStaffRoles[ri];
-    float ox = origin.x + ri * (colW + kGap);
-    float oy = origin.y + 4.0f;
+    int row = ri / kNumCols;
+    int col = ri % kNumCols;
+
+    // Center the last partial row
+    int rolesInLastRow = kNumStaffRoles % kNumCols;
+    float rowOffsetX = 0.0f;
+    if (rolesInLastRow != 0 && row == kNumStaffRoles / kNumCols)
+      rowOffsetX = (kNumCols - rolesInLastRow) * (colW + kGap) * 0.5f;
+
+    float ox = origin.x + rowOffsetX + col * (colW + kGap);
+    float oy = origin.y + 4.0f + row * (kCardH + kGap);
 
     const CareerHubState::StaffMember *hired = nullptr;
     for (const auto &sm : g_CareerHub.staff)
@@ -6357,8 +6376,8 @@ static void DrawStaffPage(float w, float h) {
       DrawStaffCard_Empty(dl, ox, oy, colW, kCardH, role, ri);
   }
 
-  // Advance past the cards so the child window has the right height
-  ImGui::Dummy(ImVec2(cw, kCardH + 8.0f));
+  int numRows = (kNumStaffRoles + kNumCols - 1) / kNumCols;
+  ImGui::Dummy(ImVec2(cw, numRows * (kCardH + kGap) + 8.0f));
   ImGui::EndChild();
 }
 
@@ -6419,7 +6438,7 @@ static void DrawStaffMarketCard(ImDrawList *dl, float ox, float oy, float cw, fl
 
   // Wage
   char wageBuf[32];
-  snprintf(wageBuf, sizeof(wageBuf), "\xC2\xA3%d / wk", e.weeklywage);
+  snprintf(wageBuf, sizeof(wageBuf), "%s%d / wk", g_CareerHub.club.currency.empty() ? "\xE2\x82\xAC" : g_CareerHub.club.currency.c_str(), e.weeklywage);
   PushMgrFont(g_ManagerFontSmall);
   ImVec2 wSz = ImGui::CalcTextSize(wageBuf);
   dl->AddText(ImVec2(ox+(cw-wSz.x)*0.5f, textY), kColWage, wageBuf);
@@ -6514,7 +6533,7 @@ static void DrawStaffMarketPage(float w, float h) {
   ImGui::SameLine();
   if (s_mktFilterMaxWage > 0) {
     PushMgrFont(g_ManagerFontSmall);
-    char capBuf[32]; snprintf(capBuf, sizeof(capBuf), "\xC2\xA3%d/wk", s_mktFilterMaxWage);
+    char capBuf[32]; snprintf(capBuf, sizeof(capBuf), "%s%d/wk", g_CareerHub.club.currency.empty() ? "\xE2\x82\xAC" : g_CareerHub.club.currency.c_str(), s_mktFilterMaxWage);
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted(capBuf);
     PopMgrFont(g_ManagerFontSmall);
@@ -6574,24 +6593,25 @@ static void DrawStaffMarketPage(float w, float h) {
 static std::string FmtMoney(long long v) {
   bool neg = v < 0;
   long long abs = neg ? -v : v;
-  char buf[32];
-  if      (abs >= 1000000000LL) snprintf(buf, sizeof(buf), "%s\xC2\xA3%.2fB", neg?"-":"", abs/1e9);
-  else if (abs >= 1000000LL)    snprintf(buf, sizeof(buf), "%s\xC2\xA3%.1fM", neg?"-":"", abs/1e6);
-  else if (abs >= 1000LL)       snprintf(buf, sizeof(buf), "%s\xC2\xA3%.0fK", neg?"-":"", abs/1e3);
-  else                          snprintf(buf, sizeof(buf), "%s\xC2\xA3%lld",  neg?"-":"", abs);
+  const char *cur = g_CareerHub.club.currency.empty() ? "\xE2\x82\xAC" : g_CareerHub.club.currency.c_str();
+  char buf[40];
+  if      (abs >= 1000000000LL) snprintf(buf, sizeof(buf), "%s%s%.2fB", neg?"-":"", cur, abs/1e9);
+  else if (abs >= 1000000LL)    snprintf(buf, sizeof(buf), "%s%s%.1fM", neg?"-":"", cur, abs/1e6);
+  else if (abs >= 1000LL)       snprintf(buf, sizeof(buf), "%s%s%.0fK", neg?"-":"", cur, abs/1e3);
+  else                          snprintf(buf, sizeof(buf), "%s%s%lld",  neg?"-":"", cur, abs);
   return buf;
 }
 
 static std::string FmtMoneyFull(long long v) {
   bool neg = v < 0;
   long long abs = neg ? -v : v;
-  char buf[48];
-  // Insert commas manually for thousands
+  const char *cur = g_CareerHub.club.currency.empty() ? "\xE2\x82\xAC" : g_CareerHub.club.currency.c_str();
+  char buf[56];
   char plain[24]; snprintf(plain, sizeof(plain), "%lld", abs);
   std::string s(plain);
   int ins = (int)s.size() - 3;
   while (ins > 0) { s.insert(ins, ","); ins -= 3; }
-  snprintf(buf, sizeof(buf), "%s\xC2\xA3%s", neg ? "-" : "", s.c_str());
+  snprintf(buf, sizeof(buf), "%s%s%s", neg ? "-" : "", cur, s.c_str());
   return buf;
 }
 

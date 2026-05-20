@@ -59,6 +59,7 @@ struct CareerHubState {
   struct ClubInfo {
     std::string name, shortName, logoPath, leagueName;
     int leagueId = 0;
+    std::string currency; // e.g. "\xC2\xA3" or "\xE2\x82\xAC"
   } club;
 
   struct Player {

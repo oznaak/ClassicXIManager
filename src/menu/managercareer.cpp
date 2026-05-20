@@ -193,6 +193,28 @@ static void EnsureCareerTables() {
       delete sr;
     }
   }
+
+  // Migrate leagues table: add currency column (£ for English leagues, € for rest).
+  {
+    DatabaseResult *info = GetDB()->Query("PRAGMA table_info(leagues);");
+    bool hasCurrency = false;
+    for (unsigned int i = 0; i < info->data.size(); i++) {
+      if (info->data.at(i).size() > 1 && info->data.at(i).at(1) == "currency")
+        hasCurrency = true;
+    }
+    delete info;
+    if (!hasCurrency) {
+      DatabaseResult *a = GetDB()->Query("ALTER TABLE leagues ADD COLUMN currency TEXT;");
+      delete a;
+    }
+    // Seed: Premier League (id=1) uses £, everything else uses €.
+    DatabaseResult *s1 = GetDB()->Query(
+      "UPDATE leagues SET currency='\xC2\xA3' WHERE id=1 AND (currency IS NULL OR currency='');");
+    delete s1;
+    DatabaseResult *s2 = GetDB()->Query(
+      "UPDATE leagues SET currency='\xE2\x82\xAC' WHERE (currency IS NULL OR currency='');");
+    delete s2;
+  }
 }
 
 static void DeleteCareerSeason(int managerId) {
