@@ -2851,12 +2851,27 @@ static void DrawSquadSnapshotCard(ImVec2 sz) {
   EndModernCard();
 }
 
+// Forward declarations for finance helpers used in DrawHomePage
+static std::string FmtMoney(long long v);
+
 // ---- DrawHomePage -------------------------------------------------------
 // Layout: Left 28% (Messages + Training + Board Objectives) | Center 42% (Story + Fixture + Agenda + Tactics) | Right 30% (Schedule + Snapshot + Medical)
 
 static void DrawHomePage(float w, float h) {
   const bool kCanClick = !s_escMenuOpen; // block panel clicks while ESC menu is open
   const float kPad = 16.0f, kGap = 10.0f;
+
+  // Shared hover-glow helper — draws club-accent ring and sets hand cursor.
+  // Call AFTER drawing each card. Returns true if hovered (for click handling).
+  const int kGlowR = (int)(kAccent.x*255), kGlowG = (int)(kAccent.y*255), kGlowB = (int)(kAccent.z*255);
+  auto HoverGlow = [&](ImVec2 p, float cw, float ch) -> bool {
+    if (!kCanClick) return false;
+    if (!ImGui::IsMouseHoveringRect(p, ImVec2(p.x+cw, p.y+ch), false)) return false;
+    ImGui::GetWindowDrawList()->AddRect(p, ImVec2(p.x+cw, p.y+ch),
+      IM_COL32(kGlowR, kGlowG, kGlowB, 58), 10.0f, 0, 1.6f);
+    ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    return true;
+  };
   float usW    = w - 2.0f*kPad - 2.0f*kGap;
   float leftW  = usW * 0.28f;
   float centerW = usW * 0.42f;
@@ -2912,28 +2927,22 @@ static void DrawHomePage(float w, float h) {
   ImGui::PopStyleColor();
   { ImVec2 p = ImGui::GetCursorScreenPos();
     DrawMessagesCard(ImVec2(leftW, kMsgH));
-    if (kCanClick && ImGui::IsMouseHoveringRect(p, ImVec2(p.x+leftW, p.y+kMsgH), false)) {
-      ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-      if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) NavPush(PAGE_INBOX);
-    }
+    if (HoverGlow(p, leftW, kMsgH) && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+      NavPush(PAGE_INBOX);
   }
   ImGui::Dummy(ImVec2(0, kGap));
   { ImVec2 p = ImGui::GetCursorScreenPos();
     DrawTrainingScheduleCard(ImVec2(leftW, kTrainH));
-    if (kCanClick && ImGui::IsMouseHoveringRect(p, ImVec2(p.x+leftW, p.y+kTrainH), false)) {
-      ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-      if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) NavPush(PAGE_TRAINING);
-    }
+    if (HoverGlow(p, leftW, kTrainH) && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+      NavPush(PAGE_TRAINING);
   }
   ImGui::Dummy(ImVec2(0, kGap));
   DrawBoardObjectivesCard(ImVec2(leftW, kBoardH));
   ImGui::Dummy(ImVec2(0, kGap));
   { ImVec2 p = ImGui::GetCursorScreenPos();
     DrawSquadSnapshotCard(ImVec2(leftW, kSquadH));
-    if (kCanClick && ImGui::IsMouseHoveringRect(p, ImVec2(p.x+leftW, p.y+kSquadH), false)) {
-      ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-      if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) NavPush(PAGE_SQUAD);
-    }
+    if (HoverGlow(p, leftW, kSquadH) && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+      NavPush(PAGE_SQUAD);
   }
   ImGui::EndChild();
 
@@ -2945,13 +2954,14 @@ static void DrawHomePage(float w, float h) {
   ImGui::PopStyleColor();
   { ImVec2 p = ImGui::GetCursorScreenPos();
     DrawTopStoryCard(ImVec2(centerW, kStoryH));
-    if (kCanClick && ImGui::IsMouseHoveringRect(p, ImVec2(p.x+centerW, p.y+kStoryH), false)) {
-      ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-      if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) NavPush(PAGE_NEWS);
-    }
+    if (HoverGlow(p, centerW, kStoryH) && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+      NavPush(PAGE_NEWS);
   }
   ImGui::Dummy(ImVec2(0, kGap));
-  DrawNextFixtureCard(ImVec2(centerW, kFixtH));
+  { ImVec2 p = ImGui::GetCursorScreenPos();
+    DrawNextFixtureCard(ImVec2(centerW, kFixtH));
+    HoverGlow(p, centerW, kFixtH);
+  }
   ImGui::Dummy(ImVec2(0, kGap));
   {
     // Inline upcoming card — fixed 5-row height
@@ -2996,9 +3006,164 @@ static void DrawHomePage(float w, float h) {
   ImGui::Dummy(ImVec2(0, kGap));
   { ImVec2 p = ImGui::GetCursorScreenPos();
     DrawTacticsOverviewCard(ImVec2(centerW, kTacH));
-    if (kCanClick && ImGui::IsMouseHoveringRect(p, ImVec2(p.x+centerW, p.y+kTacH), false)) {
-      ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-      if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) NavPush(PAGE_TACTICS);
+    if (HoverGlow(p, centerW, kTacH) && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+      NavPush(PAGE_TACTICS);
+  }
+  ImGui::Dummy(ImVec2(0, kGap));
+  // ---- Finance + Scouting quick-view panels (side by side, pure DrawList) -
+  {
+    const float kPH   = 138.0f;  // panel height (extra room for 15px font)
+    const float halfC = (centerW - kGap) * 0.5f;
+    const float kPX   = 15.0f;
+    const float kRad  = 10.0f;
+    const ImU32 kLbl  = IM_COL32(215,228,250,225); // white label text
+    const ImU32 kStripe = IM_COL32(kGlowR, kGlowG, kGlowB, 210); // club-color stripe
+    ImDrawList *pdl   = ImGui::GetWindowDrawList();
+
+    // ===== FINANCE CARD =====
+    {
+      ImVec2 fp = ImGui::GetCursorScreenPos();
+      const float fw = halfC, fh = kPH;
+      const auto &fi = g_CareerHub.finances;
+      long long bal     = fi.balance;
+      long long weekNet = fi.weeklyTV - fi.weeklyWages - fi.weeklyOperating;
+      long long proj    = bal + weekNet * 38LL;
+
+      ImU32 balCol  = bal     >= 0 ? IM_COL32(50,210,105,255) : IM_COL32(215,72,72,255);
+      ImU32 flowCol = weekNet >= 0 ? IM_COL32(50,210,105,255) : IM_COL32(215,72,72,255);
+      ImU32 projCol = proj    >= 0 ? IM_COL32(50,210,105,255) : IM_COL32(215,72,72,255);
+
+      // Card shell
+      pdl->AddRectFilled(fp, ImVec2(fp.x+fw, fp.y+fh), C32(kBgCard), kRad);
+      pdl->AddRect      (fp, ImVec2(fp.x+fw, fp.y+fh), C32(kBorder), kRad, 0, 1.0f);
+      pdl->AddLine(ImVec2(fp.x+kRad, fp.y+1), ImVec2(fp.x+fw-kRad, fp.y+1),
+                   IM_COL32(255,255,255,8), 1.0f);
+      // Club-color left stripe
+      pdl->AddRectFilled(ImVec2(fp.x,     fp.y+kRad),
+                         ImVec2(fp.x+3.5f, fp.y+fh-kRad), kStripe, 2.0f);
+
+      // "Balance" label
+      float lY = fp.y + 14.0f;
+      if (g_ManagerFontSmall)
+        pdl->AddText(g_ManagerFontSmall, 15.0f, ImVec2(fp.x+kPX, lY), kLbl, "Balance");
+
+      // Balance value — large, right-aligned
+      std::string balStr = FmtMoney(bal);
+      if (g_ManagerFontBold) {
+        ImVec2 bvSz = g_ManagerFontBold->CalcTextSizeA(22.0f, FLT_MAX, 0.0f, balStr.c_str());
+        pdl->AddText(g_ManagerFontBold, 22.0f,
+                     ImVec2(fp.x + fw - bvSz.x - kPX, lY - 4.0f),
+                     balCol, balStr.c_str());
+      }
+
+      // Divider
+      float sepY = fp.y + 52.0f;
+      pdl->AddLine(ImVec2(fp.x+kPX, sepY), ImVec2(fp.x+fw-kPX, sepY),
+                   IM_COL32(255,255,255,12), 1.0f);
+
+      // Weekly Cashflow row
+      float r1Y = sepY + 11.0f;
+      std::string flowStr = (weekNet >= 0 ? "+" : "") + FmtMoney(weekNet) + "/wk";
+      if (g_ManagerFontSmall) {
+        pdl->AddText(g_ManagerFontSmall, 15.0f, ImVec2(fp.x+kPX, r1Y), kLbl, "Weekly Cashflow");
+        ImVec2 fSz = g_ManagerFontSmall->CalcTextSizeA(15.0f, FLT_MAX, 0.0f, flowStr.c_str());
+        pdl->AddText(g_ManagerFontSmall, 15.0f,
+                     ImVec2(fp.x+fw - fSz.x - kPX, r1Y), flowCol, flowStr.c_str());
+      }
+
+      // Season Projection row
+      float r2Y = r1Y + 27.0f;
+      std::string projStr = (proj >= 0 ? "+" : "") + FmtMoney(proj);
+      if (g_ManagerFontSmall) {
+        pdl->AddText(g_ManagerFontSmall, 15.0f, ImVec2(fp.x+kPX, r2Y), kLbl, "Season Projection");
+        ImVec2 pSz = g_ManagerFontSmall->CalcTextSizeA(15.0f, FLT_MAX, 0.0f, projStr.c_str());
+        pdl->AddText(g_ManagerFontSmall, 15.0f,
+                     ImVec2(fp.x+fw - pSz.x - kPX, r2Y), projCol, projStr.c_str());
+      }
+
+      if (HoverGlow(fp, fw, fh) && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+        NavPush(PAGE_FINANCES);
+      ImGui::Dummy(ImVec2(fw, fh));
+    }
+
+    ImGui::SameLine(0, kGap);
+
+    // ===== SCOUTING CARD =====
+    {
+      ImVec2 sp = ImGui::GetCursorScreenPos();
+      const float sw = halfC, sh = kPH;
+      int queueCnt  = (int)g_CareerHub.scoutQueue.size();
+      int reportCnt = (int)g_CareerHub.scoutReports.size();
+
+      // Card shell
+      pdl->AddRectFilled(sp, ImVec2(sp.x+sw, sp.y+sh), C32(kBgCard), kRad);
+      pdl->AddRect      (sp, ImVec2(sp.x+sw, sp.y+sh), C32(kBorder), kRad, 0, 1.0f);
+      pdl->AddLine(ImVec2(sp.x+kRad, sp.y+1), ImVec2(sp.x+sw-kRad, sp.y+1),
+                   IM_COL32(255,255,255,8), 1.0f);
+      // Club-color left stripe
+      pdl->AddRectFilled(ImVec2(sp.x,     sp.y+kRad),
+                         ImVec2(sp.x+3.5f, sp.y+sh-kRad), kStripe, 2.0f);
+
+      // Two large stat blocks
+      float b1X   = sp.x + kPX + 6.0f;
+      float b2X   = sp.x + sw * 0.5f + 10.0f;
+      float statY = sp.y + 13.0f;
+
+      // Awaiting count
+      {
+        char ab[8]; snprintf(ab, sizeof(ab), "%d", queueCnt);
+        ImU32 nC = (queueCnt > 0) ? IM_COL32(225,178,42,255) : IM_COL32(60,75,128,230);
+        if (g_ManagerFontBold)
+          pdl->AddText(g_ManagerFontBold, 22.0f, ImVec2(b1X, statY), nC, ab);
+        if (g_ManagerFontSmall)
+          pdl->AddText(g_ManagerFontSmall, 15.0f, ImVec2(b1X, statY + 27.0f), kLbl, "Awaiting");
+      }
+
+      // Vertical divider between stat blocks
+      float midX = sp.x + sw * 0.5f;
+      pdl->AddLine(ImVec2(midX, sp.y + 12.0f), ImVec2(midX, sp.y + 12.0f + 48.0f),
+                   IM_COL32(255,255,255,14), 1.0f);
+
+      // Reports ready count
+      {
+        char rb[8]; snprintf(rb, sizeof(rb), "%d", reportCnt);
+        ImU32 nC = (reportCnt > 0) ? IM_COL32(50,210,105,255) : IM_COL32(60,75,128,230);
+        if (g_ManagerFontBold)
+          pdl->AddText(g_ManagerFontBold, 22.0f, ImVec2(b2X, statY), nC, rb);
+        if (g_ManagerFontSmall)
+          pdl->AddText(g_ManagerFontSmall, 15.0f, ImVec2(b2X, statY + 27.0f), kLbl, "Reports Ready");
+      }
+
+      // Divider
+      float sSepY = sp.y + 74.0f;
+      pdl->AddLine(ImVec2(sp.x+kPX, sSepY), ImVec2(sp.x+sw-kPX, sSepY),
+                   IM_COL32(255,255,255,12), 1.0f);
+
+      // Bottom info row
+      float btmY = sSepY + 11.0f;
+      if (g_ManagerFontSmall) {
+        if (!g_CareerHub.scoutQueue.empty()) {
+          std::string soonest = g_CareerHub.scoutQueue[0].dueDate;
+          for (const auto &sq : g_CareerHub.scoutQueue)
+            if (!sq.dueDate.empty() && (soonest.empty() || sq.dueDate < soonest))
+              soonest = sq.dueDate;
+          if (!soonest.empty()) {
+            std::string lbl = "Next report: " + FormatDateDisplay(soonest);
+            pdl->AddText(g_ManagerFontSmall, 15.0f, ImVec2(sp.x+kPX, btmY), kLbl, lbl.c_str());
+          }
+        } else if (reportCnt > 0) {
+          const auto &sr = g_CareerHub.scoutReports.back();
+          std::string lbl = "Latest: " + sr.firstName + " " + sr.lastName;
+          pdl->AddText(g_ManagerFontSmall, 15.0f, ImVec2(sp.x+kPX, btmY), kLbl, lbl.c_str());
+        } else {
+          pdl->AddText(g_ManagerFontSmall, 15.0f, ImVec2(sp.x+kPX, btmY),
+                       IM_COL32(60,75,128,200), "No active scouting missions");
+        }
+      }
+
+      if (HoverGlow(sp, sw, sh) && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+        NavPush(PAGE_SCOUTING);
+      ImGui::Dummy(ImVec2(sw, sh));
     }
   }
   ImGui::EndChild();
@@ -3011,26 +3176,18 @@ static void DrawHomePage(float w, float h) {
   ImGui::PopStyleColor();
   { ImVec2 p = ImGui::GetCursorScreenPos();
     DrawFixtureScheduleCard(ImVec2(rightW, schedH));
-    if (kCanClick && ImGui::IsMouseHoveringRect(p, ImVec2(p.x+rightW, p.y+schedH), false)) {
-      ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-      if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-        s_schedInit = false;
-        s_schedClubInit = true;
-        s_schedClub = -1;
-        NavPush(PAGE_SCHEDULE);
-      }
+    if (HoverGlow(p, rightW, schedH) && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+      s_schedInit = false;
+      s_schedClubInit = true;
+      s_schedClub = -1;
+      NavPush(PAGE_SCHEDULE);
     }
   }
   ImGui::Dummy(ImVec2(0, kGap));
-  {
-    ImVec2 snapPos = ImGui::GetCursorScreenPos();
+  { ImVec2 p = ImGui::GetCursorScreenPos();
     DrawLeagueSnapshotCard(ImVec2(rightW, kSnapH));
-    ImVec2 snapMax(snapPos.x + rightW, snapPos.y + kSnapH);
-    if (kCanClick && ImGui::IsMouseHoveringRect(snapPos, snapMax, false)) {
-      ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-      if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
-        NavPush(PAGE_COMPETITIONS);
-    }
+    if (HoverGlow(p, rightW, kSnapH) && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+      NavPush(PAGE_COMPETITIONS);
   }
   ImGui::Dummy(ImVec2(0, kGap));
   DrawMedicalCentreCard(ImVec2(rightW, kMedH));
