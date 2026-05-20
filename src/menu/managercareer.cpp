@@ -215,6 +215,38 @@ static void EnsureCareerTables() {
       "UPDATE leagues SET currency='\xE2\x82\xAC' WHERE (currency IS NULL OR currency='');");
     delete s2;
   }
+
+  // Create scout_queue table (players currently being scouted).
+  {
+    DatabaseResult *r = GetDB()->Query(
+      "CREATE TABLE IF NOT EXISTS scout_queue ("
+      "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+      "manager_id INTEGER NOT NULL,"
+      "player_id INTEGER NOT NULL,"
+      "firstname TEXT DEFAULT '',"
+      "lastname TEXT DEFAULT '',"
+      "club_name TEXT DEFAULT '',"
+      "scout_rating INTEGER NOT NULL DEFAULT 1,"
+      "due_date TEXT NOT NULL,"
+      "UNIQUE(manager_id, player_id));");
+    delete r;
+  }
+
+  // Create scout_reports table (completed scouting results).
+  {
+    DatabaseResult *r = GetDB()->Query(
+      "CREATE TABLE IF NOT EXISTS scout_reports ("
+      "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+      "manager_id INTEGER NOT NULL,"
+      "player_id INTEGER NOT NULL,"
+      "firstname TEXT DEFAULT '',"
+      "lastname TEXT DEFAULT '',"
+      "club_name TEXT DEFAULT '',"
+      "reveal_pct REAL NOT NULL DEFAULT 0.0,"
+      "created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+      "UNIQUE(manager_id, player_id));");
+    delete r;
+  }
 }
 
 static void DeleteCareerSeason(int managerId) {
@@ -1263,6 +1295,24 @@ void ManagerMainScreenPage::StartNextSeason() {
 // ---- Calendar helpers ------------------------------------------------------
 
 // Add exactly one calendar day to an ISO date string YYYY-MM-DD.
+static std::string AddNDays(const std::string &iso, int n) {
+  std::string d = iso;
+  for (int i = 0; i < n; i++) {
+    if (d.size() < 10) break;
+    int year  = atoi(d.substr(0, 4).c_str());
+    int month = atoi(d.substr(5, 2).c_str());
+    int day   = atoi(d.substr(8, 2).c_str());
+    bool leap = (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0));
+    const int kDIM[] = {0,31,leap?29:28,31,30,31,30,31,31,30,31,30,31};
+    day++;
+    if (day > kDIM[month]) { day = 1; month++; }
+    if (month > 12)        { month = 1; year++; }
+    char buf[16]; snprintf(buf, sizeof(buf), "%04d-%02d-%02d", year, month, day);
+    d = buf;
+  }
+  return d;
+}
+
 static std::string AddOneDay(const std::string &iso) {
   if (iso.size() < 10) return iso;
   int year  = atoi(iso.substr(0, 4).c_str());
@@ -1276,6 +1326,63 @@ static std::string AddOneDay(const std::string &iso) {
   char buf[16];
   snprintf(buf, sizeof(buf), "%04d-%02d-%02d", year, month, day);
   return std::string(buf);
+}
+
+static float ComputeRevealPct(int rating) {
+  switch (rating) {
+    case 1: return 0.10f + (rand() % 6)  * 0.01f; // 10-15%
+    case 2: return 0.15f + (rand() % 11) * 0.01f; // 15-25%
+    case 3: return 0.35f + (rand() % 11) * 0.01f; // 35-45%
+    case 4: return 0.40f + (rand() % 11) * 0.01f; // 40-50%
+    case 5: return 0.45f + (rand() % 6)  * 0.01f; // 45-50%
+    default: return 0.10f;
+  }
+}
+
+static void ProcessCompletedScouts(int managerId, const std::string &newDate) {
+  std::stringstream q;
+  q << "SELECT player_id, firstname, lastname, club_name, scout_rating"
+    << " FROM scout_queue"
+    << " WHERE manager_id=" << managerId
+    << " AND due_date <= '" << newDate << "';";
+  DatabaseResult *r = GetDB()->Query(q.str());
+  if (!r) return;
+
+  for (unsigned int i = 0; i < r->data.size(); i++) {
+    int   pid    = atoi(r->data[i][0].c_str());
+    std::string fn   = r->data[i].size() > 1 ? r->data[i][1] : "";
+    std::string ln   = r->data[i].size() > 2 ? r->data[i][2] : "";
+    std::string club = r->data[i].size() > 3 ? r->data[i][3] : "";
+    int   rating = r->data[i].size() > 4 ? atoi(r->data[i][4].c_str()) : 1;
+
+    float newPct = ComputeRevealPct(rating);
+
+    // Accumulate: never reduce what was already known
+    std::stringstream eq;
+    eq << "SELECT reveal_pct FROM scout_reports WHERE manager_id=" << managerId
+       << " AND player_id=" << pid << " LIMIT 1;";
+    DatabaseResult *er = GetDB()->Query(eq.str());
+    if (er && er->data.size() > 0 && !er->data[0][0].empty()) {
+      float existing = (float)atof(er->data[0][0].c_str());
+      if (existing > newPct) newPct = existing;
+    }
+    if (er) delete er;
+
+    std::stringstream iq;
+    iq << "INSERT OR REPLACE INTO scout_reports"
+       << " (manager_id, player_id, firstname, lastname, club_name, reveal_pct)"
+       << " VALUES (" << managerId << "," << pid
+       << ",'" << fn << "','" << ln << "','" << club << "'," << newPct << ");";
+    DatabaseResult *ir = GetDB()->Query(iq.str());
+    delete ir;
+  }
+  delete r;
+
+  std::stringstream dq;
+  dq << "DELETE FROM scout_queue WHERE manager_id=" << managerId
+     << " AND due_date <= '" << newDate << "';";
+  DatabaseResult *dr = GetDB()->Query(dq.str());
+  delete dr;
 }
 
 void ManagerMainScreenPage::AdvanceDay() {
@@ -1293,6 +1400,9 @@ void ManagerMainScreenPage::AdvanceDay() {
 
   // Step 2: compute next day entirely in C++ to avoid the CURRENT_DATE collision.
   std::string newDate = AddOneDay(fromDate);
+
+  // Step 2b: complete any scout reports that are due by the new date.
+  ProcessCompletedScouts(managerId, newDate);
 
   // Step 3: write the literal new date string into the DB.
   std::stringstream uq;

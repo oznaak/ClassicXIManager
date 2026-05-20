@@ -106,6 +106,21 @@ struct CareerHubState {
   };
   std::vector<StaffMember> staff; // currently hired staff for this manager
 
+  struct ScoutQueueEntry {
+    int         playerId    = 0;
+    std::string firstName, lastName, clubName;
+    std::string dueDate;    // YYYY-MM-DD when report arrives
+    int         scoutRating = 1;
+  };
+  std::vector<ScoutQueueEntry> scoutQueue;
+
+  struct ScoutReport {
+    int         playerId  = 0;
+    std::string firstName, lastName, clubName;
+    float       revealPct = 0.0f; // 0.0-1.0 fraction of stats revealed
+  };
+  std::vector<ScoutReport> scoutReports;
+
   struct FinanceTransaction {
     std::string date;
     std::string category;   // 'tv_rights','matchday','wages','operating','prize'

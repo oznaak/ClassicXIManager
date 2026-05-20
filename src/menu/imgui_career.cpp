@@ -186,6 +186,8 @@ void CareerHubState::Clear() {
   standings.clear();
   tactics.clear();
   staff.clear();
+  scoutQueue.clear();
+  scoutReports.clear();
   finances = {};
   ClearBadgeCache();
   ResetNavState();
@@ -922,6 +924,51 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
       finances.recent.push_back(ft);
     }
     delete rr;
+  }
+
+  // Load scout queue (in-progress scouting)
+  scoutQueue.clear();
+  {
+    std::stringstream q;
+    q << "SELECT player_id, firstname, lastname, club_name, due_date, scout_rating"
+      << " FROM scout_queue WHERE manager_id=" << mgrId
+      << " ORDER BY due_date ASC;";
+    DatabaseResult *r = GetDB()->Query(q.str());
+    if (r) {
+      for (unsigned int i = 0; i < r->data.size(); i++) {
+        ScoutQueueEntry e;
+        e.playerId    = atoi(r->data[i][0].c_str());
+        e.firstName   = r->data[i].size() > 1 ? r->data[i][1] : "";
+        e.lastName    = r->data[i].size() > 2 ? r->data[i][2] : "";
+        e.clubName    = r->data[i].size() > 3 ? r->data[i][3] : "";
+        e.dueDate     = r->data[i].size() > 4 ? r->data[i][4] : "";
+        e.scoutRating = r->data[i].size() > 5 ? atoi(r->data[i][5].c_str()) : 1;
+        scoutQueue.push_back(e);
+      }
+      delete r;
+    }
+  }
+
+  // Load completed scout reports
+  scoutReports.clear();
+  {
+    std::stringstream q;
+    q << "SELECT player_id, firstname, lastname, club_name, reveal_pct"
+      << " FROM scout_reports WHERE manager_id=" << mgrId
+      << " ORDER BY id DESC;";
+    DatabaseResult *r = GetDB()->Query(q.str());
+    if (r) {
+      for (unsigned int i = 0; i < r->data.size(); i++) {
+        ScoutReport sr;
+        sr.playerId  = atoi(r->data[i][0].c_str());
+        sr.firstName = r->data[i].size() > 1 ? r->data[i][1] : "";
+        sr.lastName  = r->data[i].size() > 2 ? r->data[i][2] : "";
+        sr.clubName  = r->data[i].size() > 3 ? r->data[i][3] : "";
+        sr.revealPct = r->data[i].size() > 4 ? (float)atof(r->data[i][4].c_str()) : 0.0f;
+        scoutReports.push_back(sr);
+      }
+      delete r;
+    }
   }
 
   active = true;
@@ -3120,11 +3167,34 @@ static void RunPlayerSearch(const char *raw) {
   delete r;
 }
 
-// Returns true for ~90% of stat indices for a given player — deterministic, never re-rolls.
+// Returns true if this stat should be hidden for a non-owned player.
+//
+// Visibility rule (consistent direction):
+//   A stat is VISIBLE when  bucket >= hideThreshold
+//   A stat is HIDDEN  when  bucket <  hideThreshold
+//
+// No report:          hideThreshold = 90  → 10 % visible  (buckets 90-99)
+// Report revealPct R: hideThreshold = 100 - round(R*100)
+//   e.g. 40% reveal  → hideThreshold = 60  → 40 % visible  (buckets 60-99)
+//   e.g. 50% reveal  → hideThreshold = 50  → 50 % visible  (buckets 50-99)
+//
+// Because we lower the threshold as scouting improves, every stat that was
+// already visible (bucket ≥ 90) stays visible after scouting (bucket ≥ 60, etc.).
 static bool IsHiddenStat(int playerId, int statIdx) {
   unsigned int h = (unsigned int)playerId * 2654435761u ^ (unsigned int)statIdx * 2246822519u;
   h ^= h >> 16;
-  return (h % 100) < 90;
+  int bucket = (int)(h % 100); // 0-99, deterministic per (playerId, statIdx)
+
+  int hideThreshold = 90; // default: 10% visible
+  for (const auto &sr : g_CareerHub.scoutReports) {
+    if (sr.playerId == playerId) {
+      hideThreshold = 100 - (int)(sr.revealPct * 100.0f);
+      if (hideThreshold < 0)   hideThreshold = 0;
+      if (hideThreshold > 100) hideThreshold = 100;
+      break;
+    }
+  }
+  return bucket < hideThreshold;
 }
 
 // Draws a section title + bar-based stat rows, all via DrawList (no ImGui tables).
@@ -3211,6 +3281,13 @@ static void DrawStatSection(const char *title, ImU32 titleColor,
   }
   ImGui::Dummy(ImVec2(0, 14.0f));
 }
+
+// Forward declarations for scouting helpers (defined later in this file)
+static void StartScouting(int managerId, int playerId,
+                          const std::string &fn, const std::string &ln,
+                          const std::string &club, int scoutRating,
+                          const std::string &currentDate);
+static void CancelScouting(int managerId, int playerId);
 
 // ---- DrawPlayerDetailPage ------------------------------------------------
 
@@ -3419,6 +3496,63 @@ static void DrawPlayerDetailPage(float w, float h) {
       tx2 += tw;
     }
   }
+  // Scout button — right side of tab row, non-squad players only
+  if (!ownPlayer) {
+    const CareerHubState::StaffMember *scout = nullptr;
+    for (const auto &sm : g_CareerHub.staff)
+      if (sm.role == "Scout") { scout = &sm; break; }
+
+    bool inQueue = false;
+    for (const auto &sq : g_CareerHub.scoutQueue)
+      if (sq.playerId == pl.id) { inQueue = true; break; }
+
+    bool hasPriorReport = false;
+    for (const auto &sr : g_CareerHub.scoutReports)
+      if (sr.playerId == pl.id) { hasPriorReport = true; break; }
+
+    const float kBtnW = 148.0f, kBtnH = 26.0f;
+    float btnX = tabOrg.x + usW - kBtnW;
+    float btnY2 = tabOrg.y + (kTabH - kBtnH) * 0.5f;
+    ImGui::SetCursorScreenPos(ImVec2(btnX, btnY2));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 5.0f);
+    PushMgrFont(g_ManagerFontSmall);
+
+    if (inQueue) {
+      ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(30, 55, 100, 200));
+      ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(30, 55, 100, 200));
+      ImGui::PushStyleColor(ImGuiCol_ButtonActive,  IM_COL32(30, 55, 100, 200));
+      ImGui::PushStyleColor(ImGuiCol_Text,          IM_COL32(130, 160, 210, 200));
+      ImGui::BeginDisabled(true);
+      ImGui::Button("Waiting on Report", ImVec2(kBtnW, kBtnH));
+      ImGui::EndDisabled();
+      ImGui::PopStyleColor(4);
+    } else if (!scout) {
+      ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(30, 38, 65, 160));
+      ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(40, 50, 80, 180));
+      ImGui::PushStyleColor(ImGuiCol_ButtonActive,  IM_COL32(40, 50, 80, 180));
+      ImGui::PushStyleColor(ImGuiCol_Text,          IM_COL32(100, 110, 140, 160));
+      ImGui::BeginDisabled(true);
+      ImGui::Button("Scout Player", ImVec2(kBtnW, kBtnH));
+      ImGui::EndDisabled();
+      ImGui::PopStyleColor(4);
+      if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("You need to hire a Scout first");
+    } else {
+      ImGui::PushStyleColor(ImGuiCol_Button,        C32(kAccent));
+      ImGui::PushStyleColor(ImGuiCol_ButtonHovered, C32(kAccentH));
+      ImGui::PushStyleColor(ImGuiCol_ButtonActive,  C32(kAccentA));
+      const char *lbl = hasPriorReport ? "Re-Scout Player" : "Scout Player";
+      if (ImGui::Button(lbl, ImVec2(kBtnW, kBtnH)))
+        StartScouting(g_CareerHub.managerId, pl.id,
+                      pl.firstName, pl.lastName, s_detailClubName,
+                      scout->rating, g_CareerHub.currentDate);
+      ImGui::PopStyleColor(3);
+    }
+
+    PopMgrFont(g_ManagerFontSmall);
+    ImGui::PopStyleVar();
+  }
+
   ImGui::SetCursorScreenPos(ImVec2(tabOrg.x, tabOrg.y + kTabH));
   ImGui::Dummy(ImVec2(0, kGap));
 
@@ -6139,6 +6273,59 @@ static GLuint GetStaffPlaceholderTex(const std::string &role) {
   return LoadMediaTex("media/textures/faces/Men Default faces /Manager - New colorways/Manager11-Grey.png");
 }
 
+// ---- Scouting DB helpers ------------------------------------------------
+
+static int ComputeScoutDays(int rating) {
+  switch (rating) {
+    case 1: return 10 + (rand() % 6); // 10-15 days
+    case 2: return 9  + (rand() % 5); // 9-13 days
+    case 3: return 8  + (rand() % 4); // 8-11 days
+    case 4: return 7  + (rand() % 3); // 7-9 days
+    case 5: return 4  + (rand() % 2); // 4-5 days
+    default: return 10;
+  }
+}
+
+static void StartScouting(int managerId, int playerId,
+                          const std::string &fn, const std::string &ln,
+                          const std::string &club, int scoutRating,
+                          const std::string &currentDate) {
+  int days = ComputeScoutDays(scoutRating);
+  // Compute due date in C++ (mirrors AddNDays in managercareer.cpp)
+  std::string dueDate = currentDate;
+  for (int i = 0; i < days; i++) {
+    if (dueDate.size() < 10) break;
+    int year  = atoi(dueDate.substr(0,4).c_str());
+    int month = atoi(dueDate.substr(5,2).c_str());
+    int day   = atoi(dueDate.substr(8,2).c_str());
+    bool leap = (year%4==0 && (year%100!=0 || year%400==0));
+    const int kDIM[] = {0,31,leap?29:28,31,30,31,30,31,31,30,31,30,31};
+    day++;
+    if (day > kDIM[month]) { day = 1; month++; }
+    if (month > 12)        { month = 1; year++; }
+    char buf[16]; snprintf(buf, sizeof(buf), "%04d-%02d-%02d", year, month, day);
+    dueDate = buf;
+  }
+  std::stringstream q;
+  q << "INSERT OR IGNORE INTO scout_queue"
+    << " (manager_id, player_id, firstname, lastname, club_name, scout_rating, due_date)"
+    << " VALUES (" << managerId << "," << playerId
+    << ",'" << fn << "','" << ln << "','" << club << "',"
+    << scoutRating << ",'" << dueDate << "');";
+  DatabaseResult *r = GetDB()->Query(q.str());
+  delete r;
+  g_CareerHub.LoadFromDB(managerId, g_CareerHub.clubId);
+}
+
+static void CancelScouting(int managerId, int playerId) {
+  std::stringstream q;
+  q << "DELETE FROM scout_queue WHERE manager_id=" << managerId
+    << " AND player_id=" << playerId << ";";
+  DatabaseResult *r = GetDB()->Query(q.str());
+  delete r;
+  g_CareerHub.LoadFromDB(managerId, g_CareerHub.clubId);
+}
+
 // ---- Staff market filter state ------------------------------------------
 static int s_mktFilterRating  = 0;  // 0 = any, 1-5 = min stars
 static int s_mktFilterMaxWage = 0;  // 0 = unlimited
@@ -6913,6 +7100,241 @@ static void DrawFinancesPage(float w, float h) {
   ImGui::EndChild();
 }
 
+// ---- DrawScoutingPage ---------------------------------------------------
+
+static void DrawScoutingPage(float w, float h) {
+  const float kPad = 14.0f;
+  const float kGap = 12.0f;
+  ImGui::SetCursorPos(ImVec2(kPad, 8.0f));
+  float usW = w - kPad * 2.0f;
+  float halfW = (usW - kGap) * 0.5f;
+  float colH  = h - 16.0f;
+
+  ImDrawList *dl = ImGui::GetWindowDrawList();
+  ImVec2 origin  = ImGui::GetCursorScreenPos();
+
+  // ---- Left panel: completed reports ------------------------------------
+  {
+    float px = origin.x;
+    float py = origin.y;
+
+    // Panel header
+    dl->AddRectFilled(ImVec2(px, py), ImVec2(px+halfW, py+28.0f),
+                      IM_COL32(16,28,60,220), 8.0f);
+    PushMgrFont(g_ManagerFontSmall);
+    ImVec2 hdrSz = ImGui::CalcTextSize("Scouted Players");
+    dl->AddText(ImVec2(px + (halfW - hdrSz.x) * 0.5f, py + 6.0f),
+                IM_COL32(180,200,240,240), "Scouted Players");
+    PopMgrFont(g_ManagerFontSmall);
+
+    ImGui::SetCursorScreenPos(ImVec2(px, py + 32.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0,0));
+    ImGui::BeginChild("##sc_done", ImVec2(halfW, colH - 34.0f), false,
+                      ImGuiWindowFlags_None);
+    ImGui::PopStyleVar();
+    ImDrawList *wdl = ImGui::GetWindowDrawList();
+
+    if (g_CareerHub.scoutReports.empty()) {
+      ImGui::Dummy(ImVec2(halfW, 20.0f));
+      PushMgrFont(g_ManagerFontSmall);
+      ImGui::PushStyleColor(ImGuiCol_Text, kTextDim);
+      float tw = ImGui::CalcTextSize("No scouted players yet.").x;
+      ImGui::SetCursorPosX((halfW - tw) * 0.5f);
+      ImGui::TextUnformatted("No scouted players yet.");
+      ImGui::PopStyleColor();
+      PopMgrFont(g_ManagerFontSmall);
+    } else {
+      const float kRowH = 54.0f, kRowGap = 4.0f;
+      float cw = ImGui::GetContentRegionAvail().x;
+      float ry = ImGui::GetCursorScreenPos().y;
+      float rx = ImGui::GetCursorScreenPos().x;
+
+      for (unsigned int i = 0; i < g_CareerHub.scoutReports.size(); i++) {
+        const auto &sr = g_CareerHub.scoutReports[i];
+        ImU32 rowBg = (i % 2 == 0) ? IM_COL32(16,24,52,200) : IM_COL32(12,18,40,160);
+        wdl->AddRectFilled(ImVec2(rx, ry), ImVec2(rx+cw, ry+kRowH), rowBg, 4.0f);
+
+        // Name
+        std::string fullName = sr.firstName.empty() ? sr.lastName
+                             : (sr.lastName.empty() ? sr.firstName
+                             : sr.firstName + " " + sr.lastName);
+        PushMgrFont(g_ManagerFontBold);
+        wdl->AddText(ImVec2(rx+10.0f, ry+6.0f),
+                     IM_COL32(220,228,248,240), fullName.c_str());
+        PopMgrFont(g_ManagerFontBold);
+
+        // Club name
+        PushMgrFont(g_ManagerFontSmall);
+        wdl->AddText(ImVec2(rx+10.0f, ry+24.0f),
+                     IM_COL32(140,155,190,190), sr.clubName.c_str());
+        PopMgrFont(g_ManagerFontSmall);
+
+        // Known% pill (right side)
+        int knownPct = (int)(sr.revealPct * 100.0f);
+        char pctBuf[16]; snprintf(pctBuf, sizeof(pctBuf), "%d%% known", knownPct);
+        ImU32 pctCol = knownPct >= 40 ? IM_COL32(80,215,110,255) :
+                       knownPct >= 20 ? IM_COL32(230,185,50,255)  :
+                                        IM_COL32(200,90,90,255);
+        PushMgrFont(g_ManagerFontSmall);
+        ImVec2 pctSz = ImGui::CalcTextSize(pctBuf);
+        float  pillW = pctSz.x + 12.0f, pillH = pctSz.y + 4.0f;
+        float  pillX = rx + cw - pillW - 10.0f;
+        float  pillY = ry + (kRowH - pillH) * 0.5f;
+        wdl->AddRectFilled(ImVec2(pillX, pillY), ImVec2(pillX+pillW, pillY+pillH),
+                           IM_COL32((pctCol&0xFF)*0/3,(pctCol>>8&0xFF)*0/3,(pctCol>>16&0xFF)*0/3,80), 5.0f);
+        wdl->AddText(ImVec2(pillX+6.0f, pillY+2.0f), pctCol, pctBuf);
+        PopMgrFont(g_ManagerFontSmall);
+
+        // View button
+        char viewId[32]; snprintf(viewId, sizeof(viewId), "View##scv_%d", sr.playerId);
+        float vBtnW = 52.0f, vBtnH = 22.0f;
+        ImGui::SetCursorScreenPos(ImVec2(pillX - vBtnW - 8.0f, ry + (kRowH - vBtnH)*0.5f));
+        ImGui::PushStyleColor(ImGuiCol_Button,        C32(kAccent));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, C32(kAccentH));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  C32(kAccentA));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
+        PushMgrFont(g_ManagerFontSmall);
+        if (ImGui::Button(viewId, ImVec2(vBtnW, vBtnH))) {
+          // Load player details via search override — query from DB
+          std::stringstream pq;
+          pq << "SELECT id, firstname, lastname, role, age, base_stat,"
+             << " formationorder, weekly_wage, contract_expiry, player_potential,"
+             << " foot, stamina, height, reputation, team_id"
+             << " FROM players WHERE id=" << sr.playerId << " LIMIT 1;";
+          DatabaseResult *pr = GetDB()->Query(pq.str());
+          if (pr && pr->data.size() > 0) {
+            CareerHubState::Player op;
+            op.id            = atoi(pr->data[0][0].c_str());
+            op.firstName     = pr->data[0][1];
+            op.lastName      = pr->data[0][2];
+            op.role          = pr->data[0][3];
+            op.age           = pr->data[0][4];
+            op.baseStat      = (float)atof(pr->data[0][5].c_str());
+            op.weeklywage    = atoi(pr->data[0][7].c_str());
+            op.contractExpiry= pr->data[0][8];
+            op.potential     = atoi(pr->data[0][9].c_str());
+            op.foot          = pr->data[0][10];
+            op.stamina       = atoi(pr->data[0][11].c_str());
+            op.height        = (float)atof(pr->data[0][12].c_str());
+            op.reputation    = (float)atof(pr->data[0][13].c_str());
+            delete pr;
+            s_detailPlayerOverride  = op;
+            s_detailOverrideActive  = true;
+            s_playerDetailId        = op.id;
+            s_detailClubName        = sr.clubName;
+            s_detailClubLogo        = "";
+            s_detailClubShortName   = sr.clubName;
+            NavPush(PAGE_PLAYER_DETAIL);
+          } else {
+            if (pr) delete pr;
+          }
+        }
+        PopMgrFont(g_ManagerFontSmall);
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor(3);
+
+        ImGui::SetCursorScreenPos(ImVec2(rx, ry + kRowH + kRowGap));
+        ImGui::Dummy(ImVec2(cw, 0.0f));
+        ry += kRowH + kRowGap;
+      }
+      ImGui::Dummy(ImVec2(cw, 4.0f));
+    }
+    ImGui::EndChild();
+  }
+
+  // ---- Right panel: in-progress scouting --------------------------------
+  {
+    float px = origin.x + halfW + kGap;
+    float py = origin.y;
+
+    dl->AddRectFilled(ImVec2(px, py), ImVec2(px+halfW, py+28.0f),
+                      IM_COL32(16,28,60,220), 8.0f);
+    PushMgrFont(g_ManagerFontSmall);
+    ImVec2 hdrSz = ImGui::CalcTextSize("Awaiting Reports");
+    dl->AddText(ImVec2(px + (halfW - hdrSz.x) * 0.5f, py + 6.0f),
+                IM_COL32(180,200,240,240), "Awaiting Reports");
+    PopMgrFont(g_ManagerFontSmall);
+
+    ImGui::SetCursorScreenPos(ImVec2(px, py + 32.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0,0));
+    ImGui::BeginChild("##sc_queue", ImVec2(halfW, colH - 34.0f), false,
+                      ImGuiWindowFlags_None);
+    ImGui::PopStyleVar();
+    ImDrawList *wdl = ImGui::GetWindowDrawList();
+
+    if (g_CareerHub.scoutQueue.empty()) {
+      ImGui::Dummy(ImVec2(halfW, 20.0f));
+      PushMgrFont(g_ManagerFontSmall);
+      ImGui::PushStyleColor(ImGuiCol_Text, kTextDim);
+      float tw = ImGui::CalcTextSize("No active scouting missions.").x;
+      ImGui::SetCursorPosX((halfW - tw) * 0.5f);
+      ImGui::TextUnformatted("No active scouting missions.");
+      ImGui::PopStyleColor();
+      PopMgrFont(g_ManagerFontSmall);
+    } else {
+      const float kRowH = 54.0f, kRowGap = 4.0f;
+      float cw = ImGui::GetContentRegionAvail().x;
+      float ry = ImGui::GetCursorScreenPos().y;
+      float rx = ImGui::GetCursorScreenPos().x;
+
+      for (unsigned int i = 0; i < g_CareerHub.scoutQueue.size(); i++) {
+        const auto &sq = g_CareerHub.scoutQueue[i];
+        ImU32 rowBg = (i % 2 == 0) ? IM_COL32(16,24,52,200) : IM_COL32(12,18,40,160);
+        wdl->AddRectFilled(ImVec2(rx, ry), ImVec2(rx+cw, ry+kRowH), rowBg, 4.0f);
+
+        // Name
+        std::string fullName = sq.firstName.empty() ? sq.lastName
+                             : (sq.lastName.empty() ? sq.firstName
+                             : sq.firstName + " " + sq.lastName);
+        PushMgrFont(g_ManagerFontBold);
+        wdl->AddText(ImVec2(rx+10.0f, ry+6.0f),
+                     IM_COL32(220,228,248,240), fullName.c_str());
+        PopMgrFont(g_ManagerFontBold);
+
+        PushMgrFont(g_ManagerFontSmall);
+        wdl->AddText(ImVec2(rx+10.0f, ry+24.0f),
+                     IM_COL32(140,155,190,190), sq.clubName.c_str());
+        PopMgrFont(g_ManagerFontSmall);
+
+        // Due date
+        std::string dispDue = sq.dueDate.size() >= 10
+                            ? FormatDateDisplay(sq.dueDate) : sq.dueDate;
+        char dueBuf[48]; snprintf(dueBuf, sizeof(dueBuf), "Due: %s", dispDue.c_str());
+        PushMgrFont(g_ManagerFontSmall);
+        ImVec2 dueSz = ImGui::CalcTextSize(dueBuf);
+        wdl->AddText(ImVec2(rx + cw - dueSz.x - 48.0f, ry + (kRowH - 14.0f)*0.5f),
+                     IM_COL32(160,185,230,210), dueBuf);
+        PopMgrFont(g_ManagerFontSmall);
+
+        // Cancel button
+        char cancelId[32]; snprintf(cancelId, sizeof(cancelId), "Cancel##scq_%d", sq.playerId);
+        float cBtnW = 42.0f, cBtnH = 22.0f;
+        ImGui::SetCursorScreenPos(ImVec2(rx + cw - cBtnW - 6.0f, ry + (kRowH - cBtnH)*0.5f));
+        ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(120,30,30,200));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(170,45,45,230));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  IM_COL32(90,20,20,255));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
+        PushMgrFont(g_ManagerFontSmall);
+        if (ImGui::Button(cancelId, ImVec2(cBtnW, cBtnH)))
+          CancelScouting(g_CareerHub.managerId, sq.playerId);
+        PopMgrFont(g_ManagerFontSmall);
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor(3);
+
+        ImGui::SetCursorScreenPos(ImVec2(rx, ry + kRowH + kRowGap));
+        ImGui::Dummy(ImVec2(cw, 0.0f));
+        ry += kRowH + kRowGap;
+      }
+      ImGui::Dummy(ImVec2(cw, 4.0f));
+    }
+    ImGui::EndChild();
+  }
+
+  // Reserve layout space for the outer window
+  ImGui::SetCursorPos(ImVec2(kPad, 8.0f + (float)colH));
+  ImGui::Dummy(ImVec2(usW, 1.0f));
+}
+
 // ---- DrawComingSoonPage -------------------------------------------------
 
 static void DrawComingSoonPage(float w, float h, const char *section) {
@@ -6975,6 +7397,7 @@ static void DrawWorkspace(float contentW, float workH) {
     case PAGE_PLAYER_DETAIL: DrawPlayerDetailPage(contentW, workH);  break;
     case PAGE_STAFF:         DrawStaffPage(contentW, workH);         break;
     case PAGE_STAFF_MARKET:  DrawStaffMarketPage(contentW, workH);   break;
+    case PAGE_SCOUTING:      DrawScoutingPage(contentW, workH);      break;
     case PAGE_FINANCES:      DrawFinancesPage(contentW, workH);      break;
     default:
       DrawComingSoonPage(contentW, workH, kPageNames[g_activePage]);
