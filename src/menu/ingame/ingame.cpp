@@ -135,8 +135,7 @@ void IngamePage::Process() {
 
       case 4:
         printf("[IMGUI PAUSE] Settings selected\n");
-        GoSystemSettings();
-        return;
+        break;
 
       case 5:
         printf("[IMGUI PAUSE] Leave Match selected\n");

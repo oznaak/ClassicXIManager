@@ -1765,28 +1765,15 @@ void RenderImGuiMatchPauseOverlay() {
   ImGui::GetBackgroundDrawList()->AddRectFilled(
       ImVec2(0, 0), io.DisplaySize, IM_COL32(0, 0, 0, 145));
 
-  // Popup dimensions
-  const float popW = std::min(1280.0f, io.DisplaySize.x - 40.0f);
-  const float popH = std::min(620.0f,  io.DisplaySize.y - 60.0f);
+  const float popW = 380.0f;
+  const float popH = 200.0f;
   const float popX = (io.DisplaySize.x - popW) * 0.5f;
   const float popY = (io.DisplaySize.y - popH) * 0.5f;
-
-  // Sub panel replaces the normal pause layout while active
-  if (s_subPanelActive) {
-    DrawSubstitutionPanel(popX, popY, popW, popH);
-    return;
-  }
-
-  // Three-panel widths: left (user formation) | mid (tiles) | right (opp formation)
-  const float leftW  = std::floor(popW * 0.265f);
-  const float rightW = leftW;
-  const float midW   = popW - leftW - rightW;
-  const float footerH = 40.0f;
 
   ImGui::SetNextWindowPos(ImVec2(popX, popY), ImGuiCond_Always);
   ImGui::SetNextWindowSize(ImVec2(popW, popH), ImGuiCond_Always);
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,  ImVec2(0, 0));
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10.0f);
   ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,    ImVec2(0, 0));
   ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(14, 20, 38, 250));
 
@@ -1799,132 +1786,38 @@ void RenderImGuiMatchPauseOverlay() {
     ImGuiWindowFlags_NoFocusOnAppearing|
     ImGuiWindowFlags_NoNav);
 
-  // ---- LEFT PANEL: user formation + Game Plan footer -----------------------
-  ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(18, 28, 52, 255));
-  ImGui::BeginChild("##pause_left", ImVec2(leftW, popH), false,
-                    ImGuiWindowFlags_NoScrollbar);
-  {
-    ImDrawList *ld      = ImGui::GetWindowDrawList();
-    ImVec2      lOrigin = ImGui::GetWindowPos();
+  ImDrawList *dl   = ImGui::GetWindowDrawList();
+  ImVec2      wPos = ImGui::GetWindowPos();
 
-    DrawFormationPanel(ld, lOrigin, leftW, popH - footerH,
-                       s_pauseTeamName, s_pauseUserColor, s_pauseUserTextColor,
-                       s_pausePlayers);
+  // Title bar strip
+  dl->AddRectFilled(ImVec2(wPos.x, wPos.y),
+                    ImVec2(wPos.x + popW, wPos.y + 44.0f),
+                    IM_COL32(20, 30, 58, 255), 10.0f);
+  AddTextCentered(dl, g_ManagerFontBold, 16.0f,
+                  ImVec2(wPos.x, wPos.y),
+                  ImVec2(wPos.x + popW, wPos.y + 44.0f),
+                  IM_COL32(255, 255, 255, 255), "SETTINGS");
 
-    // Game Plan footer
-    ImVec2 btnMin = ImVec2(lOrigin.x, lOrigin.y + popH - footerH);
-    ImVec2 btnMax = ImVec2(lOrigin.x + leftW, lOrigin.y + popH);
-    ImGui::SetCursorScreenPos(btnMin);
-    ImGui::InvisibleButton("##gameplan_btn", ImVec2(leftW, footerH));
-    bool gpHov = ImGui::IsItemHovered();
-    ld->AddRectFilled(btnMin, btnMax,
-                      gpHov ? IM_COL32(255, 255, 255, 200) : IM_COL32(30, 44, 80, 220));
-    ImU32 gpTxt = gpHov ? IM_COL32(15, 15, 15, 255) : IM_COL32(180, 200, 240, 255);
-    const char *subBtnLabel = s_subPanelActive ? "< BACK" : "SUBSTITUTIONS";
-    AddTextCentered(ld, g_ManagerFontBold, 14.0f, btnMin, btnMax, gpTxt, subBtnLabel);
-    if (ImGui::IsItemClicked()) {
-      s_subPanelActive = !s_subPanelActive;
-      s_subOffSelected = -1;
-      s_subOnSelected  = -1;
-    }
-  }
-  ImGui::EndChild();
-  ImGui::PopStyleColor();
+  // Placeholder text
+  AddTextCentered(dl, g_ManagerFontHero, 14.0f,
+                  ImVec2(wPos.x, wPos.y + 60.0f),
+                  ImVec2(wPos.x + popW, wPos.y + 130.0f),
+                  IM_COL32(160, 180, 220, 180), "Coming soon");
 
-  // ---- MIDDLE PANEL: 2x2 option tiles + speed selector ---------------------
-  ImGui::SameLine(0, 0);
-  ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(12, 18, 32, 255));
-  ImGui::BeginChild("##pause_mid", ImVec2(midW, popH), false,
-                    ImGuiWindowFlags_NoScrollbar);
-  {
-    ImDrawList *md      = ImGui::GetWindowDrawList();
-    ImVec2      mOrigin = ImGui::GetWindowPos();
-
-    // Separator lines on both sides
-    md->AddLine(ImVec2(mOrigin.x,          mOrigin.y + 16),
-                ImVec2(mOrigin.x,          mOrigin.y + popH - 16),
-                IM_COL32(50, 65, 110, 160), 1.0f);
-    md->AddLine(ImVec2(mOrigin.x + midW - 1, mOrigin.y + 16),
-                ImVec2(mOrigin.x + midW - 1, mOrigin.y + popH - 16),
-                IM_COL32(50, 65, 110, 160), 1.0f);
-
-    // Reserve bottom strip for speed selector
-    const float speedStripH = 54.0f;
-    const float tileAreaH   = popH - speedStripH;
-
-    const float tilePad = 14.0f;
-    const float tileW   = (midW - tilePad * 3.0f) * 0.5f;
-    const float tileH   = (tileAreaH - tilePad * 3.0f) * 0.5f;
-
-    ImVec2 t00 = ImVec2(mOrigin.x + tilePad,             mOrigin.y + tilePad);
-    ImVec2 t10 = ImVec2(mOrigin.x + tilePad * 2 + tileW, mOrigin.y + tilePad);
-    ImVec2 t01 = ImVec2(mOrigin.x + tilePad,             mOrigin.y + tilePad * 2 + tileH);
-    ImVec2 t11 = ImVec2(mOrigin.x + tilePad * 2 + tileW, mOrigin.y + tilePad * 2 + tileH);
-    ImVec2 tsz = ImVec2(tileW, tileH);
-
-    if (PauseTile(md, "##resume",     t00, tsz, "Resume Match")) g_ImGuiPausePendingAction = 1;
-    if (PauseTile(md, "##matchfacts", t10, tsz, "Match Facts"))  g_ImGuiPausePendingAction = 3;
-    if (PauseTile(md, "##settings",   t01, tsz, "Settings"))     g_ImGuiPausePendingAction = 4;
-    if (PauseTile(md, "##leave",      t11, tsz, "Leave Match"))  g_ImGuiPausePendingAction = 5;
-
-    // ---- Speed selector strip -----------------------------------------------
-    const int   speeds[]  = { 1, 2, 4, 8 };
-    const char *sLabels[] = { "x1", "x2", "x4", "x8" };
-    int curSpeed = GetConfiguration()->GetInt("match_speed_multiplier", 1);
-    const float btnW   = 44.0f;
-    const float btnH   = 26.0f;
-    const float sGap   = 8.0f;
-    const float rowW   = 4 * btnW + 3 * sGap;
-    float sbx = mOrigin.x + (midW - rowW) * 0.5f;
-    float sby = mOrigin.y + tileAreaH + (speedStripH - btnH) * 0.5f;
-
-    // "Speed" label
-    const char *sLabel = "Speed";
-    ImVec2 slsz = ImGui::GetFont()
-        ? ImVec2(ImGui::GetFont()->CalcTextSizeA(12.0f, FLT_MAX, 0, sLabel).x, 12.0f)
-        : ImVec2(36.0f, 12.0f);
-    md->AddText(nullptr, 12.0f,
-                ImVec2(sbx - slsz.x - 8.0f, sby + (btnH - slsz.y) * 0.5f),
-                IM_COL32(140, 160, 200, 180), sLabel);
-
-    for (int i = 0; i < 4; i++) {
-      bool active  = (curSpeed == speeds[i]);
-      ImU32 bgCol  = active ? IM_COL32(255, 200, 40, 255)  : IM_COL32(30, 42, 70, 220);
-      ImU32 txtCol = active ? IM_COL32(15,  15,  15, 255)  : IM_COL32(180, 200, 240, 220);
-
-      ImVec2 bmin = ImVec2(sbx, sby);
-      ImVec2 bmax = ImVec2(sbx + btnW, sby + btnH);
-      ImGui::SetCursorScreenPos(bmin);
-      ImGui::PushID(i + 8000);
-      if (ImGui::InvisibleButton("##spd", ImVec2(btnW, btnH))) {
-        GetConfiguration()->Set("match_speed_multiplier", (float)speeds[i]);
-        printf("[PAUSE] Match speed set to x%d\n", speeds[i]);
-      }
-      ImGui::PopID();
-      md->AddRectFilled(bmin, bmax, bgCol, 5.0f);
-      md->AddRect(bmin, bmax, IM_COL32(80, 110, 180, 160), 5.0f, 0, 1.0f);
-      AddTextCentered(md, g_ManagerFontBold, 14.0f, bmin, bmax, txtCol, sLabels[i]);
-      sbx += btnW + sGap;
-    }
-  }
-  ImGui::EndChild();
-  ImGui::PopStyleColor();
-
-  // ---- RIGHT PANEL: opponent formation (no footer) -------------------------
-  ImGui::SameLine(0, 0);
-  ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(18, 28, 52, 255));
-  ImGui::BeginChild("##pause_right", ImVec2(rightW, popH), false,
-                    ImGuiWindowFlags_NoScrollbar);
-  {
-    ImDrawList *rd      = ImGui::GetWindowDrawList();
-    ImVec2      rOrigin = ImGui::GetWindowPos();
-
-    DrawFormationPanel(rd, rOrigin, rightW, popH,
-                       s_pauseAwayTeamName, s_pauseOppColor, s_pauseOppTextColor,
-                       s_pauseAwayPlayers);
-  }
-  ImGui::EndChild();
-  ImGui::PopStyleColor();
+  // Resume button
+  const float btnW = 140.0f;
+  const float btnH = 32.0f;
+  ImVec2 btnMin = ImVec2(wPos.x + (popW - btnW) * 0.5f, wPos.y + popH - btnH - 16.0f);
+  ImVec2 btnMax = ImVec2(btnMin.x + btnW, btnMin.y + btnH);
+  ImGui::SetCursorScreenPos(btnMin);
+  ImGui::InvisibleButton("##resume_btn", ImVec2(btnW, btnH));
+  bool hov = ImGui::IsItemHovered();
+  dl->AddRectFilled(btnMin, btnMax,
+                    hov ? IM_COL32(255, 255, 255, 210) : IM_COL32(30, 44, 80, 220), 6.0f);
+  dl->AddRect(btnMin, btnMax, IM_COL32(80, 110, 180, 160), 6.0f, 0, 1.0f);
+  ImU32 btnTxt = hov ? IM_COL32(15, 15, 15, 255) : IM_COL32(180, 200, 240, 255);
+  AddTextCentered(dl, g_ManagerFontBold, 13.0f, btnMin, btnMax, btnTxt, "RESUME");
+  if (ImGui::IsItemClicked()) g_ImGuiPausePendingAction = 1;
 
   ImGui::End();
   ImGui::PopStyleColor();
