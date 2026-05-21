@@ -32,8 +32,11 @@ bool g_ImGuiIngamePauseMenuActive = false;
 // Written by GL render thread on button click, read+cleared by IngamePage::Process() on main thread.
 int  g_ImGuiPausePendingAction    = 0;
 
-QueuedSub  g_QueuedSub;
-SubGraphic g_SubGraphic;
+std::vector<QueuedSub>  g_QueuedSubQueue;
+std::vector<SubGraphic> g_SubGraphicQueue;
+int        g_SubsUsed      = 0;
+int        g_WindowsUsed   = 0;
+bool       g_SubWindowOpen = false;
 bool       g_ImGuiTopBarPauseRequest = false;
 bool       g_TopBarSoftPause         = false;
 
@@ -179,10 +182,24 @@ static void ResetPerMatch(Match *match) {
   }
 }
 
+// Per-frame hit boxes populated by draw functions, consumed by interaction logic.
+struct HitEntry { ImVec2 pos; int idx; };
+static std::vector<HitEntry> s_subHits;
+static std::vector<HitEntry> s_pitchHits;
+static int  s_dragSubIdx = -1;
+static int  s_hoverOnIdx = -1;
+
 void ResetMatchOverlayState() {
-  s_lastMatch     = nullptr;
-  s_overlayLogged = false;
+  s_lastMatch        = nullptr;
+  s_overlayLogged    = false;
   s_scoreboardHidden = false;
+  s_dragSubIdx       = -1;
+  s_hoverOnIdx       = -1;
+  s_subHits.clear();
+  s_pitchHits.clear();
+  g_SubsUsed      = 0;
+  g_WindowsUsed   = 0;
+  g_SubWindowOpen = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -236,8 +253,8 @@ static void ResetPauseCache() {
   s_subOnSelected       = -1;
   s_subsMadeCount       = 0;
   g_TopBarSoftPause     = false;
-  g_QueuedSub.pending   = false;
-  g_SubGraphic.active   = false;
+  g_QueuedSubQueue.clear();
+  g_SubGraphicQueue.clear();
 }
 
 // Landscape mini-pitch (horizontal) for the bottom HUD.
@@ -292,7 +309,8 @@ static void DrawFormationHorizontal(
     ImDrawList *dl, ImVec2 origin, float w, float h,
     const std::string & /*teamName*/,
     ImU32 teamColor, ImU32 /*teamTextColor*/,
-    const std::vector<PausePlayer> &players, bool flipGK)
+    const std::vector<PausePlayer> &players, bool flipGK,
+    bool collectHits = false)
 {
   const float padX = 4.0f;
   const float padY = 4.0f;
@@ -351,6 +369,12 @@ static void DrawFormationHorizontal(
     }
   }
 
+  // Collect starting XI hit boxes for drag/drop (user team only)
+  if (collectHits) {
+    for (size_t i = 0; i < placed.size(); i++)
+      s_pitchHits.push_back({ImVec2(placed[i].px, placed[i].py), (int)i});
+  }
+
   // Helper: draw text centered at cx with a 1px drop shadow.
   auto ShadowText = [&](float cx, float ty, float fs, ImU32 col, const char *txt) {
     ImFont *f = g_ManagerFontBold;
@@ -379,7 +403,8 @@ static void DrawFormationHorizontal(
 //   SUB7  SUB4  SUB1
 static void DrawSubsList(ImDrawList *dl, ImVec2 origin, float w, float h,
                          ImU32 teamColor,
-                         const std::vector<BenchPlayer> &bench)
+                         const std::vector<BenchPlayer> &bench,
+                         bool interactive = false)
 {
   if (bench.empty()) return;
 
@@ -397,7 +422,7 @@ static void DrawSubsList(ImDrawList *dl, ImVec2 origin, float w, float h,
   // Font size: scale with cell but cap so block always fits
   float fSize = drawH * 0.18f;
   if (fSize < 7.0f)  fSize = 7.0f;
-  if (fSize > 16.0f) fSize = 16.0f;
+  if (fSize > 22.0f) fSize = 22.0f;
   float lineH = fSize + 1.5f;
 
   // Jersey height: must leave room for 2 name lines + spacing inside drawH
@@ -425,6 +450,10 @@ static void DrawSubsList(ImDrawList *dl, ImVec2 origin, float w, float h,
       float cx = origin.x + col * cellW + cellW * 0.5f;
       float cy = origin.y + row * cellH  + cellH * 0.5f;
 
+      // Record jersey centre for drag/drop hit testing (user's bench only)
+      float jcyHit = cy - (jBH + 3.0f + lineH * 2.0f) * 0.5f + jBH * 0.5f;
+      if (interactive) s_subHits.push_back({ImVec2(cx, jcyHit), idx});
+
       // Clip everything to this cell so nothing bleeds into neighbours
       ImVec2 clipMin(origin.x + col * cellW + 2.0f,       origin.y + row * cellH + 2.0f);
       ImVec2 clipMax(origin.x + (col + 1) * cellW - 2.0f, origin.y + (row + 1) * cellH - 2.0f);
@@ -436,10 +465,15 @@ static void DrawSubsList(ImDrawList *dl, ImVec2 origin, float w, float h,
       float bx     = cx - jBW * 0.5f;
       float by     = jcy - jBH * 0.5f;
 
+      // Dim jersey when being dragged (ghost follows cursor instead)
+      ImU32 drawColor = (idx == s_dragSubIdx)
+        ? IM_COL32((teamColor>>0)&0xFF, (teamColor>>8)&0xFF, (teamColor>>16)&0xFF, 80)
+        : teamColor;
+
       // Jersey body + sleeves
-      dl->AddRectFilled(ImVec2(bx - jSW + 1, by + 1), ImVec2(bx + 2,           by + jSH), teamColor, jR);
-      dl->AddRectFilled(ImVec2(bx + jBW - 2, by + 1), ImVec2(bx + jBW + jSW - 1, by + jSH), teamColor, jR);
-      dl->AddRectFilled(ImVec2(bx, by), ImVec2(bx + jBW, by + jBH), teamColor, jR);
+      dl->AddRectFilled(ImVec2(bx - jSW + 1, by + 1), ImVec2(bx + 2,           by + jSH), drawColor, jR);
+      dl->AddRectFilled(ImVec2(bx + jBW - 2, by + 1), ImVec2(bx + jBW + jSW - 1, by + jSH), drawColor, jR);
+      dl->AddRectFilled(ImVec2(bx, by), ImVec2(bx + jBW, by + jBH), drawColor, jR);
 
       // Jersey number — outlined for contrast against any kit colour
       if (bp.jerseyNumber > 0 && f) {
@@ -675,12 +709,13 @@ void RenderImGuiMatchOverlay() {
               IM_COL32(50, 55, 80, 180), 2.0f, 0, 1.0f);
 
   // ---- Substitution banner (BBC Sport style) --------------------------------
-  if (g_SubGraphic.active) {
+  if (!g_SubGraphicQueue.empty()) {
+    SubGraphic &g_SubGraphic = g_SubGraphicQueue.front();
     if (g_SubGraphic.startTime < 0.0) g_SubGraphic.startTime = ImGui::GetTime();
     const double elapsed   = ImGui::GetTime() - g_SubGraphic.startTime;
     const double kDuration = 5.5;
     if (elapsed >= kDuration) {
-      g_SubGraphic.active = false;
+      g_SubGraphicQueue.erase(g_SubGraphicQueue.begin());
     } else {
       float alpha = 1.0f;
       if (elapsed < 0.3) alpha = (float)(elapsed / 0.3f);           // fade in
@@ -944,6 +979,9 @@ void RenderImGuiMatchOverlay() {
   // Radar is at x=38%, y=78%, w=24%, h=18% of screen (match.cpp:316).
   // Formation boards are exactly the same size, placed left and right of it.
   if (s_pauseInitialized && !s_pausePlayers.empty()) {
+    // Clear per-frame hit boxes before draw functions repopulate them
+    s_subHits.clear();
+    s_pitchHits.clear();
     const ImGuiIO &io3 = ImGui::GetIO();
     const float sw3 = io3.DisplaySize.x;
     const float sh3 = io3.DisplaySize.y;
@@ -979,7 +1017,7 @@ void RenderImGuiMatchOverlay() {
       ImVec2      lpos = ImGui::GetWindowPos();
       DrawFormationHorizontal(ldl, lpos, boardW, boardH,
                               s_pauseTeamName, s_pauseUserColor, s_pauseUserTextColor,
-                              s_pausePlayers, false);
+                              s_pausePlayers, false, /*collectHits=*/true);
       ImGui::End();
       ImGui::PopStyleVar(2);
     }
@@ -1021,7 +1059,7 @@ void RenderImGuiMatchOverlay() {
         ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoBringToFrontOnFocus);
       ImDrawList *sdl = ImGui::GetWindowDrawList();
       ImVec2      sp  = ImGui::GetWindowPos();
-      DrawSubsList(sdl, sp, subsW, boardH, s_pauseUserColor, s_benchPlayers);
+      DrawSubsList(sdl, sp, subsW, boardH, s_pauseUserColor, s_benchPlayers, /*interactive=*/true);
       ImGui::End();
       ImGui::PopStyleVar(2);
     }
@@ -1089,6 +1127,168 @@ void RenderImGuiMatchOverlay() {
     }
     ImGui::End();
     ImGui::PopStyleVar(2);
+
+    // ---- W/S budget labels + pending-sub feedback below user's board -------
+    {
+      ImDrawList *fdl_hud = ImGui::GetForegroundDrawList();
+      ImFont     *fnt     = g_ManagerFontBold;
+      const float fs      = 11.0f;
+      const float labelY  = radarT + boardH + 4.0f;
+
+      // W: X/3 — left-aligned under board left edge
+      char wBuf[16]; snprintf(wBuf, sizeof(wBuf), "W: %d/3", g_WindowsUsed);
+      ImU32 wCol = g_WindowsUsed >= 3 ? IM_COL32(255, 80, 80, 240) : IM_COL32(200, 220, 255, 220);
+      fdl_hud->AddText(fnt, fs, ImVec2(leftX + 2.0f, labelY), wCol, wBuf);
+
+      // S: X/5 — right-aligned under board right edge
+      char sBuf[16]; snprintf(sBuf, sizeof(sBuf), "S: %d/5", g_SubsUsed);
+      ImU32 sCol = g_SubsUsed >= 5 ? IM_COL32(255, 80, 80, 240) : IM_COL32(200, 220, 255, 220);
+      if (fnt) {
+        ImVec2 sz = fnt->CalcTextSizeA(fs, FLT_MAX, 0.f, sBuf);
+        fdl_hud->AddText(fnt, fs, ImVec2(leftX + boardW - sz.x - 2.0f, labelY), sCol, sBuf);
+      }
+
+      // Pending-sub: highlight stroke around board + centered "Waiting for stoppage..." text
+      if (!g_QueuedSubQueue.empty()) {
+        // Animated alpha pulse using time
+        float t      = (float)fmod(ImGui::GetTime() * 2.0, 1.0);
+        float alpha  = 0.5f + 0.5f * sinf(t * 3.14159f * 2.0f);
+        ImU32 stroke = IM_COL32((s_pauseUserColor>>0)&0xFF,
+                                (s_pauseUserColor>>8)&0xFF,
+                                (s_pauseUserColor>>16)&0xFF,
+                                (int)(180 * alpha + 75));
+        fdl_hud->AddRect(ImVec2(leftX - 2, radarT - 2),
+                         ImVec2(leftX + boardW + 2, radarT + boardH + 2),
+                         stroke, 3.0f, 0, 3.0f);
+
+        const char *waitTxt = "Waiting for stoppage...";
+        if (fnt) {
+          ImVec2 ws = fnt->CalcTextSizeA(10.0f, FLT_MAX, 0.f, waitTxt);
+          float  wx = leftX + boardW * 0.5f - ws.x * 0.5f;
+          float  wy = labelY + fs + 3.0f;
+          fdl_hud->AddText(fnt, 10.0f, ImVec2(wx+1,wy+1), IM_COL32(0,0,0,180),     waitTxt);
+          fdl_hud->AddText(fnt, 10.0f, ImVec2(wx,  wy),   IM_COL32(255,220,100,230), waitTxt);
+        }
+      }
+    }
+
+    // ---- Drag-and-drop substitution interaction ----------------------------
+    ImDrawList *fdl2     = ImGui::GetForegroundDrawList();
+    ImVec2      mouse    = ImGui::GetMousePos();
+    const float kSubR    = 24.0f;   // click radius on bench jerseys
+    const float kPitchR  = 30.0f;   // snap radius to pitch player
+
+    // Find nearest bench hit
+    int nearSub = -1; float nearSubD = kSubR;
+    for (auto &h : s_subHits) {
+      float d = hypotf(mouse.x - h.pos.x, mouse.y - h.pos.y);
+      if (d < nearSubD) { nearSubD = d; nearSub = h.idx; }
+    }
+
+    // Find nearest pitch hit (only while dragging)
+    int nearPitch = -1; float nearPitchD = kPitchR;
+    if (s_dragSubIdx >= 0) {
+      for (auto &h : s_pitchHits) {
+        float d = hypotf(mouse.x - h.pos.x, mouse.y - h.pos.y);
+        if (d < nearPitchD) { nearPitchD = d; nearPitch = h.idx; }
+      }
+    }
+
+    // Start drag — only if budget allows
+    bool budgetOk = (g_SubsUsed < 5) && (g_WindowsUsed < 3 || g_SubWindowOpen);
+    if (s_dragSubIdx < 0 && budgetOk && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && nearSub >= 0)
+      s_dragSubIdx = nearSub;
+
+    // Update hover target
+    if (s_dragSubIdx >= 0)
+      s_hoverOnIdx = nearPitch;
+
+    // Highlight hovered pitch player
+    if (s_hoverOnIdx >= 0) {
+      for (auto &h : s_pitchHits) {
+        if (h.idx == s_hoverOnIdx) {
+          fdl2->AddCircleFilled(h.pos, 22.0f, IM_COL32(255, 220, 50, 55));
+          fdl2->AddCircle(h.pos, 22.0f, IM_COL32(255, 220, 50, 230), 24, 2.5f);
+          break;
+        }
+      }
+    }
+
+    // Draw ghost jersey following cursor
+    if (s_dragSubIdx >= 0 && s_dragSubIdx < (int)s_benchPlayers.size()) {
+      const BenchPlayer &dragged = s_benchPlayers[s_dragSubIdx];
+      // Slightly larger ghost jersey
+      const float gBW = 28.0f, gBH = 30.0f, gSW = 8.0f, gSH = 12.0f, gR = 3.0f;
+      float gbx = mouse.x - gBW * 0.5f, gby = mouse.y - gBH * 0.5f;
+      fdl2->AddRectFilled(ImVec2(gbx - gSW + 1, gby + 1), ImVec2(gbx + 2,            gby + gSH), s_pauseUserColor, gR);
+      fdl2->AddRectFilled(ImVec2(gbx + gBW - 2, gby + 1), ImVec2(gbx + gBW + gSW - 1, gby + gSH), s_pauseUserColor, gR);
+      fdl2->AddRectFilled(ImVec2(gbx, gby), ImVec2(gbx + gBW, gby + gBH), s_pauseUserColor, gR);
+      // Number on ghost
+      if (dragged.jerseyNumber > 0 && g_ManagerFontBold) {
+        char buf[8]; snprintf(buf, sizeof(buf), "%d", dragged.jerseyNumber);
+        ImVec2 ns = g_ManagerFontBold->CalcTextSizeA(11.0f, FLT_MAX, 0.f, buf);
+        fdl2->AddText(g_ManagerFontBold, 11.0f,
+          ImVec2(mouse.x - ns.x * 0.5f, mouse.y + gBH * 0.1f - ns.y * 0.5f),
+          TextColorForBg(s_pauseUserColor), buf);
+      }
+      // Name below ghost
+      if (g_ManagerFontBold) {
+        ImVec2 ns = g_ManagerFontBold->CalcTextSizeA(10.0f, FLT_MAX, 0.f, dragged.lastName.c_str());
+        float tx = mouse.x - ns.x * 0.5f, ty = mouse.y + gBH * 0.5f + 3.0f;
+        fdl2->AddText(g_ManagerFontBold, 10.0f, ImVec2(tx-1,ty+1), IM_COL32(0,0,0,200), dragged.lastName.c_str());
+        fdl2->AddText(g_ManagerFontBold, 10.0f, ImVec2(tx, ty),    IM_COL32(255,255,255,255), dragged.lastName.c_str());
+      }
+    }
+
+    // Commit substitution on mouse release
+    if (s_dragSubIdx >= 0 && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+      if (s_hoverOnIdx >= 0 && s_hoverOnIdx < (int)s_pausePlayers.size() &&
+          s_dragSubIdx < (int)s_benchPlayers.size()) {
+        const BenchPlayer  &bp  = s_benchPlayers[s_dragSubIdx];
+        const PausePlayer  &off = s_pausePlayers[s_hoverOnIdx];
+
+        // Push onto sub queue (fires on next dead ball, not during goal celebration)
+        QueuedSub qs;
+        qs.pending        = true;
+        qs.teamIdx        = s_subUserTeamIdx;
+        qs.offIdx         = s_hoverOnIdx;
+        qs.onIdx          = bp.playersIdx;
+        qs.nameOut        = off.lastName;
+        qs.nameIn         = bp.lastName;
+        qs.teamBadgePath  = s_userBadgePath;
+        qs.leagueLogoPath = s_leagueLogoPath;
+        qs.teamColor      = s_pauseUserColor;
+        g_QueuedSubQueue.push_back(qs);
+
+        // Update formation board immediately so display reflects the change
+        PausePlayer incoming;
+        incoming.lastName    = bp.lastName;
+        incoming.role        = off.role;
+        incoming.nx          = off.nx;
+        incoming.ny          = off.ny;
+        incoming.jerseyNumber = bp.jerseyNumber;
+
+        s_pausePlayers.erase(s_pausePlayers.begin() + s_hoverOnIdx);
+        s_pausePlayers.push_back(incoming);
+
+        // Remove the incoming player from the bench list
+        for (int i = 0; i < (int)s_benchPlayers.size(); i++) {
+          if (s_benchPlayers[i].playersIdx == bp.playersIdx) {
+            s_benchPlayers.erase(s_benchPlayers.begin() + i);
+            break;
+          }
+        }
+      }
+      s_dragSubIdx = -1;
+      s_hoverOnIdx = -1;
+    }
+
+    // Cancel drag on right-click or Escape
+    if (s_dragSubIdx >= 0 && (ImGui::IsMouseClicked(ImGuiMouseButton_Right) ||
+                               ImGui::IsKeyPressed(ImGuiKey_Escape, false))) {
+      s_dragSubIdx = -1;
+      s_hoverOnIdx = -1;
+    }
   }
 }
 
@@ -1424,16 +1624,18 @@ static void DrawSubstitutionPanel(float px, float py, float pw, float ph) {
     for (auto &bp : s_benchPlayers)
       if (bp.playersIdx == s_subOnSelected) { nameIn = bp.lastName; break; }
 
-    // Queue the substitution — will fire on next dead ball (gametask.cpp)
-    g_QueuedSub.pending = true;
-    g_QueuedSub.teamIdx = s_subUserTeamIdx;
-    g_QueuedSub.offIdx  = s_subOffSelected;
-    g_QueuedSub.onIdx   = s_subOnSelected;
-    g_QueuedSub.nameOut        = nameOut;
-    g_QueuedSub.nameIn         = nameIn;
-    g_QueuedSub.teamBadgePath  = s_userBadgePath;
-    g_QueuedSub.leagueLogoPath = s_leagueLogoPath;
-    g_QueuedSub.teamColor      = (unsigned int)s_pauseUserColor;
+    // Push substitution onto queue — fires on next dead ball (gametask.cpp)
+    QueuedSub qs2;
+    qs2.pending        = true;
+    qs2.teamIdx        = s_subUserTeamIdx;
+    qs2.offIdx         = s_subOffSelected;
+    qs2.onIdx          = s_subOnSelected;
+    qs2.nameOut        = nameOut;
+    qs2.nameIn         = nameIn;
+    qs2.teamBadgePath  = s_userBadgePath;
+    qs2.leagueLogoPath = s_leagueLogoPath;
+    qs2.teamColor      = (unsigned int)s_pauseUserColor;
+    g_QueuedSubQueue.push_back(qs2);
 
     // Update display lists so user can queue a 2nd sub immediately
     BenchPlayer incoming;

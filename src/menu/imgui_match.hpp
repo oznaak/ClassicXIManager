@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <vector>
 
 void RenderImGuiMatchOverlay();
 
@@ -33,7 +34,12 @@ struct QueuedSub {
   std::string  leagueLogoPath;
   unsigned int teamColor      = 0;  // club primary color (same as scoreboard)
 };
-extern QueuedSub g_QueuedSub;
+extern std::vector<QueuedSub> g_QueuedSubQueue;
+
+// Substitution budget tracking (reset each match)
+extern int  g_SubsUsed;      // total subs executed this match (0–5)
+extern int  g_WindowsUsed;   // distinct stoppage windows used (0–3)
+extern bool g_SubWindowOpen; // true while a window is open (play hasn't resumed yet)
 
 // Substitution banner shown on the pitch for ~5 seconds after a sub fires.
 struct SubGraphic {
@@ -45,7 +51,7 @@ struct SubGraphic {
   unsigned int teamColor    = 0;  // club primary color
   double       startTime    = 0.0; // ImGui::GetTime() when activated; -1 = set on first frame
 };
-extern SubGraphic g_SubGraphic;
+extern std::vector<SubGraphic> g_SubGraphicQueue; // shown one at a time, front-first
 
 void RenderImGuiMatchPauseOverlay();
 

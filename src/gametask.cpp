@@ -156,25 +156,44 @@ void GameTask::ProcessPhase() {
     match->PreparePutBuffers();
     matchPutBufferMutex.unlock();
 
-    // Execute any queued substitution on the next dead ball.
-    // Hold matchPutBufferMutex so PutPhase()'s GetActiveTeamPlayers() can't race the players[] swap.
-    if (g_QueuedSub.pending && !match->GetPause() && !match->IsInPlay()) {
-      QueuedSub sub = g_QueuedSub;
-      g_QueuedSub.pending = false;
+    // Track window lifecycle: close the open window when play resumes.
+    {
+      static bool s_wasInPlay = false;
+      bool nowInPlay = match->IsInPlay();
+      if (nowInPlay && !s_wasInPlay && g_SubWindowOpen)
+        g_SubWindowOpen = false;
+      s_wasInPlay = nowInPlay;
+    }
 
-      matchPutBufferMutex.lock();
-      Team *team = match->GetTeam(sub.teamIdx);
-      if (team && team->GetSubsMade() < 3)
-        team->SubstitutePlayer(sub.offIdx, sub.onIdx);
-      matchPutBufferMutex.unlock();
+    // Execute queued substitutions one per frame on dead ball.
+    // Rules: max 5 subs total, max 3 distinct windows; multiple subs in same stoppage = 1 window.
+    if (!g_QueuedSubQueue.empty() && !match->GetPause() && !match->IsInPlay() && !match->IsGoalScored()) {
+      bool canSub = (g_SubsUsed < 5) && (g_WindowsUsed < 3 || g_SubWindowOpen);
+      if (canSub) {
+        QueuedSub sub = g_QueuedSubQueue.front();
+        g_QueuedSubQueue.erase(g_QueuedSubQueue.begin());
 
-      g_SubGraphic.active         = true;
-      g_SubGraphic.nameOut        = sub.nameOut;
-      g_SubGraphic.nameIn         = sub.nameIn;
-      g_SubGraphic.teamBadgePath  = sub.teamBadgePath;
-      g_SubGraphic.leagueLogoPath = sub.leagueLogoPath;
-      g_SubGraphic.teamColor      = sub.teamColor;
-      g_SubGraphic.startTime      = -1.0;
+        matchPutBufferMutex.lock();
+        Team *team = match->GetTeam(sub.teamIdx);
+        if (team) team->SubstitutePlayer(sub.offIdx, sub.onIdx);
+        matchPutBufferMutex.unlock();
+
+        if (!g_SubWindowOpen) { g_WindowsUsed++; g_SubWindowOpen = true; }
+        g_SubsUsed++;
+
+        SubGraphic sg;
+        sg.active         = true;
+        sg.nameOut        = sub.nameOut;
+        sg.nameIn         = sub.nameIn;
+        sg.teamBadgePath  = sub.teamBadgePath;
+        sg.leagueLogoPath = sub.leagueLogoPath;
+        sg.teamColor      = sub.teamColor;
+        sg.startTime      = -1.0;
+        g_SubGraphicQueue.push_back(sg);
+      } else {
+        // Budget exhausted — drop remaining queued subs
+        g_QueuedSubQueue.clear();
+      }
     }
   }
 
