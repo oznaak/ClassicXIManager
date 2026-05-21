@@ -142,9 +142,12 @@ void GameTask::ProcessPhase() {
   }
 
   if (match) {
-    int mult = GetConfiguration()->GetInt("match_speed_multiplier", 1);
-    if (mult < 1) mult = 1;
-    if (mult > 8) mult = 8;
+    int mult = 0;
+    if (!g_TopBarSoftPause) {
+      mult = GetConfiguration()->GetInt("match_speed_multiplier", 1);
+      if (mult < 1) mult = 1;
+      if (mult > 8) mult = 8;
+    }
     for (int s = 0; s < mult; s++) {
       match->Process();
     }

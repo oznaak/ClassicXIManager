@@ -14,6 +14,7 @@
 
 #include "../../onthepitch/match.hpp"
 #include "../imgui_career.hpp"
+#include "../imgui_match.hpp"
 #include "../careermatchcontext.hpp"
 
 using namespace blunted;
@@ -56,6 +57,22 @@ GamePage::~GamePage() {
 }
 
 void GamePage::Process() {
+
+  // Top-bar pause/settings button (GL thread) → create IngamePage same as ESC press.
+  if (g_ImGuiTopBarPauseRequest) {
+    g_ImGuiTopBarPauseRequest = false;
+    int teamID = 0;
+    if (g_CareerMatchContext.userClubId > 0) {
+      Match *m = GetGameTask()->GetMatch();
+      if (m && m->GetTeam(1) && m->GetTeam(1)->GetTeamData() &&
+          m->GetTeam(1)->GetTeamData()->GetDatabaseID() == g_CareerMatchContext.userClubId)
+        teamID = 1;
+    }
+    Properties properties;
+    properties.Set("teamID", teamID);
+    CreatePage((int)e_PageID_Ingame, properties);
+    return;
+  }
 
   if (!match) {
     GetGameTask()->matchLifetimeMutex.lock();

@@ -15,7 +15,7 @@ PlayerData::PlayerData(int playerDatabaseID) : databaseID(playerDatabaseID) {
   //std::string test = "select * from players where id = " + int_to_str(databaseID) + " limit 1";
   //printf("test: %s\n", test.c_str());
 
-  DatabaseResult *result = GetDB()->Query("select firstname, lastname, role, base_stat, profile_xml, age, skincolor, hairstyle, haircolor, height from players where id = " + int_to_str(databaseID) + " limit 1");
+  DatabaseResult *result = GetDB()->Query("select firstname, lastname, role, base_stat, profile_xml, age, skincolor, hairstyle, haircolor, height, jersey_number from players where id = " + int_to_str(databaseID) + " limit 1");
 
   std::string roleString;
   std::string profileString;
@@ -38,6 +38,7 @@ PlayerData::PlayerData(int playerDatabaseID) : databaseID(playerDatabaseID) {
     if (result->header.at(c).compare("hairstyle") == 0) hairStyle = result->data.at(0).at(c);
     if (result->header.at(c).compare("haircolor") == 0) hairColor = result->data.at(0).at(c);
     if (result->header.at(c).compare("height") == 0) height = atof(result->data.at(0).at(c).c_str());
+    if (result->header.at(c).compare("jersey_number") == 0) jerseyNumber = atoi(result->data.at(0).at(c).c_str());
   }
 
   delete result;

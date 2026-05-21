@@ -34,6 +34,8 @@ int  g_ImGuiPausePendingAction    = 0;
 
 QueuedSub  g_QueuedSub;
 SubGraphic g_SubGraphic;
+bool       g_ImGuiTopBarPauseRequest = false;
+bool       g_TopBarSoftPause         = false;
 
 // ---------------------------------------------------------------------------
 // Per-match cached state
@@ -113,7 +115,8 @@ static void AddTextLeftCY(ImDrawList *dl, ImFont *font, float sz,
 }
 
 // ---------------------------------------------------------------------------
-static void ResetPauseCache(); // forward declaration
+static void ResetPauseCache();           // forward declaration
+static void InitHUDDataIfNeeded(Match*); // forward declaration
 
 static void ResetPerMatch(Match *match) {
   s_lastMatch        = match;
@@ -183,6 +186,337 @@ void ResetMatchOverlayState() {
 }
 
 // ---------------------------------------------------------------------------
+// Player data used for formation board and substitution UI.
+// Defined here (before RenderImGuiMatchOverlay) so the always-on HUD can use it.
+
+struct PausePlayer {
+  std::string lastName;
+  std::string role;        // "GK", "CB", "LB", etc. (formation position)
+  float nx       = 0.f;   // [0,1] screen x pre-mapped with engine formula
+  float ny       = 0.f;   // [0,1] screen y — 0=top(attack), 1=bottom(GK)
+  int   jerseyNumber = 0;
+};
+
+struct BenchPlayer {
+  std::string lastName;
+  std::string role;
+  int         playersIdx    = 0;
+  int         jerseyNumber  = 0;
+};
+
+static bool                      s_pauseInitialized   = false;
+static std::string               s_pauseTeamName;
+static std::vector<PausePlayer>  s_pausePlayers;
+static ImU32                     s_pauseUserColor      = IM_COL32(210, 0, 0, 255);
+static ImU32                     s_pauseUserTextColor  = IM_COL32(255, 255, 255, 255);
+static std::string               s_pauseAwayTeamName;
+static std::vector<PausePlayer>  s_pauseAwayPlayers;
+static ImU32                     s_pauseOppColor       = IM_COL32(0, 40, 220, 255);
+static ImU32                     s_pauseOppTextColor   = IM_COL32(255, 255, 255, 255);
+
+static std::vector<BenchPlayer>  s_benchPlayers;       // user team subs
+static std::vector<BenchPlayer>  s_awayBenchPlayers;   // opponent subs
+static int                       s_subUserTeamIdx   = 0;
+static std::string               s_userBadgePath;
+static bool                      s_subPanelActive   = false;
+static int                       s_subOffSelected   = -1;
+static int                       s_subOnSelected    = -1;
+static int                       s_subsMadeCount    = 0;
+
+static void ResetPauseCache() {
+  s_pauseInitialized = false;
+  s_pauseTeamName.clear();
+  s_pausePlayers.clear();
+  s_pauseAwayTeamName.clear();
+  s_pauseAwayPlayers.clear();
+  s_benchPlayers.clear();
+  s_awayBenchPlayers.clear();
+  s_subPanelActive      = false;
+  s_subOffSelected      = -1;
+  s_subOnSelected       = -1;
+  s_subsMadeCount       = 0;
+  g_TopBarSoftPause     = false;
+  g_QueuedSub.pending   = false;
+  g_SubGraphic.active   = false;
+}
+
+// Landscape mini-pitch (horizontal) for the bottom HUD.
+static void DrawMiniPitchHorizontal(ImDrawList *dl, ImVec2 min, ImVec2 max) {
+  const ImU32 grassDark  = IM_COL32(28,  90,  40, 255);
+  const ImU32 grassLight = IM_COL32(32, 105,  46, 255);
+  const ImU32 lineCol    = IM_COL32(255, 255, 255, 180);
+  float w = max.x - min.x;
+  float h = max.y - min.y;
+  int stripes = 7;
+  for (int i = 0; i < stripes; i++) {
+    float sy = min.y + h * i / stripes;
+    float ey = min.y + h * (i + 1) / stripes;
+    dl->AddRectFilled(ImVec2(min.x, sy), ImVec2(max.x, ey),
+                      (i & 1) ? grassDark : grassLight);
+  }
+  dl->AddRect(min, max, lineCol, 0.0f, 0, 1.5f);
+  float midX = min.x + w * 0.5f;
+  float cy2  = min.y + h * 0.5f;
+  dl->AddLine(ImVec2(midX, min.y), ImVec2(midX, max.y), lineCol, 1.5f);
+  dl->AddCircle(ImVec2(midX, cy2), h * 0.20f, lineCol, 24, 1.5f);
+  float gbH = h * 0.50f;
+  float gbW = w * 0.07f;
+  float gbY = min.y + (h - gbH) * 0.5f;
+  dl->AddRect(ImVec2(min.x,     gbY), ImVec2(min.x + gbW, gbY + gbH), lineCol, 0.0f, 0, 1.2f);
+  dl->AddRect(ImVec2(max.x-gbW, gbY), ImVec2(max.x,       gbY + gbH), lineCol, 0.0f, 0, 1.2f);
+}
+
+// Draw a stylised jersey shape centred at (cx, cy).
+static void DrawJersey(ImDrawList *dl, float cx, float cy,
+                       ImU32 bodyColor, ImU32 numColor, int jerseyNum) {
+  const float bw = 20.0f, bh = 22.0f, sw = 6.0f, sh = 9.0f, r = 2.5f;
+  float bx = cx - bw * 0.5f;
+  float by = cy - bh * 0.5f;
+  dl->AddRectFilled(ImVec2(bx - sw + 1, by + 1), ImVec2(bx + 2,           by + sh), bodyColor, r);
+  dl->AddRectFilled(ImVec2(bx + bw - 2, by + 1), ImVec2(bx + bw + sw - 1, by + sh), bodyColor, r);
+  dl->AddRectFilled(ImVec2(bx, by), ImVec2(bx + bw, by + bh), bodyColor, r);
+  dl->AddRectFilled(ImVec2(cx - 4, by), ImVec2(cx + 4, by + 4), IM_COL32(0, 0, 0, 60));
+  if (jerseyNum > 0) {
+    char buf[8]; snprintf(buf, sizeof(buf), "%d", jerseyNum);
+    ImFont *f = g_ManagerFontBold ? g_ManagerFontBold : ImGui::GetFont();
+    float fs = 10.0f;
+    ImVec2 ns = f->CalcTextSizeA(fs, FLT_MAX, 0.f, buf);
+    dl->AddText(f, fs, ImVec2(cx - ns.x * 0.5f, cy + bh * 0.15f - ns.y * 0.5f), numColor, buf);
+  }
+}
+
+// Horizontal formation board for the always-on bottom HUD.
+// No team name header — just the pitch with jerseys.
+// flipGK=false → GK on left (home); flipGK=true → GK on right (away).
+static void DrawFormationHorizontal(
+    ImDrawList *dl, ImVec2 origin, float w, float h,
+    const std::string & /*teamName*/,
+    ImU32 teamColor, ImU32 /*teamTextColor*/,
+    const std::vector<PausePlayer> &players, bool flipGK)
+{
+  const float padX = 4.0f;
+  const float padY = 4.0f;
+
+  ImVec2 pMin = ImVec2(origin.x + padX, origin.y + padY);
+  ImVec2 pMax = ImVec2(origin.x + w - padX, origin.y + h - padY);
+  DrawMiniPitchHorizontal(dl, pMin, pMax);
+  float pW = pMax.x - pMin.x;
+  float pH = pMax.y - pMin.y;
+
+  // Extra horizontal margin so text never overlaps the pitch border lines.
+  // Name can be ~7 chars × ~5px = ~35px wide, so 18px centering clearance minimum.
+  const float kHMargin = 22.0f;
+  const float kVTop    = 16.0f;
+  const float kVBot    = 40.0f;  // extra bottom margin keeps RB/RM text inside pitch
+
+  // Compute all positions first so we can run an anti-collision pass.
+  struct PlacedPlayer {
+    float px, py;
+    const PausePlayer *pp;
+  };
+  std::vector<PlacedPlayer> placed;
+  placed.reserve(11);
+
+  for (size_t i = 0; i < players.size() && i < 11; i++) {
+    const PausePlayer &pp = players[i];
+    float t  = flipGK ? pp.ny : (1.0f - pp.ny);
+    float px = pMin.x + t * pW;
+    float py = pMin.y + pp.nx * pH;
+    if (px < pMin.x + kHMargin) px = pMin.x + kHMargin;
+    if (px > pMax.x - kHMargin) px = pMax.x - kHMargin;
+    if (py < pMin.y + kVTop)    py = pMin.y + kVTop;
+    if (py > pMax.y - kVBot)    py = pMax.y - kVBot;
+    placed.push_back({px, py, &pp});
+  }
+
+  // Anti-collision: players at similar depth (px) that are too close vertically
+  // get nudged apart. Run a few passes so chains resolve.
+  const float kMinPyDist = 36.0f;  // minimum py gap between two players at same depth
+  for (int pass = 0; pass < 4; pass++) {
+    for (size_t a = 0; a < placed.size(); a++) {
+      for (size_t b = a + 1; b < placed.size(); b++) {
+        if (fabsf(placed[a].px - placed[b].px) > pW * 0.25f) continue; // different depth rows
+        float dy = placed[b].py - placed[a].py;
+        if (fabsf(dy) < kMinPyDist) {
+          float push = (kMinPyDist - fabsf(dy)) * 0.5f + 1.0f;
+          if (dy >= 0.0f) { placed[a].py -= push; placed[b].py += push; }
+          else            { placed[a].py += push; placed[b].py -= push; }
+          // Re-clamp
+          if (placed[a].py < pMin.y + kVTop)  placed[a].py = pMin.y + kVTop;
+          if (placed[a].py > pMax.y - kVBot)  placed[a].py = pMax.y - kVBot;
+          if (placed[b].py < pMin.y + kVTop)  placed[b].py = pMin.y + kVTop;
+          if (placed[b].py > pMax.y - kVBot)  placed[b].py = pMax.y - kVBot;
+        }
+      }
+    }
+  }
+
+  // Helper: draw text centered at cx with a 1px drop shadow.
+  auto ShadowText = [&](float cx, float ty, float fs, ImU32 col, const char *txt) {
+    ImFont *f = g_ManagerFontBold;
+    ImVec2 ts = f ? f->CalcTextSizeA(fs, FLT_MAX, 0.f, txt) : ImGui::CalcTextSize(txt);
+    float tx = cx - ts.x * 0.5f;
+    if (f) dl->AddText(f, fs, ImVec2(tx + 1, ty + 1), IM_COL32(0, 0, 0, 200), txt);
+    else   dl->AddText(ImVec2(tx + 1, ty + 1),         IM_COL32(0, 0, 0, 200), txt);
+    if (f) dl->AddText(f, fs, ImVec2(tx, ty), col, txt);
+    else   dl->AddText(ImVec2(tx, ty),         col, txt);
+  };
+
+  ImU32 numCol = TextColorForBg(teamColor);
+  for (const PlacedPlayer &pl : placed) {
+    DrawJersey(dl, pl.px, pl.py, teamColor, numCol, pl.pp->jerseyNumber);
+    if (!pl.pp->role.empty())
+      ShadowText(pl.px, pl.py + 14.0f, 10.0f, IM_COL32(200, 225, 255, 245), pl.pp->role.c_str());
+    std::string abbr = pl.pp->lastName.size() > 8 ? pl.pp->lastName.substr(0, 8) : pl.pp->lastName;
+    ShadowText(pl.px, pl.py + 25.0f, 10.0f, IM_COL32(255, 255, 255, 230), abbr.c_str());
+  }
+}
+
+// 3-column substitutes grid.
+// Layout (9 subs example, right column = first off bench):
+//   SUB9  SUB6  SUB3
+//   SUB8  SUB5  SUB2
+//   SUB7  SUB4  SUB1
+static void DrawSubsList(ImDrawList *dl, ImVec2 origin, float w, float h,
+                         ImU32 teamColor,
+                         const std::vector<BenchPlayer> &bench)
+{
+  if (bench.empty()) return;
+
+  const int numCols = 3;
+  int numSubs = (int)bench.size();
+  int numRows = (numSubs + numCols - 1) / numCols;
+
+  const float kPadX = 6.0f;
+  const float kPadY = 8.0f;
+  float cellW  = w / (float)numCols;
+  float cellH  = h / (float)numRows;
+  float drawW  = cellW - kPadX;
+  float drawH  = cellH - kPadY;
+
+  // Font size: scale with cell but cap so block always fits
+  float fSize = drawH * 0.18f;
+  if (fSize < 7.0f)  fSize = 7.0f;
+  if (fSize > 16.0f) fSize = 16.0f;
+  float lineH = fSize + 1.5f;
+
+  // Jersey height: must leave room for 2 name lines + spacing inside drawH
+  // blockH = jBH + 3 + lineH*2  <=  drawH
+  float jBH_byH = drawH - 3.0f - lineH * 2.0f;
+  float jBH_byW = drawW / 1.42f;  // total jersey+sleeve width = jBH * 1.42
+  float jBH   = jBH_byH < jBH_byW ? jBH_byH : jBH_byW;
+  if (jBH < 10.0f) jBH = 10.0f;
+  float jBW   = jBH  * 0.90f;
+  float jSW   = jBH  * 0.26f;
+  float jSH   = jBH  * 0.40f;
+  float jR    = jBH  * 0.10f;
+
+  ImU32 numCol = TextColorForBg(teamColor);
+  ImFont *f    = g_ManagerFontBold;
+
+  for (int row = 0; row < numRows; row++) {
+    for (int col = 0; col < numCols; col++) {
+      // Right column = first off bench (lowest index)
+      int idx = (numCols - 1 - col) * numRows + (numRows - 1 - row);
+      if (idx < 0 || idx >= numSubs) continue;
+
+      const BenchPlayer &bp = bench[idx];
+
+      float cx = origin.x + col * cellW + cellW * 0.5f;
+      float cy = origin.y + row * cellH  + cellH * 0.5f;
+
+      // Clip everything to this cell so nothing bleeds into neighbours
+      ImVec2 clipMin(origin.x + col * cellW + 2.0f,       origin.y + row * cellH + 2.0f);
+      ImVec2 clipMax(origin.x + (col + 1) * cellW - 2.0f, origin.y + (row + 1) * cellH - 2.0f);
+      dl->PushClipRect(clipMin, clipMax, true);
+
+      // Block always fits in drawH: jBH sized to leave room for 2 name lines
+      float blockH = jBH + 3.0f + lineH * 2.0f;
+      float jcy    = cy - blockH * 0.5f + jBH * 0.5f;
+      float bx     = cx - jBW * 0.5f;
+      float by     = jcy - jBH * 0.5f;
+
+      // Jersey body + sleeves
+      dl->AddRectFilled(ImVec2(bx - jSW + 1, by + 1), ImVec2(bx + 2,           by + jSH), teamColor, jR);
+      dl->AddRectFilled(ImVec2(bx + jBW - 2, by + 1), ImVec2(bx + jBW + jSW - 1, by + jSH), teamColor, jR);
+      dl->AddRectFilled(ImVec2(bx, by), ImVec2(bx + jBW, by + jBH), teamColor, jR);
+
+      // Jersey number — outlined for contrast against any kit colour
+      if (bp.jerseyNumber > 0 && f) {
+        char buf[8]; snprintf(buf, sizeof(buf), "%d", bp.jerseyNumber);
+        ImVec2 ns = f->CalcTextSizeA(fSize, FLT_MAX, 0.f, buf);
+        float nx = cx - ns.x * 0.5f;
+        float ny_num = jcy - ns.y * 0.5f + jBH * 0.1f;
+        ImU32 stroke = IM_COL32(0, 0, 0, 180);
+        dl->AddText(f, fSize, ImVec2(nx-1, ny_num  ), stroke, buf);
+        dl->AddText(f, fSize, ImVec2(nx+1, ny_num  ), stroke, buf);
+        dl->AddText(f, fSize, ImVec2(nx,   ny_num-1), stroke, buf);
+        dl->AddText(f, fSize, ImVec2(nx,   ny_num+1), stroke, buf);
+        dl->AddText(f, fSize, ImVec2(nx,   ny_num  ), numCol, buf);
+      }
+
+      // Outlined text helper: 4-direction black stroke + bright white fill
+      auto OutlineText = [&](ImFont *font, float fs, float ox, float oy, const char *txt) {
+        ImU32 stroke = IM_COL32(0, 0, 0, 220);
+        ImU32 fill   = IM_COL32(255, 255, 255, 255);
+        dl->AddText(font, fs, ImVec2(ox - 1, oy    ), stroke, txt);
+        dl->AddText(font, fs, ImVec2(ox + 1, oy    ), stroke, txt);
+        dl->AddText(font, fs, ImVec2(ox,     oy - 1), stroke, txt);
+        dl->AddText(font, fs, ImVec2(ox,     oy + 1), stroke, txt);
+        dl->AddText(font, fs, ImVec2(ox,     oy    ), fill,   txt);
+      };
+
+      // Name below jersey — word-wrap to 2 lines if too wide; shrink only if no spaces
+      const std::string &nameStr = bp.lastName;
+      float ny = jcy + jBH * 0.5f + 3.0f;
+      if (f) {
+        ImVec2 ns = f->CalcTextSizeA(fSize, FLT_MAX, 0.f, nameStr.c_str());
+        if (ns.x <= drawW) {
+          float nx = cx - ns.x * 0.5f;
+          OutlineText(f, fSize, nx, ny, nameStr.c_str());
+        } else {
+          // Find the last space where the prefix still fits in drawW
+          std::string line1, line2;
+          size_t splitPos = std::string::npos;
+          for (size_t i = 0; i < nameStr.size(); i++) {
+            if (nameStr[i] == ' ') {
+              std::string candidate = nameStr.substr(0, i);
+              ImVec2 cs = f->CalcTextSizeA(fSize, FLT_MAX, 0.f, candidate.c_str());
+              if (cs.x <= drawW) splitPos = i;
+            }
+          }
+          if (splitPos != std::string::npos) {
+            line1 = nameStr.substr(0, splitPos);
+            line2 = nameStr.substr(splitPos + 1);
+          } else {
+            // No usable space — shrink to single line
+            float shrunk = fSize * drawW / ns.x;
+            if (shrunk < 7.0f) shrunk = 7.0f;
+            ns = f->CalcTextSizeA(shrunk, FLT_MAX, 0.f, nameStr.c_str());
+            OutlineText(f, shrunk, cx - ns.x * 0.5f, ny, nameStr.c_str());
+            line1.clear();
+          }
+          if (!line1.empty()) {
+            ImVec2 ns1 = f->CalcTextSizeA(fSize, FLT_MAX, 0.f, line1.c_str());
+            OutlineText(f, fSize, cx - ns1.x * 0.5f, ny, line1.c_str());
+            float f2 = fSize;
+            ImVec2 ns2 = f->CalcTextSizeA(f2, FLT_MAX, 0.f, line2.c_str());
+            if (ns2.x > drawW) {
+              f2  = f2 * drawW / ns2.x;
+              if (f2 < 7.0f) f2 = 7.0f;
+              ns2 = f->CalcTextSizeA(f2, FLT_MAX, 0.f, line2.c_str());
+            }
+            OutlineText(f, f2, cx - ns2.x * 0.5f, ny + lineH, line2.c_str());
+          }
+        }
+      }
+
+      dl->PopClipRect();
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 
 void RenderImGuiMatchOverlay() {
   auto gameTask = GetGameTask();
@@ -216,6 +550,9 @@ void RenderImGuiMatchOverlay() {
   int awayGoals      = match->GetScore(1);
   std::string homeName = match->GetTeam(0)->GetTeamData()->GetName();
   std::string awayName = match->GetTeam(1)->GetTeamData()->GetName();
+
+  // Populate HUD cache while we hold the mutex (TeamData is safe to read here).
+  InitHUDDataIfNeeded(match);
 
   gameTask->matchRenderMutex.unlock();
 
@@ -471,65 +808,303 @@ void RenderImGuiMatchOverlay() {
                   IM_COL32(12, 20, 55, A(200)), 0.0f, 0, 1.5f);
     }
   }
+
+  // ---- Always-on top-right controls bar ------------------------------------
+  {
+    const ImGuiIO &io2 = ImGui::GetIO();
+    const float sw2  = io2.DisplaySize.x;
+    const float btnH = 28.0f;
+    const float iconW = 32.0f;
+    const float spdW  = 34.0f;
+    const float gap   = 4.0f;
+    const float marginR = 16.0f;  // right margin from screen edge
+    const float marginT = 12.0f;  // top margin from screen edge
+    // Actual width = play(iconW+gap) + pause(iconW+gap) + extraGap
+    //              + 4*(spdW+gap) + extraGap + settings(iconW)
+    // = 3*iconW + 8*gap + 4*spdW
+    float totalW = iconW * 3 + gap * 8 + spdW * 4;
+    float barX   = sw2 - totalW - marginR;
+    float barY2  = marginT;
+    float winX   = barX - 6.0f;
+    float winY   = barY2 - 4.0f;
+    float winW   = totalW + 14.0f;  // extra padding so settings button is not clipped
+    float winH   = btnH + 8.0f;
+
+    ImGui::SetNextWindowPos(ImVec2(winX, winY), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(winW, winH), ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::Begin("##topbar", nullptr,
+      ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+      ImGuiWindowFlags_NoMove     | ImGuiWindowFlags_NoScrollbar |
+      ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav |
+      ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoBringToFrontOnFocus);
+    ImDrawList *tbdl = ImGui::GetWindowDrawList();
+
+    // Background pill drawn in window draw list (behind buttons)
+    tbdl->AddRectFilled(ImVec2(winX, winY), ImVec2(winX + winW, winY + winH),
+                        IM_COL32(10, 14, 28, 220), 8.0f);
+
+    bool isPaused = g_TopBarSoftPause || g_ImGuiIngamePauseMenuActive;
+    float cx2 = barX;
+    float cy2 = barY2;
+
+    // Generic icon button — draws bg rect, returns click, advances cx2
+    auto IconBtn = [&](const char *id, bool active, bool enabled) -> bool {
+      ImVec2 bmin(cx2, cy2);
+      ImVec2 bmax(cx2 + iconW, cy2 + btnH);
+      ImGui::SetCursorScreenPos(bmin);
+      ImGui::PushID(id);
+      bool clicked = ImGui::InvisibleButton(id, ImVec2(iconW, btnH)) && enabled;
+      ImGui::PopID();
+      bool hov = ImGui::IsItemHovered();
+      ImU32 bg = active ? IM_COL32(255, 200, 0, 255)
+               : hov    ? IM_COL32(50, 65, 110, 255)
+                        : IM_COL32(22, 32, 60, 200);
+      tbdl->AddRectFilled(bmin, bmax, bg, 5.0f);
+      cx2 += iconW + gap;
+      return clicked;
+    };
+
+    // Helpers: draw icons at the PREVIOUS button position (cx2 was advanced already)
+    auto DrawPlay = [&](bool active) {
+      float bx = cx2 - iconW - gap, by = cy2;
+      ImU32 col = active ? IM_COL32(15,15,15,255) : IM_COL32(200,215,255,230);
+      float mx = bx + iconW * 0.5f + 2.0f, my = by + btnH * 0.5f;
+      tbdl->AddTriangleFilled(ImVec2(mx - 7, my - 7), ImVec2(mx - 7, my + 7),
+                              ImVec2(mx + 7, my), col);
+    };
+    auto DrawPause = [&](bool active) {
+      float bx = cx2 - iconW - gap, by = cy2;
+      ImU32 col = active ? IM_COL32(15,15,15,255) : IM_COL32(200,215,255,230);
+      float mx = bx + iconW * 0.5f, my = by + btnH * 0.5f;
+      float rw = 5.0f, rh = 11.0f;
+      tbdl->AddRectFilled(ImVec2(mx - rw - 2, my - rh*0.5f),
+                          ImVec2(mx - 2,       my + rh*0.5f), col, 1.5f);
+      tbdl->AddRectFilled(ImVec2(mx + 2,       my - rh*0.5f),
+                          ImVec2(mx + 2 + rw,  my + rh*0.5f), col, 1.5f);
+    };
+    auto DrawSettings = [&]() {
+      float bx = cx2 - iconW - gap, by = cy2;
+      ImU32 col = IM_COL32(200, 215, 255, 230);
+      float mx = bx + iconW * 0.5f, my = by + btnH * 0.5f;
+      float lw = 13.0f, lh = 2.0f;
+      tbdl->AddRectFilled(ImVec2(mx - lw*0.5f, my - 5 - lh*0.5f),
+                          ImVec2(mx + lw*0.5f, my - 5 + lh*0.5f), col, 1.0f);
+      tbdl->AddRectFilled(ImVec2(mx - lw*0.5f, my     - lh*0.5f),
+                          ImVec2(mx + lw*0.5f, my     + lh*0.5f), col, 1.0f);
+      tbdl->AddRectFilled(ImVec2(mx - lw*0.5f, my + 5 - lh*0.5f),
+                          ImVec2(mx + lw*0.5f, my + 5 + lh*0.5f), col, 1.0f);
+    };
+
+    // Play button
+    if (IconBtn("##play", !isPaused, isPaused)) g_TopBarSoftPause = false;
+    DrawPlay(!isPaused);
+
+    // Pause button
+    if (IconBtn("##pause", isPaused, !isPaused)) g_TopBarSoftPause = true;
+    DrawPause(isPaused);
+
+    cx2 += gap; // extra gap before speed buttons
+
+    int curSpeed = GetConfiguration()->GetInt("match_speed_multiplier", 1);
+    const int   speeds[]  = {1, 2, 4, 8};
+    const char *sLabels[] = {"x1", "x2", "x4", "x8"};
+    for (int i = 0; i < 4; i++) {
+      ImVec2 bmin(cx2, cy2);
+      ImVec2 bmax(cx2 + spdW, cy2 + btnH);
+      ImGui::SetCursorScreenPos(bmin);
+      char sid[16]; snprintf(sid, sizeof(sid), "##spd%d", i);
+      ImGui::PushID(sid);
+      bool clicked = ImGui::InvisibleButton(sid, ImVec2(spdW, btnH));
+      ImGui::PopID();
+      bool active = (curSpeed == speeds[i]);
+      bool hov    = ImGui::IsItemHovered();
+      ImU32 bg = active ? IM_COL32(255, 200, 0, 255)
+               : hov    ? IM_COL32(50, 65, 110, 255)
+                        : IM_COL32(22, 32, 60, 200);
+      ImU32 tc = active ? IM_COL32(15, 15, 15, 255) : IM_COL32(200, 215, 255, 220);
+      tbdl->AddRectFilled(bmin, bmax, bg, 5.0f);
+      AddTextCentered(tbdl, g_ManagerFontBold, 13.0f, bmin, bmax, tc, sLabels[i]);
+      if (clicked) GetConfiguration()->Set("match_speed_multiplier", (float)speeds[i]);
+      cx2 += spdW + gap;
+    }
+
+    cx2 += gap;
+    // Settings button (3 horizontal lines icon)
+    if (IconBtn("##settings", false, true)) g_ImGuiTopBarPauseRequest = true;
+    DrawSettings();
+
+    ImGui::End();
+    ImGui::PopStyleVar(2);
+  }
+
+  // ---- Always-on bottom HUD: formation boards flanking the engine's radar ----
+  // Radar is at x=38%, y=78%, w=24%, h=18% of screen (match.cpp:316).
+  // Formation boards are exactly the same size, placed left and right of it.
+  if (s_pauseInitialized && !s_pausePlayers.empty()) {
+    const ImGuiIO &io3 = ImGui::GetIO();
+    const float sw3 = io3.DisplaySize.x;
+    const float sh3 = io3.DisplaySize.y;
+
+    // Radar geometry (percentages from match.cpp constructor)
+    const float rX = 0.38f, rY = 0.78f, rW = 0.24f, rH = 0.18f;
+    float radarL = rX * sw3;
+    float radarT = rY * sh3;
+    float boardW = rW * sw3;
+    float boardH = rH * sh3;
+
+    // Boards hug the radar edges (negative = slight inward overlap)
+    const float kBoardGap = -8.0f;
+    float leftX  = radarL - boardW - kBoardGap;
+    float rightX = (rX + rW) * sw3 + kBoardGap;
+
+    // Subs panel: 3 columns, wide enough for full surnames
+    const float subsW = 240.0f;
+
+    // ---- Left formation board: user's team ---------------------------------
+    {
+      ImGui::SetNextWindowPos(ImVec2(leftX, radarT), ImGuiCond_Always);
+      ImGui::SetNextWindowSize(ImVec2(boardW, boardH), ImGuiCond_Always);
+      ImGui::SetNextWindowBgAlpha(0.0f);
+      ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+      ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+      ImGui::Begin("##hud_left", nullptr,
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove     | ImGuiWindowFlags_NoScrollbar |
+        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav |
+        ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoBringToFrontOnFocus);
+      ImDrawList *ldl  = ImGui::GetWindowDrawList();
+      ImVec2      lpos = ImGui::GetWindowPos();
+      DrawFormationHorizontal(ldl, lpos, boardW, boardH,
+                              s_pauseTeamName, s_pauseUserColor, s_pauseUserTextColor,
+                              s_pausePlayers, false);
+      ImGui::End();
+      ImGui::PopStyleVar(2);
+    }
+
+    // ---- Right formation board: opponent -----------------------------------
+    {
+      ImGui::SetNextWindowPos(ImVec2(rightX, radarT), ImGuiCond_Always);
+      ImGui::SetNextWindowSize(ImVec2(boardW, boardH), ImGuiCond_Always);
+      ImGui::SetNextWindowBgAlpha(0.0f);
+      ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+      ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+      ImGui::Begin("##hud_right", nullptr,
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove     | ImGuiWindowFlags_NoScrollbar |
+        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav |
+        ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoBringToFrontOnFocus);
+      ImDrawList *rdl  = ImGui::GetWindowDrawList();
+      ImVec2      rpos = ImGui::GetWindowPos();
+      DrawFormationHorizontal(rdl, rpos, boardW, boardH,
+                              s_pauseAwayTeamName, s_pauseOppColor, s_pauseOppTextColor,
+                              s_pauseAwayPlayers, true);
+      ImGui::End();
+      ImGui::PopStyleVar(2);
+    }
+
+    // ---- User subs: left of user board (clamped to screen) -----------------
+    if (!s_benchPlayers.empty()) {
+      float subsX = leftX - subsW;
+      if (subsX < 4.0f) subsX = 4.0f;
+      ImGui::SetNextWindowPos(ImVec2(subsX, radarT), ImGuiCond_Always);
+      ImGui::SetNextWindowSize(ImVec2(subsW, boardH), ImGuiCond_Always);
+      ImGui::SetNextWindowBgAlpha(0.0f);
+      ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+      ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+      ImGui::Begin("##subs_home", nullptr,
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove     | ImGuiWindowFlags_NoScrollbar |
+        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav |
+        ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoBringToFrontOnFocus);
+      ImDrawList *sdl = ImGui::GetWindowDrawList();
+      ImVec2      sp  = ImGui::GetWindowPos();
+      DrawSubsList(sdl, sp, subsW, boardH, s_pauseUserColor, s_benchPlayers);
+      ImGui::End();
+      ImGui::PopStyleVar(2);
+    }
+
+    // ---- Opponent subs: right of opponent board (clamped to screen) --------
+    if (!s_awayBenchPlayers.empty()) {
+      float awaySubsX = rightX + boardW;
+      if (awaySubsX + subsW > sw3 - 4.0f) awaySubsX = sw3 - subsW - 4.0f;
+      ImGui::SetNextWindowPos(ImVec2(awaySubsX, radarT), ImGuiCond_Always);
+      ImGui::SetNextWindowSize(ImVec2(subsW, boardH), ImGuiCond_Always);
+      ImGui::SetNextWindowBgAlpha(0.0f);
+      ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+      ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+      ImGui::Begin("##subs_away", nullptr,
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove     | ImGuiWindowFlags_NoScrollbar |
+        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav |
+        ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoBringToFrontOnFocus);
+      ImDrawList *adl = ImGui::GetWindowDrawList();
+      ImVec2      ap  = ImGui::GetWindowPos();
+      DrawSubsList(adl, ap, subsW, boardH, s_pauseOppColor, s_awayBenchPlayers);
+      ImGui::End();
+      ImGui::PopStyleVar(2);
+    }
+
+    // ---- Floating tab buttons: above the radar, no background ---------------
+    const char *tabLabels[] = {"MATCH FACTS", "TACTICS", "SHOUTS"};
+    const float tbtnW   = 86.0f;
+    const float tbtnH   = 26.0f;
+    const float tbtnGap = 5.0f;
+    float tabRowW = tbtnW * 3 + tbtnGap * 2;
+    float tabCX   = radarL + boardW * 0.5f;  // center of radar
+    float tabX0   = tabCX - tabRowW * 0.5f;
+    float tabY0   = radarT - tbtnH - 10.0f;  // 10px above radar top
+
+    ImGui::SetNextWindowPos(ImVec2(tabX0, tabY0), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(tabRowW, tbtnH), ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::Begin("##tab_btns", nullptr,
+      ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+      ImGuiWindowFlags_NoMove     | ImGuiWindowFlags_NoScrollbar |
+      ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav |
+      ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoBringToFrontOnFocus);
+    ImDrawList *tdl  = ImGui::GetWindowDrawList();
+    ImVec2      tpos = ImGui::GetWindowPos();
+    float tabX = tpos.x;
+    float tabY = tpos.y;
+    for (int i = 0; i < 3; i++) {
+      ImVec2 bmin(tabX, tabY);
+      ImVec2 bmax(tabX + tbtnW, tabY + tbtnH);
+      ImGui::SetCursorScreenPos(bmin);
+      char cid[16]; snprintf(cid, sizeof(cid), "##tab%d", i);
+      ImGui::PushID(cid);
+      ImGui::InvisibleButton(cid, ImVec2(tbtnW, tbtnH));
+      ImGui::PopID();
+      bool hov = ImGui::IsItemHovered();
+      ImU32 bg = hov ? IM_COL32(50, 70, 120, 240) : IM_COL32(18, 26, 52, 210);
+      tdl->AddRectFilled(bmin, bmax, bg, 5.0f);
+      tdl->AddRect(bmin, bmax, IM_COL32(55, 80, 140, 180), 5.0f, 0, 1.0f);
+      AddTextCentered(tdl, g_ManagerFontBold, 11.0f, bmin, bmax,
+                      IM_COL32(180, 210, 255, 230), tabLabels[i]);
+      tabX += tbtnW + tbtnGap;
+    }
+    ImGui::End();
+    ImGui::PopStyleVar(2);
+  }
 }
 
 // ---------------------------------------------------------------------------
 // Pause menu overlay
 // ---------------------------------------------------------------------------
-
-struct PausePlayer {
-  std::string lastName;
-  std::string role;  // "GK", "CB", "LB", etc.
-  float nx = 0.f;   // [0,1] screen x pre-mapped with engine formula
-  float ny = 0.f;   // [0,1] screen y — 0=top(attack), 1=bottom(GK)
-};
-
-struct BenchPlayer {
-  std::string lastName;
-  std::string role;
-  int         playersIdx; // index in team->GetAllPlayers()
-};
-
-static bool                      s_pauseInitialized   = false;
-static std::string               s_pauseTeamName;
-static std::vector<PausePlayer>  s_pausePlayers;
-static ImU32                     s_pauseUserColor      = IM_COL32(210, 0, 0, 255);
-static ImU32                     s_pauseUserTextColor  = IM_COL32(255, 255, 255, 255);
-static std::string               s_pauseAwayTeamName;
-static std::vector<PausePlayer>  s_pauseAwayPlayers;
-static ImU32                     s_pauseOppColor       = IM_COL32(0, 40, 220, 255);
-static ImU32                     s_pauseOppTextColor   = IM_COL32(255, 255, 255, 255);
-
-// Substitution panel state
-static std::vector<BenchPlayer>  s_benchPlayers;
-static int                       s_subUserTeamIdx   = 0;
-static std::string               s_userBadgePath;
-static bool                      s_subPanelActive   = false;
-static int                       s_subOffSelected   = -1; // players[] index of starter going off
-static int                       s_subOnSelected    = -1; // players[] index of bench player coming on
-static int                       s_subsMadeCount    = 0;  // UI-side counter (mirrors Team::subsMade)
-
-static void ResetPauseCache() {
-  s_pauseInitialized = false;
-  s_pauseTeamName.clear();
-  s_pausePlayers.clear();
-  s_pauseAwayTeamName.clear();
-  s_pauseAwayPlayers.clear();
-  s_benchPlayers.clear();
-  s_subPanelActive  = false;
-  s_subOffSelected  = -1;
-  s_subOnSelected   = -1;
-  s_subsMadeCount   = 0;
-  g_QueuedSub.pending  = false;
-  g_SubGraphic.active  = false;
-}
+// (PausePlayer, BenchPlayer, static vars, ResetPauseCache defined above RenderImGuiMatchOverlay)
 
 static float Clamp01(float v) { return v < 0.f ? 0.f : (v > 1.f ? 1.f : v); }
 
 // Build a PausePlayer using the same formula as planmap.cpp.
 static PausePlayer MakePausePlayer(TeamData *td, int i) {
   PausePlayer pp;
-  pp.lastName = td->GetPlayerData(i)->GetLastName();
+  PlayerData *pd = td->GetPlayerData(i);
+  pp.lastName    = pd->GetLastName();
+  pp.jerseyNumber = pd->GetJerseyNumber();
   FormationEntry fe = td->GetFormationEntry(i);
   pp.role = GetRoleName(fe.role);
   Vector3 pos = fe.databasePosition;
@@ -593,7 +1168,7 @@ static void DrawMiniPitch(ImDrawList *dl, ImVec2 min, ImVec2 max) {
   dl->AddRect(ImVec2(gx, max.y - gh), ImVec2(gx + gw, max.y),      lineCol, 0.0f, 0, 1.2f);
 }
 
-// Draw a formation panel (header + mini pitch + dots) into a draw list.
+// Draw a formation panel (header + mini pitch + jerseys) into a draw list.
 // panelH: height used for the panel — caller reserves footer space separately.
 static void DrawFormationPanel(
     ImDrawList *dl,
@@ -619,35 +1194,37 @@ static void DrawFormationPanel(
 
   float pW = pitchMax.x - pitchMin.x;
   float pH = pitchMax.y - pitchMin.y;
-  const float dotR    = 7.5f;
-  const float roleSz  = 12.5f;
-  const float nameSz  = 13.5f;
 
   for (size_t i = 0; i < players.size() && i < 11; i++) {
     const PausePlayer &pp = players[i];
-    float dotX = pitchMin.x + pp.nx * pW;
-    float dotY = pitchMin.y + pp.ny * pH;
+    float px = pitchMin.x + pp.nx * pW;
+    float py = pitchMin.y + pp.ny * pH;
 
-    dl->AddCircleFilled(ImVec2(dotX, dotY), dotR, teamColor);
-    dl->AddCircle(ImVec2(dotX, dotY), dotR, IM_COL32(255, 255, 255, 200), 12, 1.0f);
+    // Clamp so text doesn't run off edges
+    if (px < pitchMin.x + 16) px = pitchMin.x + 16;
+    if (px > pitchMax.x - 16) px = pitchMax.x - 16;
+    if (py < pitchMin.y + 14) py = pitchMin.y + 14;
+    if (py > pitchMax.y - 28) py = pitchMax.y - 28;
 
-    // Role abbreviation above dot (bold, white)
+    DrawJersey(dl, px, py, teamColor, TextColorForBg(teamColor), pp.jerseyNumber);
+
+    // Playing position above jersey
     if (!pp.role.empty()) {
       ImVec2 rs = g_ManagerFontBold
-          ? g_ManagerFontBold->CalcTextSizeA(roleSz, FLT_MAX, 0.f, pp.role.c_str())
-          : ImGui::CalcTextSize(pp.role.c_str());
-      dl->AddText(g_ManagerFontBold, roleSz,
-                  ImVec2(dotX - rs.x * 0.5f, dotY - dotR - rs.y - 1.f),
-                  IM_COL32(255, 255, 255, 255), pp.role.c_str());
+          ? g_ManagerFontBold->CalcTextSizeA(11.0f, FLT_MAX, 0.f, pp.role.c_str())
+          : ImVec2(20, 10);
+      dl->AddText(g_ManagerFontBold, 11.0f,
+                  ImVec2(px - rs.x * 0.5f, py - 11 - rs.y),
+                  IM_COL32(255, 255, 255, 240), pp.role.c_str());
     }
 
-    // Surname below dot (bold, slightly larger, up to 8 chars)
+    // Surname below jersey
     std::string abbr = pp.lastName.size() > 8 ? pp.lastName.substr(0, 8) : pp.lastName;
     ImVec2 ns = g_ManagerFontBold
-        ? g_ManagerFontBold->CalcTextSizeA(nameSz, FLT_MAX, 0.f, abbr.c_str())
-        : ImGui::CalcTextSize(abbr.c_str());
-    dl->AddText(g_ManagerFontBold, nameSz,
-                ImVec2(dotX - ns.x * 0.5f, dotY + dotR + 2.f),
+        ? g_ManagerFontBold->CalcTextSizeA(11.0f, FLT_MAX, 0.f, abbr.c_str())
+        : ImVec2(30, 10);
+    dl->AddText(g_ManagerFontBold, 11.0f,
+                ImVec2(px - ns.x * 0.5f, py + 13.0f),
                 IM_COL32(255, 255, 255, 220), abbr.c_str());
   }
   if (players.empty()) {
@@ -905,81 +1482,80 @@ static void DrawSubstitutionPanel(float px, float py, float pw, float ph) {
   ImGui::PopStyleVar(2);
 }
 
+// Populate the per-match HUD/pause data cache (GL thread — TeamData read-only during match).
+// Called every frame from RenderImGuiMatchOverlay so the data is ready before ESC is pressed.
+static void InitHUDDataIfNeeded(Match *match) {
+  if (s_pauseInitialized) return;
+
+  int userClubId = g_CareerMatchContext.userClubId;
+  int teamIdx = 0;
+  if (userClubId > 0 &&
+      match->GetTeam(1) && match->GetTeam(1)->GetTeamData() &&
+      match->GetTeam(1)->GetTeamData()->GetDatabaseID() == userClubId)
+    teamIdx = 1;
+  int oppIdx = 1 - teamIdx;
+
+  TeamData *td = match->GetTeam(teamIdx) ? match->GetTeam(teamIdx)->GetTeamData() : nullptr;
+  if (td) {
+    s_pauseTeamName      = td->GetName();
+    Vector3 c            = td->GetColor1();
+    s_pauseUserColor     = Vec3ToCol32(c.coords[0], c.coords[1], c.coords[2]);
+    s_pauseUserTextColor = TextColorForBg(s_pauseUserColor);
+    int n = std::min(td->GetPlayerNum(), 11);
+    for (int i = 0; i < n; i++) s_pausePlayers.push_back(MakePausePlayer(td, i));
+
+    s_subUserTeamIdx = teamIdx;
+    {
+      std::string raw = td->GetLogoUrl();
+      const std::string kPfx = "databases/default/";
+      if (raw.substr(0, kPfx.size()) == kPfx) raw = raw.substr(kPfx.size());
+      s_userBadgePath = raw;
+    }
+    int total = std::min(td->GetPlayerNum(), 20);
+    for (int i = 11; i < total; i++) {
+      BenchPlayer bp;
+      PlayerData *pd = td->GetPlayerData(i);
+      bp.lastName    = pd->GetLastName();
+      const std::string &raw = pd->GetRoleRaw();
+      bp.role        = raw.empty() ? "SUB" : raw;
+      bp.playersIdx  = i;
+      bp.jerseyNumber = pd->GetJerseyNumber();
+      s_benchPlayers.push_back(bp);
+    }
+  }
+
+  TeamData *tdOpp = match->GetTeam(oppIdx) ? match->GetTeam(oppIdx)->GetTeamData() : nullptr;
+  if (tdOpp) {
+    s_pauseAwayTeamName = tdOpp->GetName();
+    Vector3 c           = tdOpp->GetColor1();
+    s_pauseOppColor     = Vec3ToCol32(c.coords[0], c.coords[1], c.coords[2]);
+    s_pauseOppTextColor = TextColorForBg(s_pauseOppColor);
+    int n = std::min(tdOpp->GetPlayerNum(), 11);
+    for (int i = 0; i < n; i++) s_pauseAwayPlayers.push_back(MakePausePlayer(tdOpp, i));
+    int totalOpp = std::min(tdOpp->GetPlayerNum(), 20);
+    for (int i = 11; i < totalOpp; i++) {
+      BenchPlayer bp;
+      PlayerData *pd = tdOpp->GetPlayerData(i);
+      bp.lastName    = pd->GetLastName();
+      const std::string &raw = pd->GetRoleRaw();
+      bp.role        = raw.empty() ? "SUB" : raw;
+      bp.playersIdx  = i;
+      bp.jerseyNumber = pd->GetJerseyNumber();
+      s_awayBenchPlayers.push_back(bp);
+    }
+  }
+
+  if (s_pauseTeamName.empty())     s_pauseTeamName     = g_CareerHub.club.name;
+  if (s_pauseTeamName.empty())     s_pauseTeamName     = "Your Team";
+  if (s_pauseAwayTeamName.empty()) s_pauseAwayTeamName = "Opponents";
+  s_pauseInitialized = true;
+  printf("[IMGUI HUD] Cache: %zu user / %zu opp players\n",
+         s_pausePlayers.size(), s_pauseAwayPlayers.size());
+}
+
 void RenderImGuiMatchPauseOverlay() {
   if (!g_ImGuiIngamePauseMenuActive) return;
   if (g_ImGuiPausePendingAction != 0) return;
-
-  // Populate cache on first frame of pause (GL thread — TeamData read-only during match)
-  if (!s_pauseInitialized) {
-    auto gt = GetGameTask();
-    if (gt) {
-      gt->matchRenderMutex.lock();
-      Match *match = gt->GetMatch();
-      if (match) {
-        // Use g_CareerMatchContext.userClubId — g_CareerHub is cleared when the
-        // career page exits before the match starts, so clubId would be 0 there.
-        int userClubId = g_CareerMatchContext.userClubId;
-        int teamIdx = 0;
-        if (userClubId > 0 &&
-            match->GetTeam(1) && match->GetTeam(1)->GetTeamData() &&
-            match->GetTeam(1)->GetTeamData()->GetDatabaseID() == userClubId)
-          teamIdx = 1;
-        int oppIdx = 1 - teamIdx;
-
-        // User team
-        TeamData *td = match->GetTeam(teamIdx) ? match->GetTeam(teamIdx)->GetTeamData() : nullptr;
-        if (td) {
-          s_pauseTeamName = td->GetName();
-          Vector3 c = td->GetColor1();
-          s_pauseUserColor     = Vec3ToCol32(c.coords[0], c.coords[1], c.coords[2]);
-          s_pauseUserTextColor = TextColorForBg(s_pauseUserColor);
-          int n = std::min(td->GetPlayerNum(), 11);
-          for (int i = 0; i < n; i++)
-            s_pausePlayers.push_back(MakePausePlayer(td, i));
-          // Bench players (indices 11-19, max 9 subs)
-          s_subUserTeamIdx = teamIdx;
-          // GetLogoUrl() already has "databases/default/" prepended (teamdata.cpp:96).
-          // LoadBadgeTex also prepends it — strip the duplicate prefix here.
-          {
-            std::string raw = td->GetLogoUrl();
-            const std::string kPfx = "databases/default/";
-            if (raw.substr(0, kPfx.size()) == kPfx) raw = raw.substr(kPfx.size());
-            s_userBadgePath = raw;
-          }
-          int total = std::min(td->GetPlayerNum(), 20); // cap at S9 (index 19)
-          for (int i = 11; i < total; i++) {
-            BenchPlayer bp;
-            PlayerData *pd = td->GetPlayerData(i);
-            bp.lastName   = pd->GetLastName();
-            // Show natural role from DB ("DF", "MF", "GK", "ST") — distinct from formation position
-            const std::string &raw = pd->GetRoleRaw();
-            bp.role = raw.empty() ? "SUB" : raw;
-            bp.playersIdx = i;
-            s_benchPlayers.push_back(bp);
-          }
-        }
-
-        // Opponent team
-        TeamData *tdOpp = match->GetTeam(oppIdx) ? match->GetTeam(oppIdx)->GetTeamData() : nullptr;
-        if (tdOpp) {
-          s_pauseAwayTeamName = tdOpp->GetName();
-          Vector3 c = tdOpp->GetColor1();
-          s_pauseOppColor     = Vec3ToCol32(c.coords[0], c.coords[1], c.coords[2]);
-          s_pauseOppTextColor = TextColorForBg(s_pauseOppColor);
-          int n = std::min(tdOpp->GetPlayerNum(), 11);
-          for (int i = 0; i < n; i++)
-            s_pauseAwayPlayers.push_back(MakePausePlayer(tdOpp, i));
-        }
-      }
-      gt->matchRenderMutex.unlock();
-    }
-    if (s_pauseTeamName.empty())     s_pauseTeamName     = g_CareerHub.club.name;
-    if (s_pauseTeamName.empty())     s_pauseTeamName     = "Your Team";
-    if (s_pauseAwayTeamName.empty()) s_pauseAwayTeamName = "Opponents";
-    s_pauseInitialized = true;
-    printf("[IMGUI PAUSE] Cache: %zu user / %zu opp players\n",
-           s_pausePlayers.size(), s_pauseAwayPlayers.size());
-  }
 
   ImGuiIO &io = ImGui::GetIO();
 

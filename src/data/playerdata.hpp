@@ -31,6 +31,7 @@ class PlayerData {
     std::string GetHairStyle() { return hairStyle; }
     std::string GetHairColor() { return hairColor; }
     float GetHeight() { return height; }
+    int   GetJerseyNumber() const { return jerseyNumber; }
 
   protected:
     int databaseID;
@@ -45,6 +46,7 @@ class PlayerData {
     std::string hairStyle;
     std::string hairColor;
     float height;
+    int   jerseyNumber = 0;
 
 };
 
