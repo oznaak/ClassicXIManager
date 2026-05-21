@@ -313,6 +313,7 @@ void Team::SetLastTouchPlayer(Player *player, e_TouchType touchType) {
   player->SetLastTouchTime_ms(match->GetActualTime_ms());
   player->SetLastTouchType(lastTouchType);
   match->SetLastTouchTeamID(GetID(), touchType);
+  match->GetMatchData()->RecordBallTouch(GetID());
 }
 
 void Team::ResetSituation(const Vector3 &focusPos) {

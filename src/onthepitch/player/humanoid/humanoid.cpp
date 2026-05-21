@@ -541,6 +541,7 @@ void Humanoid::Process() {
         match->GetBall()->SetRotation(xRot, yRot, zcurve, 0.9f * (1.0f - bumpyRideBias));
 
         team->SetLastTouchPlayer(CastPlayer(), GetTouchTypeForBodyPart(currentAnim->anim->GetVariable("touch_bodypart")));
+        match->GetMatchData()->RecordPassAttempt(team->GetID());
         CastPlayer()->UpdatePossessionStats(false);
         if (targetPlayer) targetPlayer->UpdatePossessionStats(false);
       }
@@ -579,6 +580,21 @@ void Humanoid::Process() {
 
         team->SetLastTouchPlayer(CastPlayer(), GetTouchTypeForBodyPart(currentAnim->anim->GetVariable("touch_bodypart")));
         match->GetMatchData()->AddShot(team->GetID());
+        {
+          // Shot-on-target: project ball along touchVec to the goal line and check frame.
+          Vector3 ballPos = match->GetBall()->Predict(0);
+          float goalX = pitchHalfW * (float)(-team->GetSide());
+          float dx = goalX - ballPos.coords[0];
+          if (fabs(dx) > 0.1f && touchVec.coords[0] != 0.0f) {
+            float t = dx / touchVec.coords[0];
+            if (t > 0.0f) {
+              float yAtGoal = ballPos.coords[1] + touchVec.coords[1] * t;
+              float zAtGoal = ballPos.coords[2] + touchVec.coords[2] * t;
+              if (fabs(yAtGoal) < 3.66f && zAtGoal >= -0.1f && zAtGoal < 2.5f)
+                match->GetMatchData()->AddShotOnTarget(team->GetID());
+            }
+          }
+        }
       }
 
       else if (currentAnim->functionType == e_FunctionType_Interfere) {

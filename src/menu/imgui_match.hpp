@@ -55,5 +55,8 @@ extern std::vector<SubGraphic> g_SubGraphicQueue; // shown one at a time, front-
 
 void RenderImGuiMatchPauseOverlay();
 
+// Live match stats panel (non-pausing floating overlay).
+extern bool g_MatchStatsVisible;
+
 // Called by StopMatch (under matchRenderMutex) to clear stale match pointer cache.
 void ResetMatchOverlayState();

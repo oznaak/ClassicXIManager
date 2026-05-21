@@ -39,6 +39,7 @@ int        g_WindowsUsed   = 0;
 bool       g_SubWindowOpen = false;
 bool       g_ImGuiTopBarPauseRequest = false;
 bool       g_TopBarSoftPause         = false;
+bool       g_MatchStatsVisible       = false;
 
 // ---------------------------------------------------------------------------
 // Per-match cached state
@@ -200,6 +201,7 @@ void ResetMatchOverlayState() {
   g_SubsUsed      = 0;
   g_WindowsUsed   = 0;
   g_SubWindowOpen = false;
+  g_MatchStatsVisible = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -235,6 +237,13 @@ static std::vector<BenchPlayer>  s_benchPlayers;       // user team subs
 static std::vector<BenchPlayer>  s_awayBenchPlayers;   // opponent subs
 static int                       s_subUserTeamIdx   = 0;
 static std::string               s_userBadgePath;
+static std::string               s_oppBadgePath;
+
+// Live goal log: populated under matchRenderMutex each frame.
+struct GoalEntry { int minute; std::string scorer; int teamIdx; };
+static std::vector<GoalEntry>    s_goalLog;
+static int                       s_lastKnownGoals[2] = {0, 0};
+
 static bool                      s_subPanelActive   = false;
 static int                       s_subOffSelected   = -1;
 static int                       s_subOnSelected    = -1;
@@ -248,6 +257,11 @@ static void ResetPauseCache() {
   s_pauseAwayPlayers.clear();
   s_benchPlayers.clear();
   s_awayBenchPlayers.clear();
+  s_userBadgePath.clear();
+  s_oppBadgePath.clear();
+  s_goalLog.clear();
+  s_lastKnownGoals[0] = 0;
+  s_lastKnownGoals[1] = 0;
   s_subPanelActive      = false;
   s_subOffSelected      = -1;
   s_subOnSelected       = -1;
@@ -551,6 +565,9 @@ static void DrawSubsList(ImDrawList *dl, ImVec2 origin, float w, float h,
 }
 
 // ---------------------------------------------------------------------------
+// Forward declaration — defined after RenderImGuiMatchOverlay.
+void RenderMatchStatsPanel();
+// ---------------------------------------------------------------------------
 
 void RenderImGuiMatchOverlay() {
   auto gameTask = GetGameTask();
@@ -587,6 +604,26 @@ void RenderImGuiMatchOverlay() {
 
   // Populate HUD cache while we hold the mutex (TeamData is safe to read here).
   InitHUDDataIfNeeded(match);
+
+  // Track goals live — detect new goals and log scorer + minute.
+  for (int ti = 0; ti < 2; ti++) {
+    int cur = match->GetScore(ti);
+    if (cur > s_lastKnownGoals[ti]) {
+      int minute = (int)(match->GetMatchTime_ms() / 60000) + 1;
+      std::string scorerName;
+      if (match->GetLastGoalTeamID() == ti) {
+        Player *sc = match->GetLastGoalScorer();
+        if (sc && sc->GetPlayerData()) scorerName = sc->GetPlayerData()->GetLastName();
+      }
+      // Map raw team index to user/opp for consistent display
+      GoalEntry ge;
+      ge.minute   = minute;
+      ge.scorer   = scorerName;
+      ge.teamIdx  = ti; // raw engine team index; resolved against s_subUserTeamIdx at draw time
+      s_goalLog.push_back(ge);
+      s_lastKnownGoals[ti] = cur;
+    }
+  }
 
   gameTask->matchRenderMutex.unlock();
 
@@ -1115,14 +1152,18 @@ void RenderImGuiMatchOverlay() {
       ImGui::SetCursorScreenPos(bmin);
       char cid[16]; snprintf(cid, sizeof(cid), "##tab%d", i);
       ImGui::PushID(cid);
-      ImGui::InvisibleButton(cid, ImVec2(tbtnW, tbtnH));
+      bool tabClicked = ImGui::InvisibleButton(cid, ImVec2(tbtnW, tbtnH));
       ImGui::PopID();
-      bool hov = ImGui::IsItemHovered();
-      ImU32 bg = hov ? IM_COL32(50, 70, 120, 240) : IM_COL32(18, 26, 52, 210);
+      bool hov    = ImGui::IsItemHovered();
+      bool active = (i == 0 && g_MatchStatsVisible);
+      ImU32 bg = active ? IM_COL32(255, 200, 40, 255)
+               : hov    ? IM_COL32(50, 70, 120, 240)
+                        : IM_COL32(18, 26, 52, 210);
+      ImU32 tc = active ? IM_COL32(15, 15, 15, 255) : IM_COL32(180, 210, 255, 230);
       tdl->AddRectFilled(bmin, bmax, bg, 5.0f);
       tdl->AddRect(bmin, bmax, IM_COL32(55, 80, 140, 180), 5.0f, 0, 1.0f);
-      AddTextCentered(tdl, g_ManagerFontBold, 11.0f, bmin, bmax,
-                      IM_COL32(180, 210, 255, 230), tabLabels[i]);
+      AddTextCentered(tdl, g_ManagerFontBold, 11.0f, bmin, bmax, tc, tabLabels[i]);
+      if (tabClicked && i == 0) g_MatchStatsVisible = !g_MatchStatsVisible;
       tabX += tbtnW + tbtnGap;
     }
     ImGui::End();
@@ -1290,6 +1331,9 @@ void RenderImGuiMatchOverlay() {
       s_hoverOnIdx = -1;
     }
   }
+
+  // Live match stats panel (non-pausing overlay)
+  RenderMatchStatsPanel();
 }
 
 // ---------------------------------------------------------------------------
@@ -1729,6 +1773,12 @@ static void InitHUDDataIfNeeded(Match *match) {
   TeamData *tdOpp = match->GetTeam(oppIdx) ? match->GetTeam(oppIdx)->GetTeamData() : nullptr;
   if (tdOpp) {
     s_pauseAwayTeamName = tdOpp->GetName();
+    {
+      std::string raw = tdOpp->GetLogoUrl();
+      const std::string kPfx = "databases/default/";
+      if (raw.substr(0, kPfx.size()) == kPfx) raw = raw.substr(kPfx.size());
+      s_oppBadgePath = raw;
+    }
     Vector3 c           = tdOpp->GetColor1();
     s_pauseOppColor     = Vec3ToCol32(c.coords[0], c.coords[1], c.coords[2]);
     s_pauseOppTextColor = TextColorForBg(s_pauseOppColor);
@@ -1753,6 +1803,296 @@ static void InitHUDDataIfNeeded(Match *match) {
   s_pauseInitialized = true;
   printf("[IMGUI HUD] Cache: %zu user / %zu opp players\n",
          s_pausePlayers.size(), s_pauseAwayPlayers.size());
+}
+
+// ---------------------------------------------------------------------------
+// Live match stats panel — drawn over the game without pausing it.
+// ---------------------------------------------------------------------------
+
+static void DrawStatBar(ImDrawList *dl, ImVec2 rowMin, float rowW, float rowH,
+                        int valA, int valB, ImU32 colorA, ImU32 colorB) {
+  int total = valA + valB;
+  float fA   = (total > 0) ? (float)valA / (float)total : 0.5f;
+  float fB   = 1.0f - fA;
+
+  const float trackH  = 6.0f;
+  const float trackY  = rowMin.y + rowH * 0.5f - trackH * 0.5f;
+  const float trackX0 = rowMin.x + 8.0f;
+  const float trackX1 = rowMin.x + rowW - 8.0f;
+  const float trackW  = trackX1 - trackX0;
+
+  // Track bg
+  dl->AddRectFilled(ImVec2(trackX0, trackY), ImVec2(trackX1, trackY + trackH),
+                    IM_COL32(40, 50, 80, 200), 3.0f);
+  // Team A fill (left)
+  float splitX = trackX0 + trackW * fA;
+  if (fA > 0.01f)
+    dl->AddRectFilled(ImVec2(trackX0, trackY), ImVec2(splitX, trackY + trackH),
+                      colorA, 3.0f);
+  // Team B fill (right)
+  if (fB > 0.01f)
+    dl->AddRectFilled(ImVec2(splitX, trackY), ImVec2(trackX1, trackY + trackH),
+                      colorB, 3.0f);
+  // Centre divider
+  dl->AddLine(ImVec2(trackX0 + trackW * 0.5f, trackY - 2),
+              ImVec2(trackX0 + trackW * 0.5f, trackY + trackH + 2),
+              IM_COL32(80, 100, 160, 180), 1.0f);
+}
+
+void RenderMatchStatsPanel() {
+  if (!g_MatchStatsVisible) return;
+
+  Match *match = GetGameTask() ? GetGameTask()->GetMatch() : nullptr;
+  if (!match) { g_MatchStatsVisible = false; return; }
+
+  MatchData *md = match->GetMatchData();
+  if (!md) return;
+
+  ImGuiIO &io  = ImGui::GetIO();
+  const float sw = io.DisplaySize.x;
+  const float sh = io.DisplaySize.y;
+
+  // Resolve user vs opponent team indices.
+  int uIdx = s_subUserTeamIdx;
+  int oIdx = 1 - uIdx;
+
+  ImU32 colorA = s_pauseUserColor;
+  ImU32 colorB = s_pauseOppColor;
+
+  // Badge textures (loaded/cached on GL thread).
+  static GLuint s_statBadgeA = 0; static std::string s_statBadgeAPath;
+  static GLuint s_statBadgeB = 0; static std::string s_statBadgeBPath;
+  if (s_statBadgeAPath != s_userBadgePath) { s_statBadgeA = 0; s_statBadgeAPath = s_userBadgePath; }
+  if (s_statBadgeBPath != s_oppBadgePath)  { s_statBadgeB = 0; s_statBadgeBPath = s_oppBadgePath; }
+  if (s_statBadgeA == 0 && !s_statBadgeAPath.empty()) s_statBadgeA = LoadBadgeTex(s_statBadgeAPath);
+  if (s_statBadgeB == 0 && !s_statBadgeBPath.empty()) s_statBadgeB = LoadBadgeTex(s_statBadgeBPath);
+
+  // Live scores.
+  int scoreA = md->GetGoalCount(uIdx);
+  int scoreB = md->GetGoalCount(oIdx);
+
+  // --- Stats ---
+  struct StatRow { const char *label; int a; int b; bool isPercent; };
+
+  unsigned long posU     = md->GetPossessionTime_ms(uIdx);
+  unsigned long posO     = md->GetPossessionTime_ms(oIdx);
+  unsigned long posTotal = posU + posO;
+  int posPercA = (posTotal > 0) ? (int)roundf((float)posU / (float)posTotal * 100.f) : 50;
+  int posPercB = 100 - posPercA;
+
+  int passAttU = md->GetPassesAttempted(uIdx), passAttO = md->GetPassesAttempted(oIdx);
+  int passComU = md->GetPassesCompleted(uIdx), passComO = md->GetPassesCompleted(oIdx);
+  int passPercU = passAttU > 0 ? (int)roundf((float)passComU / (float)passAttU * 100.f) : 0;
+  int passPercO = passAttO > 0 ? (int)roundf((float)passComO / (float)passAttO * 100.f) : 0;
+
+  StatRow rows[] = {
+    { "Shots",           md->GetShots(uIdx),         md->GetShots(oIdx),         false },
+    { "Shots On Target", md->GetShotsOnTarget(uIdx), md->GetShotsOnTarget(oIdx), false },
+    { "Corners",         md->GetCorners(uIdx),        md->GetCorners(oIdx),        false },
+    { "Fouls",           md->GetFouls(uIdx),          md->GetFouls(oIdx),          false },
+    { "Offsides",        md->GetOffsides(uIdx),       md->GetOffsides(oIdx),       false },
+    { "Passes",          passAttU,                     passAttO,                    false },
+    { "Pass Accuracy",   passPercU,                    passPercO,                   true  },
+    { "Yellow Cards",    md->GetYellowCards(uIdx),    md->GetYellowCards(oIdx),    false },
+    { "Red Cards",       md->GetRedCards(uIdx),       md->GetRedCards(oIdx),       false },
+  };
+  const int numRows = (int)(sizeof(rows) / sizeof(rows[0]));
+
+  // --- Panel geometry ---
+  const float kRound   = 12.0f;
+  const float panW     = 460.0f;
+  const float hdrH     = 42.0f;  // "MATCH STATS" title
+  const float scoreH   = 70.0f;  // badge + score row
+  const float goalLogH = (float)std::max(1, (int)s_goalLog.size()) * 16.0f + 8.0f;
+  const float posRowH  = 44.0f;
+  const float statRowH = 38.0f;
+  const float panH     = hdrH + scoreH + goalLogH + posRowH + statRowH * numRows;
+  const float panX     = (sw - panW) * 0.5f;
+  const float panY     = (sh - panH) * 0.5f - 50.0f;
+
+  // Rounded background (top corners only — bottom is square).
+  ImDrawList *bgdl = ImGui::GetBackgroundDrawList();
+  bgdl->AddRectFilled(ImVec2(panX, panY), ImVec2(panX + panW, panY + panH),
+                      IM_COL32(0, 0, 0, 70), kRound, ImDrawFlags_RoundCornersTop);
+  bgdl->AddRectFilled(ImVec2(panX, panY), ImVec2(panX + panW, panY + panH),
+                      IM_COL32(10, 16, 34, 252), kRound, ImDrawFlags_RoundCornersTop);
+
+  ImGui::SetNextWindowPos(ImVec2(panX, panY), ImGuiCond_Always);
+  ImGui::SetNextWindowSize(ImVec2(panW, panH), ImGuiCond_Always);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,    ImVec2(0, 0));
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding,   0.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,      ImVec2(0, 0));
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+  ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(0, 0, 0, 0));
+
+  ImGui::Begin("##matchstats", nullptr,
+    ImGuiWindowFlags_NoTitleBar        |
+    ImGuiWindowFlags_NoResize          |
+    ImGuiWindowFlags_NoMove            |
+    ImGuiWindowFlags_NoScrollbar       |
+    ImGuiWindowFlags_NoSavedSettings   |
+    ImGuiWindowFlags_NoFocusOnAppearing|
+    ImGuiWindowFlags_NoNav);
+
+  ImDrawList *dl   = ImGui::GetWindowDrawList();
+  ImVec2      wPos = ImGui::GetWindowPos();
+  float       curY = wPos.y;
+
+  // ── Header ──────────────────────────────────────────────────────────────
+  dl->AddRectFilled(ImVec2(wPos.x, curY), ImVec2(wPos.x + panW, curY + hdrH),
+                    IM_COL32(16, 24, 52, 255), kRound, ImDrawFlags_RoundCornersTop);
+  AddTextCentered(dl, g_ManagerFontBold, 13.0f,
+                  ImVec2(wPos.x, curY), ImVec2(wPos.x + panW, curY + hdrH),
+                  IM_COL32(200, 215, 255, 255), "MATCH STATS");
+
+  // Close [X]
+  ImVec2 xMin(wPos.x + panW - 34.0f, curY + 7.0f);
+  ImVec2 xMax(wPos.x + panW - 7.0f,  curY + hdrH - 7.0f);
+  ImGui::SetCursorScreenPos(xMin);
+  ImGui::InvisibleButton("##close_stats", ImVec2(xMax.x - xMin.x, xMax.y - xMin.y));
+  bool xHov = ImGui::IsItemHovered();
+  dl->AddRectFilled(xMin, xMax, xHov ? IM_COL32(220,60,60,220) : IM_COL32(40,50,90,180), 4.0f);
+  AddTextCentered(dl, g_ManagerFontBold, 13.0f, xMin, xMax, IM_COL32(255,255,255,255), "X");
+  if (ImGui::IsItemClicked()) g_MatchStatsVisible = false;
+  curY += hdrH;
+
+  // ── Score row: BadgeA  TeamA  ScoreA - ScoreB  TeamB  BadgeB ────────────
+  dl->AddRectFilled(ImVec2(wPos.x, curY), ImVec2(wPos.x + panW, curY + scoreH),
+                    IM_COL32(14, 22, 48, 255));
+
+  const float bdgSz = 40.0f;        // badge size
+  const float midX  = wPos.x + panW * 0.5f;
+  const float bdgY  = curY + (scoreH - bdgSz) * 0.5f;
+
+  // Team A badge (left side)
+  float aRight = midX - 30.0f;      // right edge of team-A area
+  if (s_statBadgeA) {
+    dl->AddImage((ImTextureID)(intptr_t)s_statBadgeA,
+                 ImVec2(aRight - bdgSz - 4.0f, bdgY),
+                 ImVec2(aRight - 4.0f,          bdgY + bdgSz));
+  }
+
+  // Team B badge (right side)
+  float bLeft = midX + 30.0f;       // left edge of team-B area
+  if (s_statBadgeB) {
+    dl->AddImage((ImTextureID)(intptr_t)s_statBadgeB,
+                 ImVec2(bLeft + 4.0f,          bdgY),
+                 ImVec2(bLeft + bdgSz + 4.0f,  bdgY + bdgSz));
+  }
+
+  // Score "A - B" centred
+  char scoreBuf[16];
+  snprintf(scoreBuf, sizeof(scoreBuf), "%d - %d", scoreA, scoreB);
+  AddTextCentered(dl, g_ManagerFontBold, 22.0f,
+                  ImVec2(midX - 30, curY), ImVec2(midX + 30, curY + scoreH),
+                  IM_COL32(255, 255, 255, 255), scoreBuf);
+
+  // Colour accent strips at sides
+  dl->AddRectFilled(ImVec2(wPos.x, curY), ImVec2(wPos.x + 4.0f, curY + scoreH), colorA);
+  dl->AddRectFilled(ImVec2(wPos.x + panW - 4.0f, curY), ImVec2(wPos.x + panW, curY + scoreH), colorB);
+  curY += scoreH;
+
+  // ── Goal log ─────────────────────────────────────────────────────────────
+  dl->AddRectFilled(ImVec2(wPos.x, curY), ImVec2(wPos.x + panW, curY + goalLogH),
+                    IM_COL32(11, 18, 40, 255));
+  {
+    float gly = curY + 4.0f;
+    if (s_goalLog.empty()) {
+      AddTextCentered(dl, g_ManagerFontHero, 10.0f,
+                      ImVec2(wPos.x, gly), ImVec2(wPos.x + panW, gly + 16),
+                      IM_COL32(80, 100, 150, 180), "No goals yet");
+    } else {
+      for (const GoalEntry &ge : s_goalLog) {
+        bool isUser = (ge.teamIdx == uIdx);
+        char buf[64];
+        snprintf(buf, sizeof(buf), "%d'  %s", ge.minute,
+                 ge.scorer.empty() ? "Goal" : ge.scorer.c_str());
+        // User goals left-aligned, opponent goals right-aligned
+        ImU32 gCol = isUser ? BrightenForDark(colorA, 160.f) : BrightenForDark(colorB, 160.f);
+        if (isUser) {
+          dl->AddText(g_ManagerFontBold, 11.0f, ImVec2(wPos.x + 10, gly), gCol, buf);
+        } else {
+          ImVec2 tsz = g_ManagerFontBold
+            ? g_ManagerFontBold->CalcTextSizeA(11.0f, FLT_MAX, 0, buf)
+            : ImVec2(80, 11);
+          dl->AddText(g_ManagerFontBold, 11.0f,
+                      ImVec2(wPos.x + panW - tsz.x - 10, gly), gCol, buf);
+        }
+        gly += 16.0f;
+      }
+    }
+  }
+  curY += goalLogH;
+
+  // ── Possession row ────────────────────────────────────────────────────────
+  dl->AddRectFilled(ImVec2(wPos.x, curY), ImVec2(wPos.x + panW, curY + posRowH),
+                    IM_COL32(12, 18, 42, 255));
+
+  AddTextCentered(dl, g_ManagerFontHero, 10.0f,
+                  ImVec2(wPos.x, curY), ImVec2(wPos.x + panW, curY + posRowH * 0.42f),
+                  IM_COL32(140, 160, 210, 180), "Possession");
+
+  char pABuf[8], pBBuf[8];
+  snprintf(pABuf, sizeof(pABuf), "%d%%", posPercA);
+  snprintf(pBBuf, sizeof(pBBuf), "%d%%", posPercB);
+
+  float pmid = curY + posRowH * 0.5f + 4.0f;
+  AddTextCentered(dl, g_ManagerFontBold, 13.0f,
+                  ImVec2(wPos.x + 4, curY), ImVec2(wPos.x + 54, curY + posRowH),
+                  IM_COL32(255,255,255,255), pABuf);
+  AddTextCentered(dl, g_ManagerFontBold, 13.0f,
+                  ImVec2(wPos.x + panW - 54, curY), ImVec2(wPos.x + panW - 4, curY + posRowH),
+                  IM_COL32(255,255,255,255), pBBuf);
+
+  {
+    const float tH  = 7.0f;
+    const float tX0 = wPos.x + 58.0f, tX1 = wPos.x + panW - 58.0f;
+    const float tY  = pmid - tH * 0.5f;
+    float spX = tX0 + (tX1 - tX0) * ((float)posPercA / 100.0f);
+    dl->AddRectFilled(ImVec2(tX0, tY), ImVec2(tX1, tY + tH), IM_COL32(30,40,70,200), 3.0f);
+    if (posPercA > 0) dl->AddRectFilled(ImVec2(tX0, tY), ImVec2(spX, tY + tH), colorA, 3.0f);
+    if (posPercB > 0) dl->AddRectFilled(ImVec2(spX, tY), ImVec2(tX1, tY + tH), colorB, 3.0f);
+  }
+  curY += posRowH;
+
+  // ── Stat rows ─────────────────────────────────────────────────────────────
+  for (int i = 0; i < numRows; i++) {
+    const StatRow &r = rows[i];
+    ImU32 rowBg = (i % 2 == 0) ? IM_COL32(16,24,46,255) : IM_COL32(12,18,38,255);
+    dl->AddRectFilled(ImVec2(wPos.x, curY), ImVec2(wPos.x + panW, curY + statRowH), rowBg);
+
+    AddTextCentered(dl, g_ManagerFontHero, 10.0f,
+                    ImVec2(wPos.x, curY),
+                    ImVec2(wPos.x + panW, curY + statRowH * 0.42f),
+                    IM_COL32(140, 160, 210, 180), r.label);
+
+    DrawStatBar(dl, ImVec2(wPos.x + 58.0f, curY + statRowH * 0.42f),
+                panW - 116.0f, statRowH * 0.58f, r.a, r.b, colorA, colorB);
+
+    char vA[16], vB[16];
+    if (r.isPercent) {
+      snprintf(vA, sizeof(vA), "%d%%", r.a);
+      snprintf(vB, sizeof(vB), "%d%%", r.b);
+    } else {
+      snprintf(vA, sizeof(vA), "%d", r.a);
+      snprintf(vB, sizeof(vB), "%d", r.b);
+    }
+    AddTextCentered(dl, g_ManagerFontBold, 13.0f,
+                    ImVec2(wPos.x + 4, curY), ImVec2(wPos.x + 56, curY + statRowH),
+                    IM_COL32(255,255,255,255), vA);
+    AddTextCentered(dl, g_ManagerFontBold, 13.0f,
+                    ImVec2(wPos.x + panW - 56, curY), ImVec2(wPos.x + panW - 4, curY + statRowH),
+                    IM_COL32(255,255,255,255), vB);
+    curY += statRowH;
+  }
+
+  // Top-rounded border only
+  dl->AddRect(ImVec2(wPos.x, wPos.y), ImVec2(wPos.x + panW, wPos.y + panH),
+              IM_COL32(55, 75, 140, 180), kRound, ImDrawFlags_RoundCornersTop, 1.5f);
+
+  ImGui::End();
+  ImGui::PopStyleColor();
+  ImGui::PopStyleVar(4);
 }
 
 void RenderImGuiMatchPauseOverlay() {

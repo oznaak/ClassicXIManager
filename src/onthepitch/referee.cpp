@@ -154,6 +154,8 @@ void Referee::Process() {
                      y = -pitchHalfH;
           buffer.restartPos = Vector3(pitchHalfW * lastSide, y, 0);
           buffer.teamID = abs(lastTouchTeam->GetID() - 1);
+          // Award corner to the attacking team (opponent of last touch)
+          match->GetMatchData()->AddCorner(buffer.teamID);
 
         } else {
           buffer.desiredSetPiece = e_SetPiece_GoalKick;
@@ -298,6 +300,7 @@ void Referee::BallTouched() {
           buffer.teamID = abs(lastTouchTeamID - 1);
           buffer.active = true;
           match->SpamMessage("offside!");
+          match->GetMatchData()->AddOffside(lastTouchTeamID);
           break;
         } else break;
       }
@@ -435,13 +438,16 @@ bool Referee::CheckFoul() {
     buffer.teamID = foul.foulVictim->GetTeam()->GetID();
     buffer.active = true;
     std::string spamMessage = "foul!";
+    match->GetMatchData()->AddFoul(foul.foulPlayer->GetTeam()->GetID());
     if (foul.foulType == 2) {
       spamMessage.append(" yellow card");
       foul.foulPlayer->GiveYellowCard(match->GetActualTime_ms() + 6000); // need to find out proper moment
+      match->GetMatchData()->AddYellowCard(foul.foulPlayer->GetTeam()->GetID());
     }
     if (foul.foulType == 3) {
       spamMessage.append(" red card!!!");
       foul.foulPlayer->GiveRedCard(match->GetActualTime_ms() + 6000); // need to find out proper moment
+      match->GetMatchData()->AddRedCard(foul.foulPlayer->GetTeam()->GetID());
     }
     match->SpamMessage(spamMessage);
 

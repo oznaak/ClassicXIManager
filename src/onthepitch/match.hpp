@@ -149,6 +149,7 @@ class Match {
     void SetGoalScored(bool onOff) { if (onOff == false) ballIsInGoal = false; goalScored = onOff; }
     bool IsGoalScored() const { return goalScored; }
     int GetLastGoalTeamID() const { return lastGoalTeamID; }
+    Player *GetLastGoalScorer() const { return lastGoalScorer; }
     void SetLastTouchTeamID(int id, e_TouchType touchType = e_TouchType_Intentional_Kicked) { lastTouchTeamIDs[touchType] = id; lastTouchTeamID = id; referee->BallTouched(); }
     int GetLastTouchTeamID(e_TouchType touchType) const { return lastTouchTeamIDs[touchType]; }
     int GetLastTouchTeamID() const { return lastTouchTeamID; }

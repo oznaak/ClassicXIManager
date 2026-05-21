@@ -130,8 +130,11 @@ void IngamePage::Process() {
 
       case 3:
         printf("[IMGUI PAUSE] Match Facts selected\n");
-        // Placeholder — do nothing yet
-        break;
+        g_MatchStatsVisible = true;
+        GetMenuTask()->ReleaseAllButtons();
+        GetGameTask()->GetMatch()->Pause(false);
+        GoBack();
+        return;
 
       case 4:
         printf("[IMGUI PAUSE] Settings selected\n");
