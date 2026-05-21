@@ -30,7 +30,7 @@ PlayerData::PlayerData(int playerDatabaseID) : databaseID(playerDatabaseID) {
   for (unsigned int c = 0; c < result->data.at(0).size(); c++) {
     if (result->header.at(c).compare("firstname") == 0) firstName = result->data.at(0).at(c);
     if (result->header.at(c).compare("lastname") == 0) lastName = result->data.at(0).at(c);
-    if (result->header.at(c).compare("role") == 0) roleString = result->data.at(0).at(c);
+    if (result->header.at(c).compare("role") == 0) { roleString = result->data.at(0).at(c); roleRaw = result->data.at(0).at(c); }
     if (result->header.at(c).compare("base_stat") == 0) baseStat = atof(result->data.at(0).at(c).c_str());
     if (result->header.at(c).compare("profile_xml") == 0) profileString = result->data.at(0).at(c);
     if (result->header.at(c).compare("age") == 0) age = atoi(result->data.at(0).at(c).c_str());

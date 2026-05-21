@@ -32,7 +32,8 @@ bool g_ImGuiIngamePauseMenuActive = false;
 // Written by GL render thread on button click, read+cleared by IngamePage::Process() on main thread.
 int  g_ImGuiPausePendingAction    = 0;
 
-PendingSub g_PendingSub;
+QueuedSub  g_QueuedSub;
+SubGraphic g_SubGraphic;
 
 // ---------------------------------------------------------------------------
 // Per-match cached state
@@ -335,6 +336,51 @@ void RenderImGuiMatchOverlay() {
   const float totalW = leagueW + teamW + scoreW + stripW;
   dl->AddRect(ImVec2(x0, y0), ImVec2(x0 + totalW, botY),
               IM_COL32(50, 55, 80, 180), 2.0f, 0, 1.0f);
+
+  // ---- Substitution banner ------------------------------------------------
+  if (g_SubGraphic.active) {
+    if (g_SubGraphic.startTime < 0.0) g_SubGraphic.startTime = ImGui::GetTime();
+    const double elapsed = ImGui::GetTime() - g_SubGraphic.startTime;
+    const double kDuration = 3.5;
+    if (elapsed >= kDuration) {
+      g_SubGraphic.active = false;
+    } else {
+      // Fade out in last 0.8s
+      float alpha = 1.0f;
+      if (elapsed > kDuration - 0.8) alpha = (float)((kDuration - elapsed) / 0.8);
+      if (alpha < 0.f) alpha = 0.f;
+      const ImGuiIO &io = ImGui::GetIO();
+      const float sw = io.DisplaySize.x;
+      const float sh = io.DisplaySize.y;
+      const float bw = 340.0f, bh = 70.0f;
+      const float bx = (sw - bw) * 0.5f;
+      const float by = sh - bh - 60.0f; // near bottom
+      const float rnd = 5.0f;
+      ImU32 bg   = IM_COL32(10, 10, 20, (int)(235 * alpha));
+      ImU32 acc  = IM_COL32(60, 170, 80, (int)(255 * alpha));   // green = in
+      ImU32 accO = IM_COL32(220, 50, 50, (int)(255 * alpha));   // red   = out
+      ImU32 txt  = IM_COL32(255, 255, 255, (int)(255 * alpha));
+      ImU32 dim  = IM_COL32(160, 160, 160, (int)(200 * alpha));
+      dl->AddRectFilled(ImVec2(bx, by), ImVec2(bx + bw, by + bh), bg, rnd);
+      dl->AddRect(ImVec2(bx, by), ImVec2(bx + bw, by + bh), IM_COL32(60, 65, 100, (int)(180 * alpha)), rnd, 0, 1.5f);
+      // OUT row
+      const float rowH2 = bh * 0.5f;
+      float ry = by + (rowH2 - 18.0f) * 0.5f;
+      dl->AddText(g_ManagerFontBold, 13.0f, ImVec2(bx + 12, ry),
+                  accO, "\xe2\x86\x93 OUT");  // ↓ OUT
+      dl->AddText(g_ManagerFontBold, 15.0f, ImVec2(bx + 76, ry - 1),
+                  txt, g_SubGraphic.nameOut.c_str());
+      // IN row
+      ry = by + rowH2 + (rowH2 - 18.0f) * 0.5f;
+      dl->AddText(g_ManagerFontBold, 13.0f, ImVec2(bx + 12, ry),
+                  acc, "\xe2\x86\x91 IN ");   // ↑ IN
+      dl->AddText(g_ManagerFontBold, 15.0f, ImVec2(bx + 76, ry - 1),
+                  txt, g_SubGraphic.nameIn.c_str());
+      // Divider between rows
+      dl->AddLine(ImVec2(bx + 8, by + rowH2), ImVec2(bx + bw - 8, by + rowH2),
+                  IM_COL32(50, 55, 80, (int)(120 * alpha)), 1.0f);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -383,7 +429,8 @@ static void ResetPauseCache() {
   s_subOffSelected  = -1;
   s_subOnSelected   = -1;
   s_subsMadeCount   = 0;
-  g_PendingSub.pending = false;
+  g_QueuedSub.pending  = false;
+  g_SubGraphic.active  = false;
 }
 
 static float Clamp01(float v) { return v < 0.f ? 0.f : (v > 1.f ? 1.f : v); }
@@ -702,23 +749,41 @@ static void DrawSubstitutionPanel(float px, float py, float pw, float ph) {
   AddTextCentered(dl, g_ManagerFontBold, 13.0f, confMin, confMax,
                   IM_COL32(255, 255, 255, canConfirm ? 255 : 100), "CONFIRM");
   if (confClicked) {
-    g_PendingSub.pending  = true;
-    g_PendingSub.teamIdx  = s_subUserTeamIdx;
-    g_PendingSub.offIdx   = s_subOffSelected;
-    g_PendingSub.onIdx    = s_subOnSelected;
-    // Remove the confirmed starter from the display list and add the bench player
-    // so the UI updates immediately for a 2nd sub selection
+    // Capture names before mutating the display lists
+    std::string nameOut, nameIn;
+    if (s_subOffSelected >= 0 && s_subOffSelected < (int)s_pausePlayers.size())
+      nameOut = s_pausePlayers[s_subOffSelected].lastName;
+    for (auto &bp : s_benchPlayers)
+      if (bp.playersIdx == s_subOnSelected) { nameIn = bp.lastName; break; }
+
+    // Queue the substitution — will fire on next dead ball (gametask.cpp)
+    g_QueuedSub.pending = true;
+    g_QueuedSub.teamIdx = s_subUserTeamIdx;
+    g_QueuedSub.offIdx  = s_subOffSelected;
+    g_QueuedSub.onIdx   = s_subOnSelected;
+    g_QueuedSub.nameOut = nameOut;
+    g_QueuedSub.nameIn  = nameIn;
+
+    // Update display lists so user can queue a 2nd sub immediately
     BenchPlayer incoming;
     for (auto it = s_benchPlayers.begin(); it != s_benchPlayers.end(); ++it) {
       if (it->playersIdx == s_subOnSelected) { incoming = *it; s_benchPlayers.erase(it); break; }
     }
+    // Inherit the outgoing player's formation slot (position on pitch + role label)
+    std::string outgoingRole;
+    float outgoingNx = 0.5f, outgoingNy = 0.5f;
+    if (s_subOffSelected >= 0 && s_subOffSelected < (int)s_pausePlayers.size()) {
+      outgoingRole = s_pausePlayers[s_subOffSelected].role;
+      outgoingNx   = s_pausePlayers[s_subOffSelected].nx;
+      outgoingNy   = s_pausePlayers[s_subOffSelected].ny;
+    }
     if (s_subOffSelected < (int)s_pausePlayers.size())
       s_pausePlayers.erase(s_pausePlayers.begin() + s_subOffSelected);
-    // Add incoming player back as a starter entry (with their role)
     PausePlayer newPP;
     newPP.lastName = incoming.lastName;
-    newPP.role     = incoming.role;
-    newPP.nx = 0.5f; newPP.ny = 0.5f; // approximate centre — formation panel will be stale anyway
+    newPP.role     = outgoingRole;
+    newPP.nx       = outgoingNx;
+    newPP.ny       = outgoingNy;
     s_pausePlayers.push_back(newPP);
     s_subsMadeCount++;
     s_subOffSelected = -1;
@@ -777,16 +842,16 @@ void RenderImGuiMatchPauseOverlay() {
           int n = std::min(td->GetPlayerNum(), 11);
           for (int i = 0; i < n; i++)
             s_pausePlayers.push_back(MakePausePlayer(td, i));
-          // Bench players (index 11+)
+          // Bench players (indices 11-19, max 9 subs)
           s_subUserTeamIdx = teamIdx;
-          int total = td->GetPlayerNum();
+          int total = std::min(td->GetPlayerNum(), 20); // cap at S9 (index 19)
           for (int i = 11; i < total; i++) {
             BenchPlayer bp;
             PlayerData *pd = td->GetPlayerData(i);
             bp.lastName   = pd->GetLastName();
-            // Formation entries only exist for indices 0-10; derive role from PlayerData
-            const std::vector<e_PlayerRole> &roles = pd->GetRoles();
-            bp.role = roles.empty() ? "SUB" : GetRoleName(roles[0]);
+            // Show natural role from DB ("DF", "MF", "GK", "ST") — distinct from formation position
+            const std::string &raw = pd->GetRoleRaw();
+            bp.role = raw.empty() ? "SUB" : raw;
             bp.playersIdx = i;
             s_benchPlayers.push_back(bp);
           }

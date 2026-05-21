@@ -13,6 +13,7 @@
 #include "blunted.hpp"
 
 #include "menu/imgui_match.hpp"
+#include "onthepitch/team.hpp"
 
 void UploadFullbodyModel::Update() {
   for (unsigned int i = 0; i < geometryToUpload.size(); i++) {
@@ -151,6 +152,23 @@ void GameTask::ProcessPhase() {
     matchPutBufferMutex.lock();
     match->PreparePutBuffers();
     matchPutBufferMutex.unlock();
+
+    // Execute any queued substitution on the next dead ball
+    if (g_QueuedSub.pending && !match->GetPause() && !match->IsInPlay()) {
+      QueuedSub sub = g_QueuedSub;
+      g_QueuedSub.pending = false;
+
+      Team *team = match->GetTeam(sub.teamIdx);
+      if (team && team->GetSubsMade() < 3)
+        team->SubstitutePlayer(sub.offIdx, sub.onIdx);
+
+      // Trigger the on-screen graphic (read by GL render thread in RenderImGuiMatchOverlay)
+      // startTime = -1 signals "set to ImGui::GetTime() on first render frame"
+      g_SubGraphic.active    = true;
+      g_SubGraphic.nameOut   = sub.nameOut;
+      g_SubGraphic.nameIn    = sub.nameIn;
+      g_SubGraphic.startTime = -1.0;
+    }
   }
 
   if (menuScene) {

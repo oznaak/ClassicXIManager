@@ -23,6 +23,7 @@ class PlayerData {
     std::string GetLastName() const { return lastName; }
     int GetDatabaseID() const { return databaseID; }
     const std::vector<e_PlayerRole> &GetRoles() const;
+    const std::string &GetRoleRaw() const { return roleRaw; }
 
     float GetStat(const char *name);
 
@@ -36,6 +37,7 @@ class PlayerData {
     std::string firstName;
     std::string lastName;
     std::vector<e_PlayerRole> roles;
+    std::string roleRaw;
 
     Properties stats;
 

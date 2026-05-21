@@ -179,7 +179,13 @@ e_PlayerRole GetRoleFromString(const std::string &roleString) {
   if (roleString.compare("RM") == 0) return e_PlayerRole_RM;
   if (roleString.compare("AM") == 0) return e_PlayerRole_AM;
   if (roleString.compare("CF") == 0) return e_PlayerRole_CF;
-  return e_PlayerRole_CM; // default
+  // Broad DB categories
+  if (roleString.compare("DF") == 0) return e_PlayerRole_CB;
+  if (roleString.compare("MF") == 0) return e_PlayerRole_CM;
+  if (roleString.compare("ST") == 0) return e_PlayerRole_CF;
+  if (roleString.compare("FW") == 0) return e_PlayerRole_CF;
+  if (roleString.compare("ATT") == 0) return e_PlayerRole_CF;
+  return e_PlayerRole_CM;
 }
 
 bool PlayerImageDepthSortFunc(const PlayerImage &a, const PlayerImage &b) {

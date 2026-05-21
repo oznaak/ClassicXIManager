@@ -1,4 +1,5 @@
 #pragma once
+#include <string>
 
 void RenderImGuiMatchOverlay();
 
@@ -12,14 +13,25 @@ extern bool g_ImGuiIngamePauseMenuActive;
 // 0=none 1=resume 2=gameplan 3=matchfacts 4=settings 5=leave
 extern int g_ImGuiPausePendingAction;
 
-// Substitution request written by ImGui (GL thread), consumed by IngamePage::Process() (main thread).
-struct PendingSub {
-  bool pending = false;
-  int  teamIdx = 0;   // match team index for the user's team (0 or 1)
-  int  offIdx  = -1;  // index in team->GetAllPlayers() of the player coming OFF
-  int  onIdx   = -1;  // index in team->GetAllPlayers() of the player coming ON
+// Substitution queued by the user (GL thread) — executed on the next dead ball (game thread).
+struct QueuedSub {
+  bool        pending = false;
+  int         teamIdx = 0;
+  int         offIdx  = -1;  // players[] index of outgoing player
+  int         onIdx   = -1;  // players[] index of incoming bench player
+  std::string nameOut;       // for the substitution graphic
+  std::string nameIn;
 };
-extern PendingSub g_PendingSub;
+extern QueuedSub g_QueuedSub;
+
+// Substitution banner shown on the pitch for ~3 seconds after a sub fires.
+struct SubGraphic {
+  bool        active    = false;
+  std::string nameOut;
+  std::string nameIn;
+  double      startTime = 0.0; // ImGui::GetTime() when activated
+};
+extern SubGraphic g_SubGraphic;
 
 void RenderImGuiMatchPauseOverlay();
 

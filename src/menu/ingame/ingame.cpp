@@ -13,7 +13,6 @@
 
 #include "../settings.hpp"
 #include "../imgui_match.hpp"
-#include "../../onthepitch/team.hpp"
 
 using namespace blunted;
 
@@ -143,23 +142,6 @@ void IngamePage::Process() {
         printf("[IMGUI PAUSE] Leave Match selected\n");
         GoPreQuit();
         return;
-    }
-  }
-
-  // Consume pending substitution (main thread, safe to mutate match state)
-  if (g_PendingSub.pending) {
-    PendingSub sub = g_PendingSub;
-    g_PendingSub.pending = false;
-    auto gt = GetGameTask();
-    if (gt) {
-      gt->matchRenderMutex.lock();
-      Match *match = gt->GetMatch();
-      if (match) {
-        Team *team = match->GetTeam(sub.teamIdx);
-        if (team && team->GetSubsMade() < 3)
-          team->SubstitutePlayer(sub.offIdx, sub.onIdx);
-      }
-      gt->matchRenderMutex.unlock();
     }
   }
 
