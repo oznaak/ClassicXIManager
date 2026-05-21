@@ -249,6 +249,11 @@ static int                       s_subOffSelected   = -1;
 static int                       s_subOnSelected    = -1;
 static int                       s_subsMadeCount    = 0;
 
+// Stats panel drag position — negative means "use default center".
+static float                     s_statsPanelX      = -1.f;
+static float                     s_statsPanelY      = -1.f;
+static bool                      s_statsCompact     = false;
+
 static void ResetPauseCache() {
   s_pauseInitialized = false;
   s_pauseTeamName.clear();
@@ -1885,7 +1890,7 @@ void RenderMatchStatsPanel() {
   int passPercU = passAttU > 0 ? (int)roundf((float)passComU / (float)passAttU * 100.f) : 0;
   int passPercO = passAttO > 0 ? (int)roundf((float)passComO / (float)passAttO * 100.f) : 0;
 
-  StatRow rows[] = {
+  StatRow fullRows[] = {
     { "Shots",           md->GetShots(uIdx),         md->GetShots(oIdx),         false },
     { "Shots On Target", md->GetShotsOnTarget(uIdx), md->GetShotsOnTarget(oIdx), false },
     { "Corners",         md->GetCorners(uIdx),        md->GetCorners(oIdx),        false },
@@ -1896,7 +1901,12 @@ void RenderMatchStatsPanel() {
     { "Yellow Cards",    md->GetYellowCards(uIdx),    md->GetYellowCards(oIdx),    false },
     { "Red Cards",       md->GetRedCards(uIdx),       md->GetRedCards(oIdx),       false },
   };
-  const int numRows = (int)(sizeof(rows) / sizeof(rows[0]));
+  StatRow compactRows[] = {
+    { "Shots",         md->GetShots(uIdx), md->GetShots(oIdx), false },
+    { "Pass Accuracy", passPercU,          passPercO,          true  },
+  };
+  const StatRow *rows   = s_statsCompact ? compactRows : fullRows;
+  const int      numRows = s_statsCompact ? 2 : 9;
 
   // --- Panel geometry ---
   const float kRound   = 12.0f;
@@ -1907,17 +1917,18 @@ void RenderMatchStatsPanel() {
   const float posRowH  = 44.0f;
   const float statRowH = 38.0f;
   const float panH     = hdrH + scoreH + goalLogH + posRowH + statRowH * numRows;
-  const float panX     = (sw - panW) * 0.5f;
-  const float panY     = (sh - panH) * 0.5f - 50.0f;
+  // Initialize to center on first display, then let the user drag it.
+  if (s_statsPanelX < 0.f) {
+    s_statsPanelX = (sw - panW) * 0.5f;
+    s_statsPanelY = (sh - panH) * 0.5f - 50.0f;
+  }
+  // Clamp to screen.
+  if (s_statsPanelX < 0.f)          s_statsPanelX = 0.f;
+  if (s_statsPanelY < 0.f)          s_statsPanelY = 0.f;
+  if (s_statsPanelX + panW > sw)    s_statsPanelX = sw - panW;
+  if (s_statsPanelY + panH > sh)    s_statsPanelY = sh - panH;
 
-  // Rounded background (top corners only — bottom is square).
-  ImDrawList *bgdl = ImGui::GetBackgroundDrawList();
-  bgdl->AddRectFilled(ImVec2(panX, panY), ImVec2(panX + panW, panY + panH),
-                      IM_COL32(0, 0, 0, 70), kRound, ImDrawFlags_RoundCornersTop);
-  bgdl->AddRectFilled(ImVec2(panX, panY), ImVec2(panX + panW, panY + panH),
-                      IM_COL32(10, 16, 34, 252), kRound, ImDrawFlags_RoundCornersTop);
-
-  ImGui::SetNextWindowPos(ImVec2(panX, panY), ImGuiCond_Always);
+  ImGui::SetNextWindowPos(ImVec2(s_statsPanelX, s_statsPanelY), ImGuiCond_Always);
   ImGui::SetNextWindowSize(ImVec2(panW, panH), ImGuiCond_Always);
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,    ImVec2(0, 0));
   ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding,   0.0f);
@@ -1938,12 +1949,62 @@ void RenderMatchStatsPanel() {
   ImVec2      wPos = ImGui::GetWindowPos();
   float       curY = wPos.y;
 
+  // Rounded background — drawn here so it tracks wPos, not a pre-computed position.
+  ImDrawList *bgdl = ImGui::GetBackgroundDrawList();
+  bgdl->AddRectFilled(ImVec2(wPos.x, wPos.y), ImVec2(wPos.x + panW, wPos.y + panH),
+                      IM_COL32(0, 0, 0, 70), kRound, ImDrawFlags_RoundCornersTop);
+  bgdl->AddRectFilled(ImVec2(wPos.x, wPos.y), ImVec2(wPos.x + panW, wPos.y + panH),
+                      IM_COL32(10, 16, 34, 252), kRound, ImDrawFlags_RoundCornersTop);
+
   // ── Header ──────────────────────────────────────────────────────────────
   dl->AddRectFilled(ImVec2(wPos.x, curY), ImVec2(wPos.x + panW, curY + hdrH),
                     IM_COL32(16, 24, 52, 255), kRound, ImDrawFlags_RoundCornersTop);
   AddTextCentered(dl, g_ManagerFontBold, 13.0f,
                   ImVec2(wPos.x, curY), ImVec2(wPos.x + panW, curY + hdrH),
                   IM_COL32(200, 215, 255, 255), "MATCH STATS");
+
+  // Drag handle — covers header minus the two right-side buttons.
+  ImGui::SetCursorScreenPos(ImVec2(wPos.x, curY));
+  ImGui::InvisibleButton("##drag_stats", ImVec2(panW - 74.0f, hdrH));
+  if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+    ImVec2 delta = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
+    ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
+    s_statsPanelX += delta.x;
+    s_statsPanelY += delta.y;
+    if (s_statsPanelX < 0.f)       s_statsPanelX = 0.f;
+    if (s_statsPanelY < 0.f)       s_statsPanelY = 0.f;
+    if (s_statsPanelX + panW > sw) s_statsPanelX = sw - panW;
+    if (s_statsPanelY + panH > sh) s_statsPanelY = sh - panH;
+  }
+  if (ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+
+  // Compact / expand toggle button (left of X).
+  ImVec2 cMin(wPos.x + panW - 66.0f, curY + 7.0f);
+  ImVec2 cMax(wPos.x + panW - 39.0f, curY + hdrH - 7.0f);
+  ImGui::SetCursorScreenPos(cMin);
+  ImGui::InvisibleButton("##compact_stats", ImVec2(cMax.x - cMin.x, cMax.y - cMin.y));
+  bool cHov = ImGui::IsItemHovered();
+  dl->AddRectFilled(cMin, cMax, cHov ? IM_COL32(60,100,200,220) : IM_COL32(40,50,90,180), 4.0f);
+  {
+    float icx = (cMin.x + cMax.x) * 0.5f;
+    float icy = (cMin.y + cMax.y) * 0.5f;
+    const float ts  = 5.0f;
+    ImU32 iconCol = cHov ? IM_COL32(255,255,255,255) : IM_COL32(180,200,240,210);
+    if (!s_statsCompact) {
+      // Two triangles pointing toward each other = compress
+      dl->AddTriangleFilled(ImVec2(icx-ts, icy-1.5f), ImVec2(icx+ts, icy-1.5f), ImVec2(icx, icy+ts-1.5f), iconCol); // ▼ top half
+      dl->AddTriangleFilled(ImVec2(icx-ts, icy+1.5f), ImVec2(icx+ts, icy+1.5f), ImVec2(icx, icy-ts+1.5f), iconCol); // ▲ bottom half
+    } else {
+      // Two triangles pointing away from each other = expand
+      dl->AddTriangleFilled(ImVec2(icx-ts, icy-1.5f), ImVec2(icx+ts, icy-1.5f), ImVec2(icx, icy-ts-1.5f), iconCol); // ▲ top half
+      dl->AddTriangleFilled(ImVec2(icx-ts, icy+1.5f), ImVec2(icx+ts, icy+1.5f), ImVec2(icx, icy+ts+1.5f), iconCol); // ▼ bottom half
+    }
+  }
+  if (ImGui::IsItemClicked()) {
+    s_statsCompact = !s_statsCompact;
+    s_statsPanelX = -1.f; // re-center after resize so panel doesn't go off-screen
+    s_statsPanelY = -1.f;
+  }
 
   // Close [X]
   ImVec2 xMin(wPos.x + panW - 34.0f, curY + 7.0f);
