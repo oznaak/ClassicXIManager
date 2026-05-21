@@ -152,6 +152,15 @@ void Player::SetActive() {
   SetDynamicFormationEntry(fe);
 }
 
+void Player::SetBench() {
+  // Suppress caption rendering without touching the GUI widget allocator — safe from game thread.
+  buf_nameCaptionShowCondition   = false;
+  buf_debugCaptionShowCondition  = false;
+  fetchedbuf_nameCaptionShowCondition  = false;
+  fetchedbuf_debugCaptionShowCondition = false;
+  PlayerBase::SetBench();
+}
+
 void Player::Deactivate() {
   ResetSituation(GetPosition());
 

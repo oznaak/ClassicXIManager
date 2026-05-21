@@ -175,8 +175,8 @@ bool PreMatchLineupPage::BuildPresentation() {
 
   g_PreMatchLineup.homeStartingXI = LoadXI(g_PreMatchLineup.homeTeamId, 11, 0);
   g_PreMatchLineup.awayStartingXI = LoadXI(g_PreMatchLineup.awayTeamId, 11, 0);
-  g_PreMatchLineup.homeBench      = LoadXI(g_PreMatchLineup.homeTeamId, 7, 11);
-  g_PreMatchLineup.awayBench      = LoadXI(g_PreMatchLineup.awayTeamId, 7, 11);
+  g_PreMatchLineup.homeBench      = LoadXI(g_PreMatchLineup.homeTeamId, 9, 11);
+  g_PreMatchLineup.awayBench      = LoadXI(g_PreMatchLineup.awayTeamId, 9, 11);
   g_PreMatchLineup.hasBench       = (!g_PreMatchLineup.homeBench.empty() ||
                                      !g_PreMatchLineup.awayBench.empty());
 

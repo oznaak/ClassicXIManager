@@ -29,7 +29,7 @@ class PlayerBase {
     // go back to bench/take a shower
     virtual void Deactivate();
     // hide without destroying resources — safe to call mid-match from game thread
-    void SetBench();
+    virtual void SetBench();
 
     void SetKit(boost::intrusive_ptr < Resource<Surface> > newKit) { humanoid->SetKit(newKit); }
 

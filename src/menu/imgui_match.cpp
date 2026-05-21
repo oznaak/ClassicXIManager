@@ -337,48 +337,138 @@ void RenderImGuiMatchOverlay() {
   dl->AddRect(ImVec2(x0, y0), ImVec2(x0 + totalW, botY),
               IM_COL32(50, 55, 80, 180), 2.0f, 0, 1.0f);
 
-  // ---- Substitution banner ------------------------------------------------
+  // ---- Substitution banner (BBC Sport style) --------------------------------
   if (g_SubGraphic.active) {
     if (g_SubGraphic.startTime < 0.0) g_SubGraphic.startTime = ImGui::GetTime();
-    const double elapsed = ImGui::GetTime() - g_SubGraphic.startTime;
-    const double kDuration = 3.5;
+    const double elapsed   = ImGui::GetTime() - g_SubGraphic.startTime;
+    const double kDuration = 5.5;
     if (elapsed >= kDuration) {
       g_SubGraphic.active = false;
     } else {
-      // Fade out in last 0.8s
       float alpha = 1.0f;
+      if (elapsed < 0.3) alpha = (float)(elapsed / 0.3f);           // fade in
       if (elapsed > kDuration - 0.8) alpha = (float)((kDuration - elapsed) / 0.8);
       if (alpha < 0.f) alpha = 0.f;
       const ImGuiIO &io = ImGui::GetIO();
-      const float sw = io.DisplaySize.x;
-      const float sh = io.DisplaySize.y;
-      const float bw = 340.0f, bh = 70.0f;
-      const float bx = (sw - bw) * 0.5f;
-      const float by = sh - bh - 60.0f; // near bottom
-      const float rnd = 5.0f;
-      ImU32 bg   = IM_COL32(10, 10, 20, (int)(235 * alpha));
-      ImU32 acc  = IM_COL32(60, 170, 80, (int)(255 * alpha));   // green = in
-      ImU32 accO = IM_COL32(220, 50, 50, (int)(255 * alpha));   // red   = out
-      ImU32 txt  = IM_COL32(255, 255, 255, (int)(255 * alpha));
-      ImU32 dim  = IM_COL32(160, 160, 160, (int)(200 * alpha));
-      dl->AddRectFilled(ImVec2(bx, by), ImVec2(bx + bw, by + bh), bg, rnd);
-      dl->AddRect(ImVec2(bx, by), ImVec2(bx + bw, by + bh), IM_COL32(60, 65, 100, (int)(180 * alpha)), rnd, 0, 1.5f);
-      // OUT row
-      const float rowH2 = bh * 0.5f;
-      float ry = by + (rowH2 - 18.0f) * 0.5f;
-      dl->AddText(g_ManagerFontBold, 13.0f, ImVec2(bx + 12, ry),
-                  accO, "\xe2\x86\x93 OUT");  // ↓ OUT
-      dl->AddText(g_ManagerFontBold, 15.0f, ImVec2(bx + 76, ry - 1),
-                  txt, g_SubGraphic.nameOut.c_str());
-      // IN row
-      ry = by + rowH2 + (rowH2 - 18.0f) * 0.5f;
-      dl->AddText(g_ManagerFontBold, 13.0f, ImVec2(bx + 12, ry),
-                  acc, "\xe2\x86\x91 IN ");   // ↑ IN
-      dl->AddText(g_ManagerFontBold, 15.0f, ImVec2(bx + 76, ry - 1),
-                  txt, g_SubGraphic.nameIn.c_str());
-      // Divider between rows
-      dl->AddLine(ImVec2(bx + 8, by + rowH2), ImVec2(bx + bw - 8, by + rowH2),
-                  IM_COL32(50, 55, 80, (int)(120 * alpha)), 1.0f);
+      const float sw = io.DisplaySize.x, sh = io.DisplaySize.y;
+
+      // Dimensions — BBC style: wide card, yellow header, two player rows, badges flanking
+      const float bw   = 460.0f;
+      const float hdrH = 34.0f;
+      const float rowH = 36.0f;
+      const float bh   = hdrH + rowH * 2.0f;
+      const float bx   = (sw - bw) * 0.5f;
+      const float by   = 60.0f;
+      const float badgeW = 54.0f;
+      const float innerX = bx + badgeW;
+      const float innerW = bw - badgeW * 2.0f;
+
+      auto A = [&](int v) { return (int)(v * alpha); };
+
+      // Shadow
+      dl->AddRectFilled(ImVec2(bx + 4, by + 4), ImVec2(bx + bw + 4, by + bh + 4),
+                        IM_COL32(0, 0, 0, A(80)));
+
+      // Header bar — same navy as scoreboard league logo area
+      dl->AddRectFilled(ImVec2(bx, by), ImVec2(bx + bw, by + hdrH),
+                        IM_COL32(12, 20, 55, A(248)));
+      // Header text — "SUBSTITUTION" in white
+      const char *hdrTxt = "SUBSTITUTION";
+      ImVec2 htsz = g_ManagerFontBold
+          ? g_ManagerFontBold->CalcTextSizeA(15.0f, FLT_MAX, 0.f, hdrTxt) : ImVec2(100,15);
+      dl->AddText(g_ManagerFontBold, 15.0f,
+                  ImVec2(bx + bw * 0.5f - htsz.x * 0.5f, by + (hdrH - htsz.y) * 0.5f),
+                  IM_COL32(255, 255, 255, A(255)), hdrTxt);
+
+      // Player rows background — white; text — black
+      const ImU32 rowBgCol  = IM_COL32(255, 255, 255, A(255));
+      const ImU32 rowTxtCol = IM_COL32(15,  15,  15,  A(255));
+      dl->AddRectFilled(ImVec2(bx, by + hdrH), ImVec2(bx + bw, by + bh), rowBgCol);
+
+      // Divider between the two player rows
+      float midY = by + hdrH + rowH;
+      ImU32 divCol = (ImU32)((rowTxtCol & 0x00FFFFFF) | ((unsigned int)A(80) << 24));
+      dl->AddLine(ImVec2(innerX + 2, midY), ImVec2(innerX + innerW - 2, midY), divCol, 1.0f);
+
+      // League logo (left side, spanning both rows)
+      {
+        static GLuint s_subLeagueTex = 0;
+        static std::string s_subLeaguePath;
+        if (s_subLeaguePath != g_SubGraphic.leagueLogoPath) {
+          s_subLeagueTex  = 0;
+          s_subLeaguePath = g_SubGraphic.leagueLogoPath;
+        }
+        if (s_subLeagueTex == 0 && !s_subLeaguePath.empty())
+          s_subLeagueTex = LoadBadgeTex(s_subLeaguePath);
+        if (s_subLeagueTex) {
+          const float pad = 8.0f;
+          const float sz  = rowH * 2.0f - pad * 2.0f;
+          dl->AddRectFilled(ImVec2(bx, by + hdrH), ImVec2(bx + badgeW, by + bh),
+                            rowBgCol);
+          dl->AddImage((ImTextureID)(intptr_t)s_subLeagueTex,
+                       ImVec2(bx + (badgeW - sz) * 0.5f, by + hdrH + pad),
+                       ImVec2(bx + (badgeW + sz) * 0.5f, by + hdrH + pad + sz),
+                       ImVec2(0,0), ImVec2(1,1), IM_COL32(255,255,255,A(255)));
+        }
+      }
+
+      // Club badge (right side, spanning both rows)
+      {
+        static GLuint s_subBadgeTex = 0;
+        static std::string s_subBadgePath;
+        if (s_subBadgePath != g_SubGraphic.teamBadgePath) {
+          s_subBadgeTex  = 0;
+          s_subBadgePath = g_SubGraphic.teamBadgePath;
+        }
+        if (s_subBadgeTex == 0 && !s_subBadgePath.empty())
+          s_subBadgeTex = LoadBadgeTex(s_subBadgePath);
+        if (s_subBadgeTex) {
+          const float pad = 7.0f;
+          const float sz  = rowH * 2.0f - pad * 2.0f;
+          float rx = bx + bw - badgeW;
+          dl->AddRectFilled(ImVec2(rx, by + hdrH), ImVec2(bx + bw, by + bh),
+                            rowBgCol);
+          dl->AddImage((ImTextureID)(intptr_t)s_subBadgeTex,
+                       ImVec2(rx + (badgeW - sz) * 0.5f, by + hdrH + pad),
+                       ImVec2(rx + (badgeW + sz) * 0.5f, by + hdrH + pad + sz),
+                       ImVec2(0,0), ImVec2(1,1), IM_COL32(255,255,255,A(255)));
+        }
+      }
+
+      // OUT row — red left-pointing triangle + name
+      auto DrawPlayerRow = [&](float ry, const char *name, bool isOut) {
+        ImU32 arrowCol = isOut ? IM_COL32(210, 30, 30, A(255)) : IM_COL32(30, 160, 60, A(255));
+        ImU32 txtCol   = rowTxtCol;
+        // Arrow triangle
+        const float arrowSz = 12.0f;
+        float ax = innerX + 14.0f;
+        float ay = ry + rowH * 0.5f;
+        if (isOut) { // left-pointing ◄
+          dl->AddTriangleFilled(ImVec2(ax,             ay),
+                                ImVec2(ax + arrowSz,   ay - arrowSz * 0.6f),
+                                ImVec2(ax + arrowSz,   ay + arrowSz * 0.6f),
+                                arrowCol);
+        } else {     // right-pointing ►
+          dl->AddTriangleFilled(ImVec2(ax + arrowSz,   ay),
+                                ImVec2(ax,             ay - arrowSz * 0.6f),
+                                ImVec2(ax,             ay + arrowSz * 0.6f),
+                                arrowCol);
+        }
+        // Name
+        if (g_ManagerFontBold) {
+          ImVec2 nsz = g_ManagerFontBold->CalcTextSizeA(15.0f, FLT_MAX, 0.f, name);
+          float nx = innerX + (innerW - nsz.x) * 0.5f + 8.0f; // slight right offset for arrow
+          float ny = ry + (rowH - nsz.y) * 0.5f;
+          dl->AddText(g_ManagerFontBold, 15.0f, ImVec2(nx, ny), txtCol, name);
+        }
+      };
+
+      DrawPlayerRow(by + hdrH,        g_SubGraphic.nameOut.c_str(), true);
+      DrawPlayerRow(by + hdrH + rowH, g_SubGraphic.nameIn.c_str(),  false);
+
+      // Outer border
+      dl->AddRect(ImVec2(bx, by), ImVec2(bx + bw, by + bh),
+                  IM_COL32(12, 20, 55, A(200)), 0.0f, 0, 1.5f);
     }
   }
 }
@@ -413,6 +503,7 @@ static ImU32                     s_pauseOppTextColor   = IM_COL32(255, 255, 255,
 // Substitution panel state
 static std::vector<BenchPlayer>  s_benchPlayers;
 static int                       s_subUserTeamIdx   = 0;
+static std::string               s_userBadgePath;
 static bool                      s_subPanelActive   = false;
 static int                       s_subOffSelected   = -1; // players[] index of starter going off
 static int                       s_subOnSelected    = -1; // players[] index of bench player coming on
@@ -761,8 +852,11 @@ static void DrawSubstitutionPanel(float px, float py, float pw, float ph) {
     g_QueuedSub.teamIdx = s_subUserTeamIdx;
     g_QueuedSub.offIdx  = s_subOffSelected;
     g_QueuedSub.onIdx   = s_subOnSelected;
-    g_QueuedSub.nameOut = nameOut;
-    g_QueuedSub.nameIn  = nameIn;
+    g_QueuedSub.nameOut        = nameOut;
+    g_QueuedSub.nameIn         = nameIn;
+    g_QueuedSub.teamBadgePath  = s_userBadgePath;
+    g_QueuedSub.leagueLogoPath = s_leagueLogoPath;
+    g_QueuedSub.teamColor      = (unsigned int)s_pauseUserColor;
 
     // Update display lists so user can queue a 2nd sub immediately
     BenchPlayer incoming;
@@ -844,6 +938,14 @@ void RenderImGuiMatchPauseOverlay() {
             s_pausePlayers.push_back(MakePausePlayer(td, i));
           // Bench players (indices 11-19, max 9 subs)
           s_subUserTeamIdx = teamIdx;
+          // GetLogoUrl() already has "databases/default/" prepended (teamdata.cpp:96).
+          // LoadBadgeTex also prepends it — strip the duplicate prefix here.
+          {
+            std::string raw = td->GetLogoUrl();
+            const std::string kPfx = "databases/default/";
+            if (raw.substr(0, kPfx.size()) == kPfx) raw = raw.substr(kPfx.size());
+            s_userBadgePath = raw;
+          }
           int total = std::min(td->GetPlayerNum(), 20); // cap at S9 (index 19)
           for (int i = 11; i < total; i++) {
             BenchPlayer bp;

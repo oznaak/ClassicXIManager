@@ -650,14 +650,13 @@ bool Team::SubstitutePlayer(int offIdx, int onIdx) {
   if (!players[offIdx]->IsActive())  return false;
   if ( players[onIdx ]->IsActive())  return false;
 
-  // Deactivate outgoing player (hides humanoid, deletes controller, cleans captions)
-  players[offIdx]->Deactivate();
+  // SetBench() is safe to call from the game thread — no GUI widget allocation/deletion.
+  // Deactivate() (which calls MarkForDeletion on captions) is NOT safe mid-match from this thread.
+  players[offIdx]->SetBench();
 
   // Swap so the incoming player sits at offIdx — a valid formation-entry index (0–10).
-  // After the swap, GetFormationEntry() on the incoming player returns the correct slot.
   std::swap(players[offIdx], players[onIdx]);
 
-  // Make the incoming player active — uses its pre-created humanoid, no GL work on this thread.
   players[offIdx]->SetActive();
 
   subsMade++;

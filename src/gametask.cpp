@@ -153,21 +153,25 @@ void GameTask::ProcessPhase() {
     match->PreparePutBuffers();
     matchPutBufferMutex.unlock();
 
-    // Execute any queued substitution on the next dead ball
+    // Execute any queued substitution on the next dead ball.
+    // Hold matchPutBufferMutex so PutPhase()'s GetActiveTeamPlayers() can't race the players[] swap.
     if (g_QueuedSub.pending && !match->GetPause() && !match->IsInPlay()) {
       QueuedSub sub = g_QueuedSub;
       g_QueuedSub.pending = false;
 
+      matchPutBufferMutex.lock();
       Team *team = match->GetTeam(sub.teamIdx);
       if (team && team->GetSubsMade() < 3)
         team->SubstitutePlayer(sub.offIdx, sub.onIdx);
+      matchPutBufferMutex.unlock();
 
-      // Trigger the on-screen graphic (read by GL render thread in RenderImGuiMatchOverlay)
-      // startTime = -1 signals "set to ImGui::GetTime() on first render frame"
-      g_SubGraphic.active    = true;
-      g_SubGraphic.nameOut   = sub.nameOut;
-      g_SubGraphic.nameIn    = sub.nameIn;
-      g_SubGraphic.startTime = -1.0;
+      g_SubGraphic.active         = true;
+      g_SubGraphic.nameOut        = sub.nameOut;
+      g_SubGraphic.nameIn         = sub.nameIn;
+      g_SubGraphic.teamBadgePath  = sub.teamBadgePath;
+      g_SubGraphic.leagueLogoPath = sub.leagueLogoPath;
+      g_SubGraphic.teamColor      = sub.teamColor;
+      g_SubGraphic.startTime      = -1.0;
     }
   }
 

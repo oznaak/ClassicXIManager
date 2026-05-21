@@ -15,21 +15,27 @@ extern int g_ImGuiPausePendingAction;
 
 // Substitution queued by the user (GL thread) — executed on the next dead ball (game thread).
 struct QueuedSub {
-  bool        pending = false;
-  int         teamIdx = 0;
-  int         offIdx  = -1;  // players[] index of outgoing player
-  int         onIdx   = -1;  // players[] index of incoming bench player
-  std::string nameOut;       // for the substitution graphic
-  std::string nameIn;
+  bool         pending        = false;
+  int          teamIdx        = 0;
+  int          offIdx         = -1;
+  int          onIdx          = -1;
+  std::string  nameOut;
+  std::string  nameIn;
+  std::string  teamBadgePath;
+  std::string  leagueLogoPath;
+  unsigned int teamColor      = 0;  // club primary color (same as scoreboard)
 };
 extern QueuedSub g_QueuedSub;
 
-// Substitution banner shown on the pitch for ~3 seconds after a sub fires.
+// Substitution banner shown on the pitch for ~5 seconds after a sub fires.
 struct SubGraphic {
-  bool        active    = false;
-  std::string nameOut;
-  std::string nameIn;
-  double      startTime = 0.0; // ImGui::GetTime() when activated
+  bool         active       = false;
+  std::string  nameOut;
+  std::string  nameIn;
+  std::string  teamBadgePath;
+  std::string  leagueLogoPath;
+  unsigned int teamColor    = 0;  // club primary color
+  double       startTime    = 0.0; // ImGui::GetTime() when activated; -1 = set on first frame
 };
 extern SubGraphic g_SubGraphic;
 

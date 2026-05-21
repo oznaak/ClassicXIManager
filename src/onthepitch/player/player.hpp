@@ -41,6 +41,8 @@ class Player : public PlayerBase {
     void ActivateBench(boost::intrusive_ptr<Node> humanoidSourceNode, boost::intrusive_ptr<Node> fullbodySourceNode, std::map<Vector3, Vector3> &colorCoords, boost::intrusive_ptr < Resource<Surface> > kit, boost::shared_ptr<AnimCollection> animCollection);
     // reactivate a pre-built bench player after a substitution (must be called after std::swap in players[])
     void SetActive();
+    // safe mid-match bench: hides humanoid + suppresses captions, no GUI deletion
+    virtual void SetBench();
     // go back to bench/take a shower
     virtual void Deactivate();
 
