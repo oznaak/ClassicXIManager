@@ -60,3 +60,14 @@ extern bool g_MatchStatsVisible;
 
 // Called by StopMatch (under matchRenderMutex) to clear stale match pointer cache.
 void ResetMatchOverlayState();
+
+// Live tactics panel (non-pausing floating overlay).
+extern bool g_TacticsPanelVisible;
+
+// Tactic change queued by GL thread — applied to TeamData by gametask.cpp each frame.
+struct TacticChange {
+  std::string key;
+  float       value   = 0.f;
+  int         teamIdx = 0;
+};
+extern std::vector<TacticChange> g_PendingTacticsChanges;

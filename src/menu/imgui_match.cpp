@@ -40,6 +40,15 @@ bool       g_SubWindowOpen = false;
 bool       g_ImGuiTopBarPauseRequest = false;
 bool       g_TopBarSoftPause         = false;
 bool       g_MatchStatsVisible       = false;
+bool       g_TacticsPanelVisible     = false;
+std::vector<TacticChange> g_PendingTacticsChanges;
+
+// Panel drag positions — declared here so ResetMatchOverlayState() can reach them.
+static float s_statsPanelX   = -1.f;
+static float s_statsPanelY   = -1.f;
+static bool  s_statsCompact  = false;
+static float s_tacticsPanelX = -1.f;
+static float s_tacticsPanelY = -1.f;
 
 // ---------------------------------------------------------------------------
 // Per-match cached state
@@ -122,6 +131,43 @@ static void AddTextLeftCY(ImDrawList *dl, ImFont *font, float sz,
 static void ResetPauseCache();           // forward declaration
 static void InitHUDDataIfNeeded(Match*); // forward declaration
 
+// ---------------------------------------------------------------------------
+// Tactic instruction table — used by InitHUDDataIfNeeded and RenderTacticsPanel.
+// ---------------------------------------------------------------------------
+struct TacInstRow {
+  const char *key;
+  const char *name;
+  const char *category;
+  struct Preset { const char *label; float value; } presets[4];
+};
+static const TacInstRow kMatchTacInstr[] = {
+  { "position_offense_depth_factor",       "Attacking Depth",    "Attacking",
+    {{"Compact",0.25f},{"Balanced",0.5f},{"Expansive",0.75f},{"Total Attack",1.0f}} },
+  { "position_offense_width_factor",       "Attacking Width",    "Attacking",
+    {{"Narrow",0.3f},{"Balanced",0.6f},{"Wide",0.8f},{"Full Width",1.0f}} },
+  { "position_offense_midfieldfocus",      "Midfield in Attack", "Attacking",
+    {{"Hold Shape",0.2f},{"Balanced",0.45f},{"Join Attack",0.7f},{"All Forward",0.9f}} },
+  { "position_offense_sidefocus_strength", "Flank Play",         "Attacking",
+    {{"Central",0.1f},{"Mixed",0.35f},{"Wide Threat",0.6f},{"Wing Ovrlds",0.9f}} },
+  { "position_offense_microfocus_strength","Attacking Pressing", "Attacking",
+    {{"Loose",0.2f},{"Balanced",0.5f},{"Tight",0.75f},{"Swarm",0.95f}} },
+  { "position_defense_depth_factor",       "Defensive Line",     "Defending",
+    {{"Deep Block",0.3f},{"Mid Block",0.55f},{"High Line",0.75f},{"Ultra High",0.95f}} },
+  { "position_defense_width_factor",       "Defensive Shape",    "Defending",
+    {{"Narrow",0.3f},{"Balanced",0.55f},{"Wide",0.8f},{"Spread",1.0f}} },
+  { "position_defense_midfieldfocus",      "Midfield Pressure",  "Defending",
+    {{"Drop Deep",0.2f},{"Compact",0.45f},{"Press High",0.7f},{"Extreme Press",0.9f}} },
+  { "position_defense_sidefocus_strength", "Flank Coverage",     "Defending",
+    {{"Narrow",0.1f},{"Balanced",0.4f},{"Cover Wings",0.65f},{"Full Width",0.9f}} },
+  { "position_defense_microfocus_strength","Def. Compactness",   "Defending",
+    {{"Loose",0.2f},{"Solid",0.5f},{"Compact",0.75f},{"Max Compact",0.95f}} },
+  { "dribble_offensiveness",               "Dribble Rate",       "On the Ball",
+    {{"Cautious",0.2f},{"Balanced",0.5f},{"Direct",0.7f},{"Expressive",0.9f}} },
+  { "dribble_centermagnet",                "Dribble Direction",  "On the Ball",
+    {{"Hug Flanks",0.1f},{"Mixed",0.4f},{"Thru Middle",0.7f},{"Central Drive",0.9f}} },
+};
+static const int kNumMatchTacInstr = 12;
+
 static void ResetPerMatch(Match *match) {
   s_lastMatch        = match;
   s_overlayLogged    = false;
@@ -201,7 +247,11 @@ void ResetMatchOverlayState() {
   g_SubsUsed      = 0;
   g_WindowsUsed   = 0;
   g_SubWindowOpen = false;
-  g_MatchStatsVisible = false;
+  g_MatchStatsVisible     = false;
+  g_TacticsPanelVisible   = false;
+  g_PendingTacticsChanges.clear();
+  s_tacticsPanelX         = -1.f;
+  s_tacticsPanelY         = -1.f;
 }
 
 // ---------------------------------------------------------------------------
@@ -249,10 +299,9 @@ static int                       s_subOffSelected   = -1;
 static int                       s_subOnSelected    = -1;
 static int                       s_subsMadeCount    = 0;
 
-// Stats panel drag position — negative means "use default center".
-static float                     s_statsPanelX      = -1.f;
-static float                     s_statsPanelY      = -1.f;
-static bool                      s_statsCompact     = false;
+// Live tactic values read from TeamData under matchRenderMutex, updated on preset click.
+static std::map<std::string, float> s_liveTactics;
+
 
 static void ResetPauseCache() {
   s_pauseInitialized = false;
@@ -271,6 +320,7 @@ static void ResetPauseCache() {
   s_subOffSelected      = -1;
   s_subOnSelected       = -1;
   s_subsMadeCount       = 0;
+  s_liveTactics.clear();
   g_TopBarSoftPause     = false;
   g_QueuedSubQueue.clear();
   g_SubGraphicQueue.clear();
@@ -570,8 +620,9 @@ static void DrawSubsList(ImDrawList *dl, ImVec2 origin, float w, float h,
 }
 
 // ---------------------------------------------------------------------------
-// Forward declaration — defined after RenderImGuiMatchOverlay.
+// Forward declarations — defined after RenderImGuiMatchOverlay.
 void RenderMatchStatsPanel();
+void RenderTacticsPanel();
 // ---------------------------------------------------------------------------
 
 void RenderImGuiMatchOverlay() {
@@ -1160,7 +1211,7 @@ void RenderImGuiMatchOverlay() {
       bool tabClicked = ImGui::InvisibleButton(cid, ImVec2(tbtnW, tbtnH));
       ImGui::PopID();
       bool hov    = ImGui::IsItemHovered();
-      bool active = (i == 0 && g_MatchStatsVisible);
+      bool active = (i == 0 && g_MatchStatsVisible) || (i == 1 && g_TacticsPanelVisible);
       ImU32 bg = active ? IM_COL32(255, 200, 40, 255)
                : hov    ? IM_COL32(50, 70, 120, 240)
                         : IM_COL32(18, 26, 52, 210);
@@ -1168,7 +1219,8 @@ void RenderImGuiMatchOverlay() {
       tdl->AddRectFilled(bmin, bmax, bg, 5.0f);
       tdl->AddRect(bmin, bmax, IM_COL32(55, 80, 140, 180), 5.0f, 0, 1.0f);
       AddTextCentered(tdl, g_ManagerFontBold, 11.0f, bmin, bmax, tc, tabLabels[i]);
-      if (tabClicked && i == 0) g_MatchStatsVisible = !g_MatchStatsVisible;
+      if (tabClicked && i == 0) g_MatchStatsVisible  = !g_MatchStatsVisible;
+      if (tabClicked && i == 1) g_TacticsPanelVisible = !g_TacticsPanelVisible;
       tabX += tbtnW + tbtnGap;
     }
     ImGui::End();
@@ -1339,6 +1391,9 @@ void RenderImGuiMatchOverlay() {
 
   // Live match stats panel (non-pausing overlay)
   RenderMatchStatsPanel();
+
+  // Live tactics panel (non-pausing overlay)
+  RenderTacticsPanel();
 }
 
 // ---------------------------------------------------------------------------
@@ -1805,6 +1860,20 @@ static void InitHUDDataIfNeeded(Match *match) {
   if (s_pauseTeamName.empty())     s_pauseTeamName     = g_CareerHub.club.name;
   if (s_pauseTeamName.empty())     s_pauseTeamName     = "Your Team";
   if (s_pauseAwayTeamName.empty()) s_pauseAwayTeamName = "Opponents";
+
+  // Seed live tactics from user team's TeamData (the authoritative source during the match).
+  // g_CareerHub is cleared before match starts, so we can't rely on it.
+  if (td) {
+    const Properties &up = td->GetTactics().userProperties;
+    for (int ti = 0; ti < kNumMatchTacInstr; ti++) {
+      const char *key = kMatchTacInstr[ti].key;
+      // Default from the factory preset array if TeamData has no value stored
+      float def = kMatchTacInstr[ti].presets[1].value; // "Balanced" preset as fallback
+      s_liveTactics[key] = up.GetReal(key, def);
+    }
+    printf("[IMGUI HUD] Tactics cached from TeamData (%zu keys)\n", s_liveTactics.size());
+  }
+
   s_pauseInitialized = true;
   printf("[IMGUI HUD] Cache: %zu user / %zu opp players\n",
          s_pausePlayers.size(), s_pauseAwayPlayers.size());
@@ -2146,6 +2215,233 @@ void RenderMatchStatsPanel() {
                     IM_COL32(255,255,255,255), vB);
     curY += statRowH;
   }
+
+  // Top-rounded border only
+  dl->AddRect(ImVec2(wPos.x, wPos.y), ImVec2(wPos.x + panW, wPos.y + panH),
+              IM_COL32(55, 75, 140, 180), kRound, ImDrawFlags_RoundCornersTop, 1.5f);
+
+  ImGui::End();
+  ImGui::PopStyleColor();
+  ImGui::PopStyleVar(4);
+}
+
+void RenderTacticsPanel() {
+  if (!g_TacticsPanelVisible) return;
+
+  const ImGuiIO &io  = ImGui::GetIO();
+  const float    sw  = io.DisplaySize.x;
+  const float    sh  = io.DisplaySize.y;
+
+  const float kRound    = 12.0f;
+  const float panW      = 490.0f;
+  const float hdrH      = 42.0f;
+  const float scrollH   = 444.0f;  // content area height (scrollable)
+  const float panH      = hdrH + scrollH;
+
+  if (s_tacticsPanelX < 0.f) {
+    // Default: slightly left of center so it doesn't overlap match stats
+    s_tacticsPanelX = (sw - panW) * 0.5f - 230.0f;
+    s_tacticsPanelY = (sh - panH) * 0.5f - 50.0f;
+  }
+  if (s_tacticsPanelX < 0.f)          s_tacticsPanelX = 0.f;
+  if (s_tacticsPanelY < 0.f)          s_tacticsPanelY = 0.f;
+  if (s_tacticsPanelX + panW > sw)    s_tacticsPanelX = sw - panW;
+  if (s_tacticsPanelY + panH > sh)    s_tacticsPanelY = sh - panH;
+
+  ImGui::SetNextWindowPos(ImVec2(s_tacticsPanelX, s_tacticsPanelY), ImGuiCond_Always);
+  ImGui::SetNextWindowSize(ImVec2(panW, panH), ImGuiCond_Always);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,    ImVec2(0, 0));
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding,   0.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,      ImVec2(0, 0));
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+  ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(0, 0, 0, 0));
+
+  ImGui::Begin("##tactics_panel", nullptr,
+    ImGuiWindowFlags_NoTitleBar        |
+    ImGuiWindowFlags_NoResize          |
+    ImGuiWindowFlags_NoMove            |
+    ImGuiWindowFlags_NoScrollbar       |
+    ImGuiWindowFlags_NoSavedSettings   |
+    ImGuiWindowFlags_NoFocusOnAppearing|
+    ImGuiWindowFlags_NoNav);
+
+  ImDrawList *dl   = ImGui::GetWindowDrawList();
+  ImVec2      wPos = ImGui::GetWindowPos();
+  float       curY = wPos.y;
+
+  // Rounded background on the back draw list (top corners only).
+  ImDrawList *bgdl = ImGui::GetBackgroundDrawList();
+  bgdl->AddRectFilled(ImVec2(wPos.x, wPos.y), ImVec2(wPos.x + panW, wPos.y + panH),
+                      IM_COL32(0, 0, 0, 70), kRound, ImDrawFlags_RoundCornersTop);
+  bgdl->AddRectFilled(ImVec2(wPos.x, wPos.y), ImVec2(wPos.x + panW, wPos.y + panH),
+                      IM_COL32(10, 16, 34, 252), kRound, ImDrawFlags_RoundCornersTop);
+
+  // ── Header ────────────────────────────────────────────────────────────────
+  dl->AddRectFilled(ImVec2(wPos.x, curY), ImVec2(wPos.x + panW, curY + hdrH),
+                    IM_COL32(16, 24, 52, 255), kRound, ImDrawFlags_RoundCornersTop);
+  // Club color accent strip on left
+  dl->AddRectFilled(ImVec2(wPos.x, curY), ImVec2(wPos.x + 4.f, curY + hdrH), s_pauseUserColor);
+  AddTextCentered(dl, g_ManagerFontBold, 17.0f,
+                  ImVec2(wPos.x, curY), ImVec2(wPos.x + panW, curY + hdrH),
+                  IM_COL32(200, 215, 255, 255), "TACTICS");
+
+  // Drag handle
+  ImGui::SetCursorScreenPos(ImVec2(wPos.x, curY));
+  ImGui::InvisibleButton("##drag_tac", ImVec2(panW - 40.0f, hdrH));
+  if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+    ImVec2 delta = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
+    ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
+    s_tacticsPanelX += delta.x;
+    s_tacticsPanelY += delta.y;
+    if (s_tacticsPanelX < 0.f)       s_tacticsPanelX = 0.f;
+    if (s_tacticsPanelY < 0.f)       s_tacticsPanelY = 0.f;
+    if (s_tacticsPanelX + panW > sw) s_tacticsPanelX = sw - panW;
+    if (s_tacticsPanelY + panH > sh) s_tacticsPanelY = sh - panH;
+  }
+  if (ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+
+  // Close [X]
+  ImVec2 txMin(wPos.x + panW - 34.0f, curY + 7.0f);
+  ImVec2 txMax(wPos.x + panW - 7.0f,  curY + hdrH - 7.0f);
+  ImGui::SetCursorScreenPos(txMin);
+  ImGui::InvisibleButton("##close_tac", ImVec2(txMax.x - txMin.x, txMax.y - txMin.y));
+  bool txHov = ImGui::IsItemHovered();
+  dl->AddRectFilled(txMin, txMax, txHov ? IM_COL32(220,60,60,220) : IM_COL32(40,50,90,180), 4.0f);
+  AddTextCentered(dl, g_ManagerFontBold, 17.0f, txMin, txMax, IM_COL32(255,255,255,255), "X");
+  if (ImGui::IsItemClicked()) g_TacticsPanelVisible = false;
+  curY += hdrH;
+
+  // ── Scrollable content ────────────────────────────────────────────────────
+  const float kRowH   = 30.0f;
+  const float kSecH   = 22.0f;
+  const float kBtnGap = 3.0f;
+  const float kPadX   = 8.0f;
+
+  // Category colours matching career screen
+  const ImU32 kCatBgAtk  = IM_COL32(18, 100, 42, 220);
+  const ImU32 kCatBgDef  = IM_COL32(16, 56, 130, 220);
+  const ImU32 kCatBgBall = IM_COL32(130, 75, 10, 220);
+  const ImU32 kCatTxtAtk  = IM_COL32(50, 210, 95, 255);
+  const ImU32 kCatTxtDef  = IM_COL32(90, 165, 255, 255);
+  const ImU32 kCatTxtBall = IM_COL32(255, 190, 60, 255);
+
+  ImGui::SetCursorScreenPos(ImVec2(wPos.x, curY));
+  ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(10, 16, 34, 255));
+  ImGui::BeginChild("##tac_scroll", ImVec2(panW, scrollH), false, ImGuiWindowFlags_None);
+  ImDrawList *cdl  = ImGui::GetWindowDrawList();
+  ImVec2      cpos = ImGui::GetWindowPos();
+  float       cy   = cpos.y;
+
+  const char *lastCat = nullptr;
+  for (int ti = 0; ti < kNumMatchTacInstr; ti++) {
+    const TacInstRow &ins = kMatchTacInstr[ti];
+
+    // Section header on category change
+    if (!lastCat || strcmp(lastCat, ins.category) != 0) {
+      lastCat = ins.category;
+      ImU32 catBg  = kCatBgAtk,  catTxt = kCatTxtAtk;
+      if (strcmp(ins.category, "Defending")    == 0) { catBg = kCatBgDef;  catTxt = kCatTxtDef;  }
+      if (strcmp(ins.category, "On the Ball")  == 0) { catBg = kCatBgBall; catTxt = kCatTxtBall; }
+      cdl->AddRectFilled(ImVec2(cpos.x, cy), ImVec2(cpos.x + panW, cy + kSecH), catBg);
+      cdl->AddRectFilled(ImVec2(cpos.x, cy), ImVec2(cpos.x + 3.f,  cy + kSecH), catTxt);
+      char secBuf[48]; snprintf(secBuf, sizeof(secBuf), "   %s", ins.category);
+      if (g_ManagerFontSmall)
+        cdl->AddText(g_ManagerFontSmall, 15.0f,
+                     ImVec2(cpos.x + 8, cy + (kSecH - 15.0f) * 0.5f), catTxt, secBuf);
+      cy += kSecH;
+    }
+
+    // Row bg (alternating)
+    ImU32 rowBg = (ti % 2 == 0) ? IM_COL32(14, 22, 46, 255) : IM_COL32(11, 17, 38, 255);
+    cdl->AddRectFilled(ImVec2(cpos.x, cy), ImVec2(cpos.x + panW, cy + kRowH), rowBg);
+
+    // Tactic label (left 28%)
+    float nameW = panW * 0.28f;
+    if (g_ManagerFontSmall)
+      cdl->AddText(g_ManagerFontSmall, 15.0f,
+                   ImVec2(cpos.x + kPadX, cy + (kRowH - 15.0f) * 0.5f),
+                   IM_COL32(185, 200, 230, 255), ins.name);
+
+    // Resolve active preset from the live cache (populated from TeamData at match start).
+    float curVal  = ins.presets[1].value; // fallback: "Balanced"
+    auto  it = s_liveTactics.find(ins.key);
+    if (it != s_liveTactics.end()) curVal = it->second;
+    int selPreset = 0;
+    float bestD = 9999.f;
+    for (int pi = 0; pi < 4; pi++) {
+      float d = fabsf(ins.presets[pi].value - curVal);
+      if (d < bestD) { bestD = d; selPreset = pi; }
+    }
+
+    // Preset buttons (right 64%)
+    float btnAreaX = cpos.x + nameW;
+    float btnAreaW = panW - nameW - kPadX;
+    float btnW     = (btnAreaW - kBtnGap * 3.0f) / 4.0f;
+    float btnH     = kRowH - 6.0f;
+    float btnY     = cy + 3.0f;
+
+    for (int pi = 0; pi < 4; pi++) {
+      float bx = btnAreaX + pi * (btnW + kBtnGap);
+      bool  sel = (pi == selPreset);
+
+      ImVec2 bMin(bx, btnY);
+      ImVec2 bMax(bx + btnW, btnY + btnH);
+
+      char btnId[64]; snprintf(btnId, sizeof(btnId), "##t%d_p%d", ti, pi);
+      ImGui::SetCursorScreenPos(bMin);
+      ImGui::PushID(btnId);
+      bool clicked = ImGui::InvisibleButton(btnId, ImVec2(btnW, btnH));
+      ImGui::PopID();
+      bool hov = ImGui::IsItemHovered();
+
+      ImU32 bg = sel ? s_pauseUserColor
+               : hov ? IM_COL32(40, 55, 110, 220)
+                     : IM_COL32(20, 30, 60, 200);
+      cdl->AddRectFilled(bMin, bMax, bg, 4.0f);
+
+      ImU32 tc = sel ? TextColorForBg(s_pauseUserColor)
+               : hov ? IM_COL32(220, 230, 255, 255)
+                     : IM_COL32(130, 150, 200, 210);
+      AddTextCentered(cdl, g_ManagerFontSmall, 15.0f, bMin, bMax, tc, ins.presets[pi].label);
+
+      if (clicked) {
+        float newVal = ins.presets[pi].value;
+        // Update local cache for immediate visual feedback
+        s_liveTactics[ins.key] = newVal;
+        // Queue for game-thread application to TeamData (takes effect within ~1 s)
+        TacticChange tc2;
+        tc2.key     = ins.key;
+        tc2.value   = newVal;
+        tc2.teamIdx = s_subUserTeamIdx;
+        g_PendingTacticsChanges.push_back(tc2);
+        // Persist to DB using s_liveTactics as source of truth
+        {
+          std::stringstream xml;
+          for (const auto &kv : s_liveTactics)
+            xml << "<" << kv.first << ">" << kv.second << "</" << kv.first << ">\n";
+          std::string xmlStr = xml.str();
+          std::string esc; esc.reserve(xmlStr.size());
+          for (char c : xmlStr) { if (c == '\'') esc += "''"; else esc += c; }
+          int clubId = g_CareerMatchContext.userClubId;
+          if (clubId > 0) {
+            std::stringstream q;
+            q << "UPDATE teams SET tactics_xml='" << esc << "' WHERE id=" << clubId << ";";
+            DatabaseResult *r = GetDB()->Query(q.str());
+            delete r;
+          }
+        }
+      }
+    }
+
+    // Row bottom divider
+    cdl->AddLine(ImVec2(cpos.x, cy + kRowH - 1), ImVec2(cpos.x + panW, cy + kRowH - 1),
+                 IM_COL32(30, 45, 80, 120), 1.0f);
+    cy += kRowH;
+  }
+
+  ImGui::Dummy(ImVec2(panW, 4.0f)); // bottom padding
+  ImGui::EndChild();
+  ImGui::PopStyleColor();
 
   // Top-rounded border only
   dl->AddRect(ImVec2(wPos.x, wPos.y), ImVec2(wPos.x + panW, wPos.y + panH),

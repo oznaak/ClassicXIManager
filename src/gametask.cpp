@@ -165,6 +165,18 @@ void GameTask::ProcessPhase() {
       s_wasInPlay = nowInPlay;
     }
 
+    // Apply pending tactic changes from the tactics panel (every frame, immediate effect).
+    if (!g_PendingTacticsChanges.empty()) {
+      matchPutBufferMutex.lock();
+      for (const auto &tc : g_PendingTacticsChanges) {
+        Team *team = match->GetTeam(tc.teamIdx);
+        if (team && team->GetTeamData())
+          team->GetTeamData()->GetTacticsWritable().userProperties.Set(tc.key.c_str(), tc.value);
+      }
+      g_PendingTacticsChanges.clear();
+      matchPutBufferMutex.unlock();
+    }
+
     // Execute queued substitutions one per frame on dead ball.
     // Rules: max 5 subs total, max 3 distinct windows; multiple subs in same stoppage = 1 window.
     if (!g_QueuedSubQueue.empty() && !match->GetPause() && !match->IsInPlay() && !match->IsGoalScored()) {
