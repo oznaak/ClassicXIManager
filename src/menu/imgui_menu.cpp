@@ -359,6 +359,7 @@ static void ProcessPreCareerPendingAction() {
 // ---- Image texture cache ------------------------------------------------
 
 static std::map<std::string, GLuint> s_ImageCache;
+static std::map<GLuint, std::pair<int,int>> s_ImageDims;
 
 static GLuint TryLoadImage(const std::string &path) {
   printf("[IMG LOAD] trying: %s\n", path.c_str());
@@ -392,6 +393,7 @@ static GLuint TryLoadImage(const std::string &path) {
   glBindTexture(GL_TEXTURE_2D, 0);
   SDL_FreeSurface(rgba);
 
+  s_ImageDims[texID] = { rgba->w, rgba->h };
   printf("[IMG LOAD] success: %s texture=%u size=%dx%d\n",
          path.c_str(), texID, (int)rgba->w, (int)rgba->h);
   return texID;
@@ -464,13 +466,32 @@ static void ClearImageCache() {
   for (auto &kv : s_ImageCache)
     if (kv.second) glDeleteTextures(1, &kv.second);
   s_ImageCache.clear();
+  s_ImageDims.clear();
 }
 
 // ---- Draw image badge (texture or fallback) -----------------------------
 
+static ImVec2 FitInSquare(GLuint tex, float sz) {
+  auto it = s_ImageDims.find(tex);
+  if (it == s_ImageDims.end() || it->second.first <= 0 || it->second.second <= 0)
+    return ImVec2(sz, sz);
+  float iw = (float)it->second.first;
+  float ih = (float)it->second.second;
+  float aspect = iw / ih;
+  return aspect >= 1.0f ? ImVec2(sz, sz / aspect) : ImVec2(sz * aspect, sz);
+}
+
 static void DrawImageBadge(GLuint tex, const std::string &sn, float sz) {
   if (tex) {
-    ImGui::Image((ImTextureID)(intptr_t)tex, ImVec2(sz, sz));
+    ImVec2 fit = FitInSquare(tex, sz);
+    float ox = (sz - fit.x) * 0.5f;
+    float oy = (sz - fit.y) * 0.5f;
+    ImVec2 cur = ImGui::GetCursorScreenPos();
+    ImGui::GetWindowDrawList()->AddImage(
+      (ImTextureID)(intptr_t)tex,
+      ImVec2(cur.x + ox, cur.y + oy),
+      ImVec2(cur.x + ox + fit.x, cur.y + oy + fit.y));
+    ImGui::Dummy(ImVec2(sz, sz));
   } else {
     ImVec2 p = ImGui::GetCursorScreenPos();
     ImDrawList *dl = ImGui::GetWindowDrawList();
@@ -496,7 +517,12 @@ static void DrawImageBadge(GLuint tex, const std::string &sn, float sz) {
 static void DrawImageBadgeAt(ImDrawList *dl, ImVec2 pos, GLuint tex,
                               const std::string &sn, float sz) {
   if (tex) {
-    dl->AddImage((ImTextureID)(intptr_t)tex, pos, ImVec2(pos.x+sz, pos.y+sz));
+    ImVec2 fit = FitInSquare(tex, sz);
+    float ox = (sz - fit.x) * 0.5f;
+    float oy = (sz - fit.y) * 0.5f;
+    dl->AddImage((ImTextureID)(intptr_t)tex,
+                 ImVec2(pos.x + ox, pos.y + oy),
+                 ImVec2(pos.x + ox + fit.x, pos.y + oy + fit.y));
   } else {
     unsigned int hash = 5381;
     for (char c : sn) hash = ((hash << 5) + hash) ^ (unsigned char)c;

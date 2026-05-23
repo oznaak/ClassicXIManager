@@ -109,6 +109,7 @@ static std::string DBCell(DatabaseResult *r, unsigned int row, unsigned int col)
 // ---- Badge texture cache ------------------------------------------------
 
 static std::map<std::string, GLuint> s_BadgeCache;
+static std::map<GLuint, std::pair<int,int>> s_BadgeDims;
 
 GLuint LoadBadgeTex(const std::string &logoRelPath) {
   if (logoRelPath.empty()) return 0;
@@ -138,6 +139,7 @@ GLuint LoadBadgeTex(const std::string &logoRelPath) {
     if (maxAniso > 1.0f)
       glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, maxAniso);
   }
+  s_BadgeDims[texID] = { rgba->w, rgba->h };
   glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, rgba->w, rgba->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba->pixels);
   glGenerateMipmap(GL_TEXTURE_2D);
   glBindTexture(GL_TEXTURE_2D, 0);
@@ -151,6 +153,17 @@ static void ClearBadgeCache() {
   for (auto &kv : s_BadgeCache)
     if (kv.second) glDeleteTextures(1, &kv.second);
   s_BadgeCache.clear();
+  s_BadgeDims.clear();
+}
+
+static ImVec2 BadgeFitInSquare(GLuint tex, float sz) {
+  auto it = s_BadgeDims.find(tex);
+  if (it == s_BadgeDims.end() || it->second.first <= 0 || it->second.second <= 0)
+    return ImVec2(sz, sz);
+  float iw = (float)it->second.first;
+  float ih = (float)it->second.second;
+  float aspect = iw / ih;
+  return aspect >= 1.0f ? ImVec2(sz, sz / aspect) : ImVec2(sz * aspect, sz);
 }
 
 // ---- State management ---------------------------------------------------
@@ -1331,8 +1344,19 @@ static void DrawFallbackBadge(const std::string &sn, float sz) {
 
 static void DrawTeamBadge(const std::string &logoPath, const std::string &sn, float sz) {
   GLuint tex = LoadBadgeTex(logoPath);
-  if (tex) ImGui::Image((ImTextureID)(intptr_t)tex, ImVec2(sz,sz));
-  else     DrawFallbackBadge(sn, sz);
+  if (tex) {
+    ImVec2 fit = BadgeFitInSquare(tex, sz);
+    float ox = (sz - fit.x) * 0.5f;
+    float oy = (sz - fit.y) * 0.5f;
+    ImVec2 cur = ImGui::GetCursorScreenPos();
+    ImGui::GetWindowDrawList()->AddImage(
+      (ImTextureID)(intptr_t)tex,
+      ImVec2(cur.x + ox, cur.y + oy),
+      ImVec2(cur.x + ox + fit.x, cur.y + oy + fit.y));
+    ImGui::Dummy(ImVec2(sz, sz));
+  } else {
+    DrawFallbackBadge(sn, sz);
+  }
 }
 
 static void DrawTeamLabel(const std::string &logoPath, const std::string &sn, float badgeSz = 18.0f) {
@@ -1340,8 +1364,19 @@ static void DrawTeamLabel(const std::string &logoPath, const std::string &sn, fl
   float offY = (lh - badgeSz) * 0.5f;
   if (offY > 0) ImGui::SetCursorPosY(ImGui::GetCursorPosY() + offY);
   GLuint tex = LoadBadgeTex(logoPath);
-  if (tex) ImGui::Image((ImTextureID)(intptr_t)tex, ImVec2(badgeSz,badgeSz));
-  else     DrawFallbackBadge(sn, badgeSz);
+  if (tex) {
+    ImVec2 fit = BadgeFitInSquare(tex, badgeSz);
+    float ox = (badgeSz - fit.x) * 0.5f;
+    float oy = (badgeSz - fit.y) * 0.5f;
+    ImVec2 cur = ImGui::GetCursorScreenPos();
+    ImGui::GetWindowDrawList()->AddImage(
+      (ImTextureID)(intptr_t)tex,
+      ImVec2(cur.x + ox, cur.y + oy),
+      ImVec2(cur.x + ox + fit.x, cur.y + oy + fit.y));
+    ImGui::Dummy(ImVec2(badgeSz, badgeSz));
+  } else {
+    DrawFallbackBadge(sn, badgeSz);
+  }
   if (offY > 0) ImGui::SetCursorPosY(ImGui::GetCursorPosY() - offY);
   ImGui::SameLine(0, 5);
   ImGui::TextUnformatted(sn.c_str());
