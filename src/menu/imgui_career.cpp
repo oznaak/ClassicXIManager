@@ -296,6 +296,25 @@ static float CalcClubQualityFactor(const std::vector<CareerHubState::Player> &sq
   return factor;
 }
 
+// Forward declarations (implementations follow in the player-detail helpers section)
+static void ParsePlayerAttrsFromRow(CareerHubState::Player &p,
+                                    DatabaseResult *r, int row, int col0);
+static std::string DisplayName(const CareerHubState::Player &p);
+static std::string FormatContractExpiry(const std::string &exp);
+static std::vector<std::string> ParseAltPositions(const std::string &raw);
+static void LoadPlayerFullDetail(int playerId, CareerHubState::Player &out);
+
+// Shared column list for all full player SELECT queries (appended after base columns)
+static const char *kPlayerAttrCols =
+  " nickname, alternative_pos, skillMoves, weakFoot,"
+  " nationality, weight, playervalue, jersey_number, international_reputation,"
+  " Acceleration, SprintSpeed, Agility, Balance, Jumping, Strength, Reactions,"
+  " Aggression, Composure, Interceptions, Positioning, Vision,"
+  " BallControl, Crossing, Dribbling, Finishing, FkAccuracy, HeadingAccuracy,"
+  " LongPassing, ShortPassing, DefensiveAwareness, ShotPower, LongShots,"
+  " StandingTackle, SlidingTackle, Volleys, Curve, Penalties,"
+  " GkDiving, GkHandling, GkKicking, GkReflexes, GkPositioning";
+
 void CareerHubState::LoadFromDB(int mgrId, int cId) {
   active = false;
   managerId = mgrId;
@@ -370,7 +389,8 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
     std::stringstream q;
     q << "SELECT id, firstname, lastname, role, age, base_stat,"
       << " formationorder, weekly_wage, contract_expiry, player_potential,"
-      << " foot, stamina, height, reputation"
+      << " foot, stamina, height, reputation,"
+      << kPlayerAttrCols
       << " FROM players WHERE team_id = " << clubId
       << " ORDER BY"
       << "  CASE WHEN formationorder IS NULL OR formationorder < 0 THEN 999"
@@ -400,6 +420,8 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
       p.height           = htStr.empty() ? 0.0f : (float)atof(htStr.c_str());
       std::string repStr = DBCell(r, i, 13);
       p.reputation       = repStr.empty() ? 0.0f : (float)atof(repStr.c_str());
+      p.currentStamina   = 100; // current_stamina not yet in DB
+      ParsePlayerAttrsFromRow(p, r, i, 14);
       players.push_back(p);
     }
     delete r;
@@ -1078,7 +1100,7 @@ static int  s_plTab              = 0;
 // ---- Live player search --------------------------------------------------
 struct SearchPlayerResult {
   int         id            = 0;
-  std::string firstName, lastName, role, age, clubName, clubShortName, clubLogoPath;
+  std::string firstName, lastName, nickname, role, age, clubName, clubShortName, clubLogoPath;
   float       baseStat      = 0.0f;
   float       height        = 0.0f;
   float       reputation    = 0.0f;
@@ -2925,10 +2947,10 @@ static void DrawSquadSnapshotCard(ImVec2 sz) {
         ImGui::Dummy(ImVec2(kFaceH, kFaceH));
       }
 
-      // Name
+      // Name (nickname if available)
       ImGui::TableSetColumnIndex(2);
       PushMgrFont(g_ManagerFontSmall);
-      std::string full = p->firstName + " " + p->lastName;
+      std::string full = DisplayName(*p);
       ImGui::PushStyleColor(ImGuiCol_Text, isXI ? kTextPri : kTextSec);
       ImGui::TextUnformatted(full.c_str());
       ImGui::PopStyleColor();
@@ -3372,21 +3394,15 @@ static void EnsureFilterCache() {
 
 // ---- Player detail helpers -----------------------------------------------
 
-struct StatDef { const char *label; int idx; };
-
-// Derive a stat (1-20) from player ID + stat index + baseStat (0-1)
-static int DerivedStat(int playerId, int statIdx, float baseStat) {
-  int base = (int)(baseStat * 13.0f + 4.0f);           // 4-17
-  int var  = ((playerId * 7919 + statIdx * 6271) % 7) - 3; // -3..+3
-  int val  = base + var;
-  return val < 1 ? 1 : (val > 20 ? 20 : val);
-}
+// val = real DB attribute (0-99); hiddenIdx = unique index for scouting fog hash
+struct StatDef { const char *label; int val; int hiddenIdx; };
 
 static ImU32 StatValueColor(int v) {
-  if (v >= 16) return IM_COL32( 80, 215, 105, 255); // green  — excellent
-  if (v >= 13) return IM_COL32(155, 215,  80, 255); // lime   — good
-  if (v >= 10) return IM_COL32(215, 195,  55, 255); // gold   — average
-  if (v >= 7)  return IM_COL32(215, 130,  45, 255); // orange — below avg
+  // v is 0-99 scale
+  if (v >= 80) return IM_COL32( 80, 215, 105, 255); // green  — excellent
+  if (v >= 65) return IM_COL32(155, 215,  80, 255); // lime   — good
+  if (v >= 50) return IM_COL32(215, 195,  55, 255); // gold   — average
+  if (v >= 35) return IM_COL32(215, 130,  45, 255); // orange — below avg
   return             IM_COL32(210,  60,  55, 255); // red    — poor
 }
 
@@ -3398,6 +3414,162 @@ static ImU32 QualityColor(float baseStat) {
   if (baseStat >= 0.50f) return IM_COL32(215, 195,  55, 255);
   if (baseStat >= 0.35f) return IM_COL32(215, 130,  45, 255);
   return                        IM_COL32(210,  60,  55, 255);
+}
+
+// Returns the display name: nickname if available, else firstName + " " + lastName
+static std::string DisplayName(const CareerHubState::Player &p) {
+  if (!p.nickname.empty()) return p.nickname;
+  if (p.firstName.empty()) return p.lastName;
+  if (p.lastName.empty())  return p.firstName;
+  return p.firstName + " " + p.lastName;
+}
+
+// Format contract_expiry from DB (handles DD/MM/YYYY or YYYY-MM-DD) → "Jul 2028"
+static std::string FormatContractExpiry(const std::string &exp) {
+  if (exp.size() < 8) return exp.empty() ? "-" : exp;
+  static const char *kMo[] = {"","Jan","Feb","Mar","Apr","May","Jun",
+                               "Jul","Aug","Sep","Oct","Nov","Dec"};
+  int dy = 0, mo = 0, yr = 0;
+  if (exp.size() >= 10 && exp[2] == '/') {
+    // DD/MM/YYYY
+    dy = atoi(exp.substr(0,2).c_str());
+    mo = atoi(exp.substr(3,2).c_str());
+    yr = atoi(exp.substr(6,4).c_str());
+  } else if (exp.size() >= 10 && exp[4] == '-') {
+    // YYYY-MM-DD
+    yr = atoi(exp.substr(0,4).c_str());
+    mo = atoi(exp.substr(5,2).c_str());
+    dy = atoi(exp.substr(8,2).c_str());
+  } else {
+    return exp;
+  }
+  (void)dy;
+  char buf[16];
+  if (mo >= 1 && mo <= 12)
+    snprintf(buf, sizeof(buf), "%s %d", kMo[mo], yr);
+  else
+    snprintf(buf, sizeof(buf), "%d", yr);
+  return buf;
+}
+
+// Parse alternative_pos from DB (handles JSON array ["RM","LW"] or comma-separated "RB,CM")
+static std::vector<std::string> ParseAltPositions(const std::string &raw) {
+  std::vector<std::string> result;
+  if (raw.empty() || raw == "[]" || raw == "null" || raw == "NULL") return result;
+  if (raw[0] == '[') {
+    // JSON array: extract quoted tokens
+    bool inQ = false;
+    std::string tok;
+    for (char c : raw) {
+      if (c == '"') {
+        inQ = !inQ;
+        if (!inQ && !tok.empty()) { result.push_back(tok); tok.clear(); }
+      } else if (inQ) {
+        tok += c;
+      }
+    }
+  } else {
+    // Comma-separated
+    std::stringstream ss(raw);
+    std::string tok;
+    while (std::getline(ss, tok, ',')) {
+      while (!tok.empty() && isspace((unsigned char)tok.front())) tok.erase(tok.begin());
+      while (!tok.empty() && isspace((unsigned char)tok.back())) tok.pop_back();
+      if (!tok.empty()) result.push_back(tok);
+    }
+  }
+  return result;
+}
+
+// Parse all player attribute columns into a Player struct from a DB row.
+// col0 is the offset of the first new column (nickname) in the row.
+static void ParsePlayerAttrsFromRow(CareerHubState::Player &p,
+                                    DatabaseResult *r, int row, int col0) {
+  // col0+0: nickname
+  p.nickname        = DBCell(r, row, col0+0);
+  // col0+1: alternative_pos
+  p.alternativePos  = DBCell(r, row, col0+1);
+  // col0+2: skillMoves
+  { std::string s = DBCell(r, row, col0+2); p.skillMoves = s.empty() ? 0 : atoi(s.c_str()); }
+  // col0+3: weakFoot
+  { std::string s = DBCell(r, row, col0+3); p.weakFoot = s.empty() ? 0 : atoi(s.c_str()); }
+  // col0+4: nationality
+  p.nationality     = DBCell(r, row, col0+4);
+  // col0+5: weight
+  { std::string s = DBCell(r, row, col0+5); p.weight = s.empty() ? 0.0f : (float)atof(s.c_str()); }
+  // col0+6: playervalue
+  { std::string s = DBCell(r, row, col0+6); p.playerValue = s.empty() ? 0 : atoi(s.c_str()); }
+  // col0+7: jersey_number
+  { std::string s = DBCell(r, row, col0+7); p.jerseyNumber = s.empty() ? 0 : atoi(s.c_str()); }
+  // col0+8: international_reputation
+  { std::string s = DBCell(r, row, col0+8); p.intlReputation = s.empty() ? 0 : atoi(s.c_str()); }
+  // Outfield attributes col0+9 .. col0+36
+  auto gi = [&](int off) -> int {
+    std::string s = DBCell(r, row, col0+off); return s.empty() ? 0 : atoi(s.c_str());
+  };
+  p.atAcceleration      = gi(9);
+  p.atSprintSpeed       = gi(10);
+  p.atAgility           = gi(11);
+  p.atBalance           = gi(12);
+  p.atJumping           = gi(13);
+  p.atStrength          = gi(14);
+  p.atReactions         = gi(15);
+  p.atAggression        = gi(16);
+  p.atComposure         = gi(17);
+  p.atInterceptions     = gi(18);
+  p.atPositioning       = gi(19);
+  p.atVision            = gi(20);
+  p.atBallControl       = gi(21);
+  p.atCrossing          = gi(22);
+  p.atDribbling         = gi(23);
+  p.atFinishing         = gi(24);
+  p.atFkAccuracy        = gi(25);
+  p.atHeadingAccuracy   = gi(26);
+  p.atLongPassing       = gi(27);
+  p.atShortPassing      = gi(28);
+  p.atDefensiveAwareness= gi(29);
+  p.atShotPower         = gi(30);
+  p.atLongShots         = gi(31);
+  p.atStandingTackle    = gi(32);
+  p.atSlidingTackle     = gi(33);
+  p.atVolleys           = gi(34);
+  p.atCurve             = gi(35);
+  p.atPenalties         = gi(36);
+  // GK attributes col0+37..col0+41
+  p.atGkDiving          = gi(37);
+  p.atGkHandling        = gi(38);
+  p.atGkKicking         = gi(39);
+  p.atGkReflexes        = gi(40);
+  p.atGkPositioning     = gi(41);
+}
+
+// Load a full player detail from DB by id into a Player struct
+static void LoadPlayerFullDetail(int playerId, CareerHubState::Player &out) {
+  std::stringstream q;
+  q << "SELECT id, firstname, lastname, role, age, base_stat,"
+    << " formationorder, weekly_wage, contract_expiry, player_potential,"
+    << " foot, stamina, height, reputation,"
+    << kPlayerAttrCols
+    << " FROM players WHERE id=" << playerId << " LIMIT 1;";
+  DatabaseResult *r = GetDB()->Query(q.str());
+  if (!r || r->data.empty()) { if (r) delete r; return; }
+  out.id             = atoi(DBCell(r,0,0).c_str());
+  out.firstName      = DBCell(r,0,1);
+  out.lastName       = DBCell(r,0,2);
+  out.role           = DBCell(r,0,3);
+  out.age            = DBCell(r,0,4);
+  { std::string s = DBCell(r,0,5); out.baseStat = s.empty() ? 0.0f : (float)atof(s.c_str()); }
+  { std::string s = DBCell(r,0,6); out.formationOrder = s.empty() ? -1 : atoi(s.c_str()); }
+  { std::string s = DBCell(r,0,7); out.weeklywage = s.empty() ? 0 : atoi(s.c_str()); }
+  out.contractExpiry = DBCell(r,0,8);
+  { std::string s = DBCell(r,0,9); out.potential = s.empty() ? 0 : atoi(s.c_str()); }
+  out.foot           = DBCell(r,0,10);
+  { std::string s = DBCell(r,0,11); out.stamina = s.empty() ? 0 : atoi(s.c_str()); }
+  { std::string s = DBCell(r,0,12); out.height = s.empty() ? 0.0f : (float)atof(s.c_str()); }
+  { std::string s = DBCell(r,0,13); out.reputation = s.empty() ? 0.0f : (float)atof(s.c_str()); }
+  out.currentStamina = 100; // current_stamina column not yet in DB
+  ParsePlayerAttrsFromRow(out, r, 0, 14);
+  delete r;
 }
 
 static void RunPlayerSearch(const char *raw) {
@@ -3419,10 +3591,12 @@ static void RunPlayerSearch(const char *raw) {
     << " p.weekly_wage, p.contract_expiry, p.formationorder,"
     << " COALESCE(t.name,'') as club_name,"
     << " COALESCE(t.logo_url,'') as club_logo,"
-    << " COALESCE(t.shortname,'') as club_short"
+    << " COALESCE(t.shortname,'') as club_short,"
+    << " COALESCE(p.nickname,'') as nickname"
     << " FROM players p LEFT JOIN teams t ON p.team_id = t.id"
-    << " WHERE LOWER(p.firstname) LIKE '%" << lo << "%'"
-    << " OR LOWER(p.lastname)    LIKE '%" << lo << "%'"
+    << " WHERE LOWER(p.firstname)  LIKE '%" << lo << "%'"
+    << " OR LOWER(p.lastname)      LIKE '%" << lo << "%'"
+    << " OR LOWER(COALESCE(p.nickname,'')) LIKE '%" << lo << "%'"
     << " ORDER BY p.base_stat DESC LIMIT 12;";
 
   DatabaseResult *r = GetDB()->Query(q.str());
@@ -3452,6 +3626,7 @@ static void RunPlayerSearch(const char *raw) {
     sr.clubName       = DBCell(r, i, 14);
     sr.clubLogoPath   = DBCell(r, i, 15);
     sr.clubShortName  = DBCell(r, i, 16);
+    sr.nickname       = DBCell(r, i, 17);
     s_searchResults.push_back(sr);
   }
   delete r;
@@ -3491,14 +3666,14 @@ static bool IsHiddenStat(int playerId, int statIdx) {
 // ownPlayer=true → show all stats; false → apply scouting fog of war.
 static void DrawStatSection(const char *title, ImU32 titleColor,
                             const StatDef *stats, int count,
-                            int playerId, float baseStat, bool ownPlayer = true) {
+                            int playerId, bool ownPlayer = true) {
   ImDrawList *dl = ImGui::GetWindowDrawList();
   float secW     = ImGui::GetContentRegionAvail().x;
-  const float kFs   = 15.0f;  // readable stat font size
-  const float kTFs  = 13.0f;  // section title font size
-  const float kRowH = 26.0f;  // row height — tall enough to read comfortably
+  const float kFs   = 15.0f;
+  const float kTFs  = 13.0f;
+  const float kRowH = 26.0f;
 
-  // Section title: colored label + thin separator line
+  // Section title
   ImVec2 tp = ImGui::GetCursorScreenPos();
   PushMgrFont(g_ManagerFontSmall);
   dl->AddText(g_ManagerFontSmall, kTFs,
@@ -3511,21 +3686,19 @@ static void DrawStatSection(const char *title, ImU32 titleColor,
 
   // Stat rows
   for (int i = 0; i < count; i++) {
-    bool  hidden = !ownPlayer && IsHiddenStat(playerId, stats[i].idx);
-    int   val    = DerivedStat(playerId, stats[i].idx, baseStat);
+    bool  hidden = !ownPlayer && IsHiddenStat(playerId, stats[i].hiddenIdx);
+    int   val    = stats[i].val; // real 0-99 attribute value
     ImU32 valCol = hidden ? IM_COL32(60, 68, 90, 180) : StatValueColor(val);
     ImVec2 rp    = ImGui::GetCursorScreenPos();
 
-    // Alternating row tint
     ImU32 rowBg = (i % 2 == 0) ? IM_COL32(15, 22, 46, 130) : IM_COL32(10, 16, 34, 60);
     dl->AddRectFilled(ImVec2(rp.x, rp.y), ImVec2(rp.x + secW, rp.y + kRowH), rowBg);
 
-    // Accent left edge on excellent stats (only for known stats)
-    if (!hidden && val >= 16)
+    // Colored accent edge always visible — color matches stat quality
+    if (!hidden)
       dl->AddRectFilled(ImVec2(rp.x, rp.y), ImVec2(rp.x + 3.0f, rp.y + kRowH),
-                        IM_COL32(80, 215, 105, 200));
+                        valCol);
 
-    // Stat name — dimmer when hidden
     PushMgrFont(g_ManagerFontSmall);
     ImU32 labelCol = hidden ? IM_COL32(110, 118, 145, 160) : IM_COL32(192, 202, 226, 240);
     dl->AddText(g_ManagerFontSmall, kFs,
@@ -3533,7 +3706,7 @@ static void DrawStatSection(const char *title, ImU32 titleColor,
                 labelCol, stats[i].label);
     PopMgrFont(g_ManagerFontSmall);
 
-    // Fill bar
+    // Fill bar (0-99 scale)
     float bX0 = rp.x + secW * 0.60f;
     float bX1 = rp.x + secW - 24.0f;
     if (bX1 > bX0 + 4.0f) {
@@ -3542,13 +3715,12 @@ static void DrawStatSection(const char *title, ImU32 titleColor,
       dl->AddRectFilled(ImVec2(bX0, bY), ImVec2(bX1, bY + bH),
                         IM_COL32(22, 30, 58, 210), 3.0f);
       if (!hidden) {
-        const float fill = (bX1 - bX0) * (val / 20.0f);
+        const float fill = (bX1 - bX0) * (val / 99.0f);
         int vr = valCol & 0xFF, vg = (valCol >> 8) & 0xFF, vb = (valCol >> 16) & 0xFF;
         if (fill > 0.5f)
           dl->AddRectFilled(ImVec2(bX0, bY), ImVec2(bX0 + fill, bY + bH),
                             IM_COL32(vr, vg, vb, 175), 3.0f);
       } else {
-        // Fog of war: gray hatched fill to signal "unknown"
         dl->AddRectFilled(ImVec2(bX0, bY), ImVec2(bX1, bY + bH),
                           IM_COL32(35, 42, 65, 140), 3.0f);
       }
@@ -3605,6 +3777,7 @@ static void DrawPlayerDetailPage(float w, float h) {
     s_playerDetailLastId = s_playerDetailId;
   }
 
+  std::string dispName = DisplayName(pl);
   std::string fullName = pl.firstName.empty() ? pl.lastName
                        : (pl.lastName.empty() ? pl.firstName
                        : pl.firstName + " " + pl.lastName);
@@ -3619,14 +3792,14 @@ static void DrawPlayerDetailPage(float w, float h) {
   int accB = (int)(kAccent.z * 255);
 
   // ===========================================================
-  // Header card
+  // Header card (taller to fit more info)
   // ===========================================================
-  const float kHdrH = 130.0f;
+  const float kHdrH = 150.0f;
   ImVec2 hdrOrg = ImGui::GetCursorScreenPos();
   BeginModernCard("##pldhdr", ImVec2(usW, kHdrH));
   ImDrawList *hdl = ImGui::GetWindowDrawList();
 
-  // Face placeholder box
+  // Face placeholder box (jersey number inside)
   const float kFaceS = 90.0f;
   float fx = hdrOrg.x + 16.0f;
   float fy = hdrOrg.y + (kHdrH - kFaceS) * 0.5f;
@@ -3634,8 +3807,20 @@ static void DrawPlayerDetailPage(float w, float h) {
                      IM_COL32(22, 32, 56, 255), 12.0f);
   hdl->AddRect(ImVec2(fx, fy), ImVec2(fx + kFaceS, fy + kFaceS),
                IM_COL32(accR, accG, accB, 80), 12.0f, 0, 1.5f);
-  char init[2] = { pl.firstName.empty() ? (pl.lastName.empty() ? '?' : pl.lastName[0])
-                                        : pl.firstName[0], '\0' };
+  // Jersey number badge
+  if (pl.jerseyNumber > 0) {
+    char jnBuf[8]; snprintf(jnBuf, sizeof(jnBuf), "#%d", pl.jerseyNumber);
+    PushMgrFont(g_ManagerFontSmall);
+    ImVec2 jnSz = g_ManagerFontSmall
+        ? g_ManagerFontSmall->CalcTextSizeA(13.0f, FLT_MAX, 0, jnBuf)
+        : ImGui::CalcTextSize(jnBuf);
+    hdl->AddText(g_ManagerFontSmall, 13.0f,
+                 ImVec2(fx + (kFaceS - jnSz.x) * 0.5f, fy + 6.0f),
+                 IM_COL32(accR, accG, accB, 200), jnBuf);
+    PopMgrFont(g_ManagerFontSmall);
+  }
+  // Initial letter
+  char init[2] = { dispName.empty() ? '?' : (unsigned char)dispName[0], '\0' };
   PushMgrFont(g_ManagerFontTitle);
   ImVec2 initSz = g_ManagerFontTitle
       ? g_ManagerFontTitle->CalcTextSizeA(28.0f, FLT_MAX, 0, init)
@@ -3647,47 +3832,80 @@ static void DrawPlayerDetailPage(float w, float h) {
 
   // Name + info block
   float tx = fx + kFaceS + 18.0f;
-  float ty = hdrOrg.y + 14.0f;
+  float ty = hdrOrg.y + 10.0f;
 
-  // Full name (title font, natural size)
+  // Nickname / display name (title font)
   PushMgrFont(g_ManagerFontTitle);
   float titleLineH = g_ManagerFontTitle ? g_ManagerFontTitle->FontSize : 20.0f;
-  hdl->AddText(g_ManagerFontTitle, 0.0f,
-               ImVec2(tx, ty), IM_COL32(232, 238, 252, 255), fullName.c_str());
+  hdl->AddText(g_ManagerFontTitle, 31.0f,
+               ImVec2(tx, ty), IM_COL32(232, 238, 252, 255), dispName.c_str());
   PopMgrFont(g_ManagerFontTitle);
 
-  // Age | Nationality row
-  float row2y = ty + titleLineH + 5.0f;
-  {
-    char ageLine[64];
-    snprintf(ageLine, sizeof(ageLine), "Age: %s  |  Nationality: -",
-             pl.age.empty() ? "-" : pl.age.c_str());
+  // Full name (smaller, dimmer) — only if nickname differs from full name
+  float row2y = ty + titleLineH + 3.0f;
+  if (!pl.nickname.empty() && fullName != dispName && !fullName.empty()) {
     PushMgrFont(g_ManagerFontSmall);
-    hdl->AddText(g_ManagerFontSmall, 15.0f, ImVec2(tx, row2y),
+    hdl->AddText(g_ManagerFontSmall, 13.0f, ImVec2(tx, row2y),
+                 IM_COL32(120, 135, 170, 180), fullName.c_str());
+    PopMgrFont(g_ManagerFontSmall);
+    row2y += 17.0f;
+  }
+
+  // Age | Nationality row
+  {
+    char ageLine[96];
+    const char *natStr = pl.nationality.empty() ? "-" : pl.nationality.c_str();
+    snprintf(ageLine, sizeof(ageLine), "Age: %s  |  %s",
+             pl.age.empty() ? "-" : pl.age.c_str(), natStr);
+    PushMgrFont(g_ManagerFontSmall);
+    hdl->AddText(g_ManagerFontSmall, 18.0f, ImVec2(tx, row2y),
                  IM_COL32(148, 162, 196, 215), ageLine);
     PopMgrFont(g_ManagerFontSmall);
   }
 
-  // Position badge
-  float row3y = row2y + 22.0f;
-  if (!pl.role.empty()) {
-    PushMgrFont(g_ManagerFontSmall);
-    ImVec2 rSz = g_ManagerFontSmall
-        ? g_ManagerFontSmall->CalcTextSizeA(15.0f, FLT_MAX, 0, pl.role.c_str())
-        : ImGui::CalcTextSize(pl.role.c_str());
-    float bW = rSz.x + 16.0f, bH = 22.0f;
-    hdl->AddRectFilled(ImVec2(tx, row3y), ImVec2(tx + bW, row3y + bH),
-                       IM_COL32(accR, accG, accB, 55), 5.0f);
-    hdl->AddRect(ImVec2(tx, row3y), ImVec2(tx + bW, row3y + bH),
-                 IM_COL32(accR, accG, accB, 150), 5.0f, 0, 1.2f);
-    hdl->AddText(g_ManagerFontSmall, 15.0f,
-                 ImVec2(tx + 8.0f, row3y + (bH - 15.0f) * 0.5f),
-                 IM_COL32(222, 230, 248, 235), pl.role.c_str());
-    PopMgrFont(g_ManagerFontSmall);
+  // Position badge + alt positions
+  float row3y = row2y + 20.0f;
+  {
+    float badgeX = tx;
+    // Main position
+    if (!pl.role.empty()) {
+      PushMgrFont(g_ManagerFontSmall);
+      ImVec2 rSz = g_ManagerFontSmall
+          ? g_ManagerFontSmall->CalcTextSizeA(16.0f, FLT_MAX, 0, pl.role.c_str())
+          : ImGui::CalcTextSize(pl.role.c_str());
+      float bW = rSz.x + 18.0f, bH = 26.0f;
+      hdl->AddRectFilled(ImVec2(badgeX, row3y), ImVec2(badgeX + bW, row3y + bH),
+                         IM_COL32(accR, accG, accB, 70), 4.0f);
+      hdl->AddRect(ImVec2(badgeX, row3y), ImVec2(badgeX + bW, row3y + bH),
+                   IM_COL32(accR, accG, accB, 180), 4.0f, 0, 1.2f);
+      hdl->AddText(g_ManagerFontSmall, 16.0f,
+                   ImVec2(badgeX + 9.0f, row3y + (bH - 16.0f) * 0.5f),
+                   IM_COL32(222, 230, 248, 235), pl.role.c_str());
+      PopMgrFont(g_ManagerFontSmall);
+      badgeX += bW + 5.0f;
+    }
+    // Alternative positions
+    auto altPos = ParseAltPositions(pl.alternativePos);
+    for (const auto &ap : altPos) {
+      PushMgrFont(g_ManagerFontSmall);
+      ImVec2 aSz = g_ManagerFontSmall
+          ? g_ManagerFontSmall->CalcTextSizeA(15.0f, FLT_MAX, 0, ap.c_str())
+          : ImGui::CalcTextSize(ap.c_str());
+      float bW = aSz.x + 16.0f, bH = 26.0f;
+      if (badgeX + bW > hdrOrg.x + usW * 0.46f) { PopMgrFont(g_ManagerFontSmall); break; }
+      hdl->AddRectFilled(ImVec2(badgeX, row3y), ImVec2(badgeX + bW, row3y + bH),
+                         IM_COL32(45, 58, 95, 120), 4.0f);
+      hdl->AddRect(ImVec2(badgeX, row3y), ImVec2(badgeX + bW, row3y + bH),
+                   IM_COL32(80, 100, 150, 130), 4.0f, 0, 0.8f);
+      hdl->AddText(g_ManagerFontSmall, 15.0f,
+                   ImVec2(badgeX + 8.0f, row3y + (bH - 15.0f) * 0.5f),
+                   IM_COL32(160, 175, 210, 210), ap.c_str());
+      PopMgrFont(g_ManagerFontSmall);
+      badgeX += bW + 4.0f;
+    }
   }
 
   // Right section: club badge + info
-  // Use the player's actual club (override if from search, own club if squad player)
   const std::string &dispClubLogo  = ownPlayer ? g_CareerHub.club.logoPath  : s_detailClubLogo;
   const std::string &dispClubShort = ownPlayer ? g_CareerHub.club.shortName : s_detailClubShortName;
   const std::string &dispClubName  = ownPlayer ? g_CareerHub.club.name      : s_detailClubName;
@@ -3696,46 +3914,57 @@ static void DrawPlayerDetailPage(float w, float h) {
   ImGui::SetCursorScreenPos(ImVec2(rx, hdrOrg.y + (kHdrH - 60.0f) * 0.5f));
   DrawTeamBadge(dispClubLogo, dispClubShort, 60.0f);
 
-  float infoX = rx + 70.0f, infoY = hdrOrg.y + 14.0f;
+  float infoX = rx + 70.0f, infoY = hdrOrg.y + 10.0f;
   PushMgrFont(g_ManagerFontSmall);
-  // Club name — slightly larger/brighter
-  hdl->AddText(g_ManagerFontSmall, 18.0f, ImVec2(infoX, infoY),
+  hdl->AddText(g_ManagerFontSmall, 17.0f, ImVec2(infoX, infoY),
                IM_COL32(205, 215, 238, 240), dispClubName.c_str());
   {
     char wb[48];
     if (pl.weeklywage >= 1000)
-      snprintf(wb, sizeof(wb), "Wage: %d,%03d p/w", pl.weeklywage/1000, pl.weeklywage%1000);
+      snprintf(wb, sizeof(wb), "Wage: \xe2\x82\xac%d,%03d p/w", pl.weeklywage/1000, pl.weeklywage%1000);
     else if (pl.weeklywage > 0)
-      snprintf(wb, sizeof(wb), "Wage: %d p/w", pl.weeklywage);
+      snprintf(wb, sizeof(wb), "Wage: \xe2\x82\xac%d p/w", pl.weeklywage);
     else
       snprintf(wb, sizeof(wb), "Wage: -");
-    hdl->AddText(g_ManagerFontSmall, 16.0f, ImVec2(infoX, infoY + 26.0f),
+    hdl->AddText(g_ManagerFontSmall, 20.0f, ImVec2(infoX, infoY + 24.0f),
                  IM_COL32(155, 168, 202, 220), wb);
   }
   {
-    std::string exp = pl.contractExpiry;
-    if (exp.size() >= 10) {
-      char eb[16];
-      snprintf(eb, sizeof(eb), "%d/%d/%d",
-               atoi(exp.substr(8,2).c_str()),
-               atoi(exp.substr(5,2).c_str()),
-               atoi(exp.substr(0,4).c_str()));
-      exp = eb;
-    }
+    std::string expFmt = FormatContractExpiry(pl.contractExpiry);
     char cb[48];
-    snprintf(cb, sizeof(cb), "Contract: %s", exp.empty() ? "-" : exp.c_str());
-    hdl->AddText(g_ManagerFontSmall, 16.0f, ImVec2(infoX, infoY + 52.0f),
+    snprintf(cb, sizeof(cb), "Contract: %s", expFmt.c_str());
+    hdl->AddText(g_ManagerFontSmall, 20.0f, ImVec2(infoX, infoY + 48.0f),
                  IM_COL32(155, 168, 202, 220), cb);
+  }
+  // Estimated player value
+  if (pl.playerValue > 0) {
+    char vb[40];
+    if (pl.playerValue >= 1000000)
+      snprintf(vb, sizeof(vb), "Est. Value: \xe2\x82\xac%.1fM", pl.playerValue / 1000000.0f);
+    else if (pl.playerValue >= 1000)
+      snprintf(vb, sizeof(vb), "Est. Value: \xe2\x82\xac%.0fK", pl.playerValue / 1000.0f);
+    else
+      snprintf(vb, sizeof(vb), "Est. Value: \xe2\x82\xac%d", pl.playerValue);
+    hdl->AddText(g_ManagerFontSmall, 20.0f, ImVec2(infoX, infoY + 72.0f),
+                 IM_COL32(155, 168, 202, 220), vb);
   }
   PopMgrFont(g_ManagerFontSmall);
 
-  // CA / PA stars (far right)
+  // CA / PA stars + jersey number (far right)
   float starX = hdrOrg.x + usW - 175.0f;
   PushMgrFont(g_ManagerFontSmall);
   hdl->AddText(g_ManagerFontSmall, 16.0f, ImVec2(starX, hdrOrg.y + 20.0f),
                IM_COL32(138, 152, 185, 210), "Ability");
   hdl->AddText(g_ManagerFontSmall, 16.0f, ImVec2(starX, hdrOrg.y + 52.0f),
                IM_COL32(138, 152, 185, 210), "Potential");
+  // Jersey number
+  if (pl.jerseyNumber > 0) {
+    char jnHdr[16]; snprintf(jnHdr, sizeof(jnHdr), "#%d", pl.jerseyNumber);
+    hdl->AddText(g_ManagerFontSmall, 16.0f, ImVec2(starX, hdrOrg.y + 84.0f),
+                 IM_COL32(138, 152, 185, 210), "Jersey");
+    hdl->AddText(g_ManagerFontSmall, 18.0f, ImVec2(starX + 80.0f, hdrOrg.y + 83.0f),
+                 IM_COL32(accR, accG, accB, 220), jnHdr);
+  }
   PopMgrFont(g_ManagerFontSmall);
   ImGui::SetCursorScreenPos(ImVec2(starX + 80.0f, hdrOrg.y + 17.0f));
   DrawStars(pl.baseStat, 1.0f, C32(kGold), 1.5f);
@@ -3867,27 +4096,56 @@ static void DrawPlayerDetailPage(float w, float h) {
     return;
   }
 
-  // Stat definitions
-  static const StatDef kTechStats[] = {
-    {"Crossing",      0}, {"Dribbling",      1}, {"Finishing",    2}, {"First Touch",  3},
-    {"Heading",       4}, {"Long Shots",     5}, {"Marking",      6}, {"Passing",      7},
-    {"Tackling",      8}, {"Technique",      9},
+  // Determine if this player is a goalkeeper
+  bool isGK = (pl.role == "GK");
+
+  // Build real attribute arrays from DB values
+  // hiddenIdx values: unique per stat across all sections for scouting fog
+  const StatDef kAttackStats[] = {
+    {"Finishing",          pl.atFinishing,          0},
+    {"Shot Power",         pl.atShotPower,           1},
+    {"Long Shots",         pl.atLongShots,           2},
+    {"Volleys",            pl.atVolleys,             3},
+    {"Penalties",          pl.atPenalties,           4},
+    {"Curve",              pl.atCurve,               5},
+    {"FK Accuracy",        pl.atFkAccuracy,          6},
+    {"Heading Accuracy",   pl.atHeadingAccuracy,     7},
   };
-  static const StatDef kSetStats[] = {
-    {"Corners",      10}, {"Free Kick",     11}, {"Long Throws", 12}, {"Penalty",     13},
+  const StatDef kTechStats[] = {
+    {"Ball Control",       pl.atBallControl,         8},
+    {"Dribbling",          pl.atDribbling,           9},
+    {"Crossing",           pl.atCrossing,           10},
+    {"Short Passing",      pl.atShortPassing,       11},
+    {"Long Passing",       pl.atLongPassing,        12},
+    {"Vision",             pl.atVision,             13},
   };
-  static const StatDef kMentStats[] = {
-    {"Aggression",   14}, {"Anticipation",  15}, {"Bravery",     16}, {"Composure",   17},
-    {"Concentration",18}, {"Decisions",     19}, {"Determination",20},{"Flair",       21},
-    {"Leadership",   22}, {"Off The Ball",  23}, {"Positioning", 24}, {"Teamwork",    25},
-    {"Vision",       26}, {"Work Rate",     27},
+  const StatDef kDefStats[] = {
+    {"Def. Awareness",     pl.atDefensiveAwareness, 14},
+    {"Standing Tackle",    pl.atStandingTackle,     15},
+    {"Sliding Tackle",     pl.atSlidingTackle,      16},
+    {"Interceptions",      pl.atInterceptions,      17},
   };
-  static const StatDef kPhysStats[] = {
-    {"Acceleration", 28}, {"Agility",       29}, {"Balance",     30}, {"Jumping Reach",31},
-    {"Natural Fitness",32},{"Pace",         33}, {"Stamina",     34}, {"Strength",    35},
+  const StatDef kPhysStats[] = {
+    {"Acceleration",       pl.atAcceleration,       18},
+    {"Sprint Speed",       pl.atSprintSpeed,        19},
+    {"Agility",            pl.atAgility,            20},
+    {"Balance",            pl.atBalance,            21},
+    {"Jumping",            pl.atJumping,            22},
+    {"Strength",           pl.atStrength,           23},
+    {"Reactions",          pl.atReactions,          24},
+    {"Stamina",            pl.stamina,              25},
   };
-  static const StatDef kGKStats[] = {
-    {"GK Rating",    36},
+  const StatDef kMentStats[] = {
+    {"Aggression",         pl.atAggression,         26},
+    {"Composure",          pl.atComposure,          27},
+    {"Positioning",        pl.atPositioning,        28},
+  };
+  const StatDef kGKStats[] = {
+    {"GK Diving",          pl.atGkDiving,           29},
+    {"GK Handling",        pl.atGkHandling,         30},
+    {"GK Kicking",         pl.atGkKicking,          31},
+    {"GK Reflexes",        pl.atGkReflexes,         32},
+    {"GK Positioning",     pl.atGkPositioning,      33},
   };
 
   float availW = ImGui::GetContentRegionAvail().x;
@@ -3899,31 +4157,34 @@ static void DrawPlayerDetailPage(float w, float h) {
   const float c2W = availW * 0.22f;
   const float c3W = availW - c0W - c1W - c2W - 8.0f;
 
-  // Column 0: Technical + Set Pieces
+  // Column 0: Attacking + Technical
   ImGui::BeginChild("##pdc0", ImVec2(c0W, colH), false,
                     ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-  DrawStatSection("Technical",  IM_COL32(130,185,130,230),
-                  kTechStats,  10, pl.id, pl.baseStat, ownPlayer);
-  DrawStatSection("Set Pieces", IM_COL32(130,185,130,160),
-                  kSetStats,    4, pl.id, pl.baseStat, ownPlayer);
+  DrawStatSection("Attacking", IM_COL32(220,100,100,230),
+                  kAttackStats, 8, pl.id, ownPlayer);
+  DrawStatSection("Technical", IM_COL32(130,185,130,230),
+                  kTechStats,  6, pl.id, ownPlayer);
   ImGui::EndChild();
   ImGui::SameLine(0, 2.0f);
 
-  // Column 1: Mental
+  // Column 1: Defending + Mental
   ImGui::BeginChild("##pdc1", ImVec2(c1W, colH), false,
                     ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+  DrawStatSection("Defending", IM_COL32(80,140,220,230),
+                  kDefStats, 4, pl.id, ownPlayer);
   DrawStatSection("Mental", IM_COL32(130,150,220,230),
-                  kMentStats, 14, pl.id, pl.baseStat, ownPlayer);
+                  kMentStats, 3, pl.id, ownPlayer);
   ImGui::EndChild();
   ImGui::SameLine(0, 2.0f);
 
-  // Column 2: Physical + Goalkeeping
+  // Column 2: Physical + Goalkeeping (GK stats only shown for GKs)
   ImGui::BeginChild("##pdc2", ImVec2(c2W, colH), false,
                     ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-  DrawStatSection("Physical",    IM_COL32(220,140,100,230),
-                  kPhysStats,  8, pl.id, pl.baseStat, ownPlayer);
-  DrawStatSection("Goalkeeping", IM_COL32(220,140,100,160),
-                  kGKStats,    1, pl.id, pl.baseStat, ownPlayer);
+  DrawStatSection("Physical", IM_COL32(220,140,100,230),
+                  kPhysStats, 8, pl.id, ownPlayer);
+  if (isGK)
+    DrawStatSection("Goalkeeping", IM_COL32(60, 220, 200, 255),
+                    kGKStats, 5, pl.id, ownPlayer);
   ImGui::EndChild();
   ImGui::SameLine(0, 2.0f);
 
@@ -3946,45 +4207,78 @@ static void DrawPlayerDetailPage(float w, float h) {
                   IM_COL32(60, 80, 130, 55), 0.5f);
     ImGui::Dummy(ImVec2(c3avail, 23.0f));
 
-    // Build live info values
+    // Build info rows
     char heightBuf[16] = "-";
     if (pPlayer->height > 0.5f) {
       int hcm = (int)roundf(pPlayer->height * 100.0f);
       snprintf(heightBuf, sizeof(heightBuf), "%d cm", hcm);
     }
+    char weightBuf[16] = "-";
+    if (pPlayer->weight > 0.5f)
+      snprintf(weightBuf, sizeof(weightBuf), "%.0f kg", pPlayer->weight);
+
+    // International reputation (1-5 scale)
     const char *repLabel = "-";
     ImU32 repCol = IM_COL32(212,220,238,235);
-    if (pPlayer->reputation > 0.0f) {
-      float rep = pPlayer->reputation;
-      if      (rep >= 20.0f) { repLabel = "GOAT";          repCol = IM_COL32(255,215, 40,255); }
-      else if (rep >= 19.0f) { repLabel = "Legend";        repCol = IM_COL32(220,160, 60,255); }
-      else if (rep >= 16.0f) { repLabel = "World Class";   repCol = IM_COL32(120,200,255,255); }
-      else if (rep >= 13.0f) { repLabel = "Star";          repCol = IM_COL32( 80,215,105,255); }
-      else if (rep >=  9.0f) { repLabel = "Above Average"; repCol = IM_COL32(155,215, 80,255); }
-      else if (rep >=  7.0f) { repLabel = "Average";       repCol = IM_COL32(215,195, 55,255); }
-      else if (rep >=  4.0f) { repLabel = "Below Average"; repCol = IM_COL32(215,130, 45,255); }
-      else                   { repLabel = "No Namer";      repCol = IM_COL32(160,170,195,200); }
+    switch (pPlayer->intlReputation) {
+      case 5: repLabel = "GOAT Status"; repCol = IM_COL32(255,215, 40,255); break;
+      case 4: repLabel = "World Star";  repCol = IM_COL32(120,200,255,255); break;
+      case 3: repLabel = "Respected";   repCol = IM_COL32( 80,215,105,255); break;
+      case 2: repLabel = "Barely Known";repCol = IM_COL32(215,195, 55,255); break;
+      case 1: repLabel = "No Namer";    repCol = IM_COL32(160,170,195,200); break;
     }
-    const char *kInfoLabels[] = {"Height", "Personality", "Reputation"};
-    const char *kInfoVals[]   = {heightBuf, "-", repLabel};
-    ImU32       kInfoCols[]   = {IM_COL32(212,220,238,235),
-                                 IM_COL32(212,220,238,235),
-                                 repCol};
-    for (int i = 0; i < 3; i++) {
+
+    struct InfoRow { const char *lbl; const char *val; ImU32 col; };
+    InfoRow infoRows[] = {
+      {"Height",     heightBuf,                      IM_COL32(212,220,238,235)},
+      {"Weight",     weightBuf,                      IM_COL32(212,220,238,235)},
+      {"Nationality",pPlayer->nationality.empty() ? "-" : pPlayer->nationality.c_str(),
+                                                     IM_COL32(212,220,238,235)},
+      {"Reputation", repLabel,                        repCol},
+    };
+    for (int i = 0; i < 4; i++) {
       cp = ImGui::GetCursorScreenPos();
       ImU32 rowBg = (i%2==0) ? IM_COL32(15,22,46,130) : IM_COL32(10,16,34,60);
       c3dl->AddRectFilled(cp, ImVec2(cp.x+c3avail, cp.y+kRowH), rowBg);
       PushMgrFont(g_ManagerFontSmall);
       c3dl->AddText(g_ManagerFontSmall, kFs,
                     ImVec2(cp.x+6.0f, cp.y+(kRowH-kFs)*0.5f),
-                    IM_COL32(172,182,212,215), kInfoLabels[i]);
+                    IM_COL32(172,182,212,215), infoRows[i].lbl);
       c3dl->AddText(g_ManagerFontSmall, kFs,
                     ImVec2(cp.x + c3avail*0.52f, cp.y+(kRowH-kFs)*0.5f),
-                    kInfoCols[i], kInfoVals[i]);
+                    infoRows[i].col, infoRows[i].val);
       PopMgrFont(g_ManagerFontSmall);
       ImGui::Dummy(ImVec2(c3avail, kRowH));
     }
-    ImGui::Dummy(ImVec2(0, 10.0f));
+    ImGui::Dummy(ImVec2(0, 6.0f));
+
+    // ---- Skill Moves section ------------------------------------------------
+    cp = ImGui::GetCursorScreenPos();
+    PushMgrFont(g_ManagerFontSmall);
+    c3dl->AddText(g_ManagerFontSmall, kTFs, ImVec2(cp.x+4.0f, cp.y+2.0f),
+                  IM_COL32(180,190,215,220), "Skill Moves");
+    PopMgrFont(g_ManagerFontSmall);
+    c3dl->AddLine(ImVec2(cp.x, cp.y+19.0f), ImVec2(cp.x+c3avail, cp.y+19.0f),
+                  IM_COL32(60,80,130,55), 0.5f);
+    ImGui::Dummy(ImVec2(c3avail, 23.0f));
+    {
+      cp = ImGui::GetCursorScreenPos();
+      // Draw 5 stars, filled = skillMoves count, gold if filled, dim if not
+      const float kSW = 16.0f, kSH = 12.0f, kSG = 3.0f;
+      float sx = cp.x + 6.0f, sy = cp.y + 4.0f;
+      int sm = pPlayer->skillMoves;
+      for (int i = 0; i < 5; i++) {
+        bool filled = (i < sm);
+        c3dl->AddRectFilled(ImVec2(sx, sy), ImVec2(sx+kSW, sy+kSH),
+                            filled ? IM_COL32(220,175,30,235) : IM_COL32(30,38,65,200), 3.0f);
+        if (filled)
+          c3dl->AddRect(ImVec2(sx, sy), ImVec2(sx+kSW, sy+kSH),
+                        IM_COL32(255,210,50,120), 3.0f, 0, 0.8f);
+        sx += kSW + kSG;
+      }
+      ImGui::Dummy(ImVec2(c3avail, kRowH));
+    }
+    ImGui::Dummy(ImVec2(0, 4.0f));
 
     // ---- Preferred Foot section ---------------------------------------------
     cp = ImGui::GetCursorScreenPos();
@@ -3998,34 +4292,34 @@ static void DrawPlayerDetailPage(float w, float h) {
 
     bool isLeft  = (!pl.foot.empty() && (pl.foot[0]=='L'||pl.foot[0]=='l'));
     bool isRight = (!pl.foot.empty() && (pl.foot[0]=='R'||pl.foot[0]=='r'));
+    int wf = pPlayer->weakFoot; // 1-5; weak foot star count
+
+    // Draw foot label + 5 stars side by side: Left | Right
+    // Strong foot = 5 gold stars; weak foot = weakFoot stars
+    auto drawFootStars = [&](float bx, float by, bool isStrong, const char *side) {
+      PushMgrFont(g_ManagerFontSmall);
+      c3dl->AddText(g_ManagerFontSmall, kFs, ImVec2(bx, by),
+                    IM_COL32(168,180,212,230), side);
+      PopMgrFont(g_ManagerFontSmall);
+      int filled = isStrong ? 5 : (wf > 0 ? wf : 1);
+      const float kSW = 13.0f, kSH = 10.0f, kSG = 2.0f;
+      float sx = bx, sy = by + 18.0f;
+      for (int si = 0; si < 5; si++) {
+        bool on = (si < filled);
+        c3dl->AddRectFilled(ImVec2(sx, sy), ImVec2(sx+kSW, sy+kSH),
+                            on ? IM_COL32(220,175,30,235) : IM_COL32(30,38,65,200), 2.0f);
+        if (on)
+          c3dl->AddRect(ImVec2(sx, sy), ImVec2(sx+kSW, sy+kSH),
+                        IM_COL32(255,210,50,100), 2.0f, 0, 0.7f);
+        sx += kSW + kSG;
+      }
+    };
     float footColW = c3avail * 0.5f - 4.0f;
     float lfx2 = ImGui::GetCursorScreenPos().x;
-    float rfx2 = lfx2 + c3avail * 0.5f + 4.0f;
-
-    auto drawFoot = [&](float bx, bool strong, const char *side) {
-      ImVec2 fcp = ImGui::GetCursorScreenPos(); fcp.x = bx;
-      PushMgrFont(g_ManagerFontSmall);
-      c3dl->AddText(g_ManagerFontSmall, kFs, ImVec2(bx, fcp.y),
-                    IM_COL32(168,180,212,230), side);
-      const char *strengthLbl = strong ? "Strong" : "Weak";
-      ImU32 strCol = strong ? IM_COL32(80,215,105,230) : IM_COL32(155,165,195,185);
-      ImVec2 stSz = g_ManagerFontSmall
-          ? g_ManagerFontSmall->CalcTextSizeA(kFs, FLT_MAX, 0, strengthLbl)
-          : ImGui::CalcTextSize(strengthLbl);
-      c3dl->AddText(g_ManagerFontSmall, kFs,
-                    ImVec2(bx + footColW - stSz.x, fcp.y), strCol, strengthLbl);
-      PopMgrFont(g_ManagerFontSmall);
-      float barY = fcp.y + 20.0f;
-      float fill = strong ? 0.90f : 0.28f;
-      ImU32 fillCol = strong ? IM_COL32(80,215,105,190) : IM_COL32(80,100,160,140);
-      c3dl->AddRectFilled(ImVec2(bx, barY), ImVec2(bx+footColW, barY+10.0f),
-                          IM_COL32(22,30,58,210), 3.0f);
-      c3dl->AddRectFilled(ImVec2(bx, barY), ImVec2(bx+footColW*fill, barY+10.0f),
-                          fillCol, 3.0f);
-    };
-    drawFoot(lfx2, isLeft,  "Left");
-    drawFoot(rfx2, isRight, "Right");
-    ImGui::Dummy(ImVec2(0, 34.0f)); // label + bar
+    float fby   = ImGui::GetCursorScreenPos().y;
+    drawFootStars(lfx2,          fby, isLeft,  "Left");
+    drawFootStars(lfx2 + footColW + 8.0f, fby, isRight, "Right");
+    ImGui::Dummy(ImVec2(0, 34.0f));
     ImGui::Dummy(ImVec2(0, 10.0f));
 
     // ---- Spider / Radar chart -----------------------------------------------
@@ -4053,9 +4347,16 @@ static void DrawPlayerDetailPage(float w, float h) {
                       IM_COL32(50, 68, 115, 110), 0.5f);
     }
 
-    // Axis lines
-    static const char *kAxes[]    = {"Def", "Phy", "Men", "Tec", "Att", "Spd"};
-    static const int   kAxeStat[] = {8, 28, 17, 9, 2, 33};
+    // Axis lines — use real attribute values (0-99 scale)
+    static const char *kAxes[] = {"Def", "Phy", "Men", "Tec", "Att", "Spd"};
+    int kRadarVals[6] = {
+      pl.atDefensiveAwareness,  // Def
+      pl.atStrength,             // Phy
+      pl.atComposure,            // Men
+      pl.atBallControl,          // Tec
+      pl.atFinishing,            // Att
+      pl.atSprintSpeed,          // Spd
+    };
     ImVec2 webPts[6];
     for (int ai = 0; ai < 6; ai++) {
       float ang = ai * (2.0f * 3.14159f / 6.0f) - 3.14159f * 0.5f;
@@ -4063,7 +4364,6 @@ static void DrawPlayerDetailPage(float w, float h) {
                     ImVec2(spCx + cosf(ang)*spR, spCy + sinf(ang)*spR),
                     IM_COL32(55, 72, 120, 150), 0.8f);
 
-      // Axis label
       PushMgrFont(g_ManagerFontSmall);
       ImVec2 lsz = g_ManagerFontSmall
           ? g_ManagerFontSmall->CalcTextSizeA(12.0f, FLT_MAX, 0, kAxes[ai])
@@ -4075,8 +4375,7 @@ static void DrawPlayerDetailPage(float w, float h) {
                     IM_COL32(145, 158, 192, 215), kAxes[ai]);
       PopMgrFont(g_ManagerFontSmall);
 
-      int sv = DerivedStat(pl.id, kAxeStat[ai], pl.baseStat);
-      float r = (sv / 20.0f) * spR;
+      float r = (kRadarVals[ai] / 99.0f) * spR;
       webPts[ai] = ImVec2(spCx + cosf(ang)*r, spCy + sinf(ang)*r);
     }
 
@@ -4572,7 +4871,7 @@ static void DrawSquadPage(float w, float h) {
 
   ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(5.0f, 4.0f));
   // Col indices: 0=POS 1=Name 2=Position 3=Wage 4=Age 5=Foot 6=Expires 7=Ability 8=Potential
-  //              9=CON 10=SHP 11=Morale 12=Happiness 13=L5 14=Apps
+  //              9=Stamina 10=SHP 11=Morale 12=Happiness 13=L5 14=Apps
   static const int kColAge = 4, kColFoot = 5, kColAbility = 7, kColPotential = 8;
   if (ImGui::BeginTable("##sqfm", 15,
         ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
@@ -4590,7 +4889,7 @@ static void DrawSquadPage(float w, float h) {
     ImGui::TableSetupColumn("Expires",   ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort,  72.0f);
     ImGui::TableSetupColumn("Ability",   ImGuiTableColumnFlags_WidthFixed,  60.0f);
     ImGui::TableSetupColumn("Potential", ImGuiTableColumnFlags_WidthFixed,  60.0f);
-    ImGui::TableSetupColumn("CON",       ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort,  36.0f);
+    ImGui::TableSetupColumn("Stamina",   ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort,  72.0f);
     ImGui::TableSetupColumn("SHP",       ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort,  36.0f);
     ImGui::TableSetupColumn("Morale",    ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort,  60.0f);
     ImGui::TableSetupColumn("Happiness", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort,  72.0f);
@@ -4720,25 +5019,23 @@ static void DrawSquadPage(float w, float h) {
       // Name — click opens player detail page
       ImGui::TableSetColumnIndex(1);
       {
-        std::string name = p.firstName.empty() ? p.lastName
-                         : (p.lastName.empty() ? p.firstName
-                         : p.firstName + " " + p.lastName);
+        std::string name = DisplayName(p);
         ImVec2 cp2 = ImGui::GetCursorScreenPos();
         ImDrawList *ndl = ImGui::GetWindowDrawList();
         char nbtnId[32]; snprintf(nbtnId, sizeof(nbtnId), "##plnm_%d", p.id);
-        ImGui::InvisibleButton(nbtnId, ImVec2(170.0f, 18.0f));
+        ImGui::InvisibleButton(nbtnId, ImVec2(170.0f, 22.0f));
         bool nhov     = ImGui::IsItemHovered();
         bool nclicked = ImGui::IsItemClicked();
         int ar2 = (int)(kAccent.x*255), ag2 = (int)(kAccent.y*255), ab2 = (int)(kAccent.z*255);
         ImU32 nCol = nhov ? IM_COL32(ar2, ag2, ab2, 255) : IM_COL32(220, 230, 248, 230);
-        ndl->AddText(g_ManagerFontSmall, 11.0f, ImVec2(cp2.x, cp2.y + 2.0f), nCol, name.c_str());
+        ndl->AddText(g_ManagerFontSmall, 17.0f, ImVec2(cp2.x, cp2.y + 2.0f), nCol, name.c_str());
         if (nhov) {
           ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
           float nsz = g_ManagerFontSmall
-              ? g_ManagerFontSmall->CalcTextSizeA(11.0f, FLT_MAX, 0, name.c_str()).x
+              ? g_ManagerFontSmall->CalcTextSizeA(17.0f, FLT_MAX, 0, name.c_str()).x
               : ImGui::CalcTextSize(name.c_str()).x;
-          ndl->AddLine(ImVec2(cp2.x, cp2.y + 15.0f),
-                       ImVec2(cp2.x + nsz, cp2.y + 15.0f),
+          ndl->AddLine(ImVec2(cp2.x, cp2.y + 19.0f),
+                       ImVec2(cp2.x + nsz, cp2.y + 19.0f),
                        IM_COL32(ar2, ag2, ab2, 180), 1.0f);
         }
         if (nclicked && !s_escMenuOpen) {
@@ -4801,19 +5098,12 @@ static void DrawSquadPage(float w, float h) {
         }
       }
 
-      // Contract expiry (col 6) — format YYYY-MM-DD → D/M/YYYY
+      // Contract expiry (col 6) — formatted via helper (handles DD/MM/YYYY or YYYY-MM-DD)
       ImGui::TableSetColumnIndex(6);
       {
-        std::string exp = p.contractExpiry;
-        if (exp.size() >= 10) {
-          int yr = atoi(exp.substr(0,4).c_str());
-          int mo = atoi(exp.substr(5,2).c_str());
-          int dy = atoi(exp.substr(8,2).c_str());
-          char ebuf[16]; snprintf(ebuf, sizeof(ebuf), "%d/%d/%d", dy, mo, yr);
-          exp = ebuf;
-        }
+        std::string exp = FormatContractExpiry(p.contractExpiry);
         ImGui::PushStyleColor(ImGuiCol_Text, kTextSec);
-        ImGui::TextUnformatted(exp.empty() ? "\xe2\x80\x94" : exp.c_str());
+        ImGui::TextUnformatted(exp == "-" ? "\xe2\x80\x94" : exp.c_str());
         ImGui::PopStyleColor();
       }
 
@@ -4832,7 +5122,27 @@ static void DrawSquadPage(float w, float h) {
         ImGui::TextUnformatted("\xe2\x80\x94");
         ImGui::PopStyleColor();
       };
-      placeholder(9);  // CON
+      // Stamina bar (col 9) — based on current_stamina (defaults to 100)
+      ImGui::TableSetColumnIndex(9);
+      {
+        int cs = p.currentStamina; // 0-100
+        if (cs < 0) cs = 0; if (cs > 100) cs = 100;
+        ImVec2 bcp = ImGui::GetCursorScreenPos();
+        ImDrawList *sdl = ImGui::GetWindowDrawList();
+        const float bW = 60.0f, bH = 8.0f;
+        float bY = bcp.y + 5.0f;
+        sdl->AddRectFilled(ImVec2(bcp.x, bY), ImVec2(bcp.x+bW, bY+bH),
+                           IM_COL32(22,30,58,210), 3.0f);
+        if (cs > 0) {
+          ImU32 sCol = cs >= 70 ? IM_COL32(80,215,105,200)
+                    : cs >= 40 ? IM_COL32(215,195,55,215)
+                               : IM_COL32(215,80,80,200);
+          sdl->AddRectFilled(ImVec2(bcp.x, bY),
+                             ImVec2(bcp.x + bW*(cs/100.0f), bY+bH),
+                             sCol, 3.0f);
+        }
+        ImGui::Dummy(ImVec2(bW, bH + 10.0f));
+      }
       placeholder(10); // SHP
       placeholder(11); // Morale
       placeholder(12); // Happiness
@@ -6531,13 +6841,13 @@ static void DrawTacticsPage(float w, float h) {
   for (const auto &p : g_CareerHub.players) {
     for (int ni = 0; ni < kNumTacNodes; ni++) {
       if (kTacNodes[ni].fo == p.formationOrder) {
-        std::string ln = p.lastName.empty() ? p.firstName : p.lastName;
+        std::string ln = DisplayName(p);
         if (ln.size() > 9) ln = ln.substr(0, 8) + ".";
         nodes[ni].name      = ln;
         nodes[ni].filled    = true;
         nodes[ni].baseStat  = p.baseStat;
         nodes[ni].potential = p.potential;
-        nodes[ni].stamina   = p.stamina;
+        nodes[ni].stamina   = p.currentStamina; // use current fitness bar
         nodes[ni].foot      = p.foot;
         break;
       }
@@ -6821,9 +7131,7 @@ static void DrawTacticsPage(float w, float h) {
   bool alt = false;
   for (const auto *p : xi) {
     alt = !alt;
-    std::string dispName = p->firstName.empty() ? p->lastName :
-                           (p->lastName.empty() ? p->firstName :
-                            p->firstName.substr(0,1) + ". " + p->lastName);
+    std::string dispName = DisplayName(*p);
     char popId[32]; snprintf(popId, sizeof(popId), "##tlrow_%d", p->id);
     DrawTacPlayerRow(wdl, innerW, rowH, p->id, p->formationOrder,
                      dispName, false, faceTex, alt, popId, p->baseStat, p->role);
@@ -6844,9 +7152,7 @@ static void DrawTacticsPage(float w, float h) {
   alt = false;
   for (const auto *p : subs) {
     alt = !alt;
-    std::string dispName = p->firstName.empty() ? p->lastName :
-                           (p->lastName.empty() ? p->firstName :
-                            p->firstName.substr(0,1) + ". " + p->lastName);
+    std::string dispName = DisplayName(*p);
     char popId[32]; snprintf(popId, sizeof(popId), "##tlsub_%d", p->id);
     DrawTacPlayerRow(wdl, innerW, rowH, p->id, p->formationOrder,
                      dispName, true, faceTex, alt, popId, p->baseStat, p->role);
@@ -7997,28 +8303,9 @@ static void DrawScoutingPage(float w, float h) {
           sr.playerId, sr.revealPct, "", nullptr);
 
         if (viewClicked) {
-          std::stringstream pq;
-          pq << "SELECT id, firstname, lastname, role, age, base_stat,"
-             << " formationorder, weekly_wage, contract_expiry, player_potential,"
-             << " foot, stamina, height, reputation"
-             << " FROM players WHERE id=" << sr.playerId << " LIMIT 1;";
-          DatabaseResult *pr = GetDB()->Query(pq.str());
-          if (pr && pr->data.size() > 0) {
-            CareerHubState::Player op;
-            op.id            = atoi(pr->data[0][0].c_str());
-            op.firstName     = pr->data[0][1];
-            op.lastName      = pr->data[0][2];
-            op.role          = pr->data[0][3];
-            op.age           = pr->data[0][4];
-            op.baseStat      = (float)atof(pr->data[0][5].c_str());
-            op.weeklywage    = atoi(pr->data[0][7].c_str());
-            op.contractExpiry= pr->data[0][8];
-            op.potential     = atoi(pr->data[0][9].c_str());
-            op.foot          = pr->data[0][10];
-            op.stamina       = atoi(pr->data[0][11].c_str());
-            op.height        = (float)atof(pr->data[0][12].c_str());
-            op.reputation    = (float)atof(pr->data[0][13].c_str());
-            delete pr;
+          CareerHubState::Player op;
+          LoadPlayerFullDetail(sr.playerId, op);
+          if (op.id > 0) {
             s_detailPlayerOverride = op;
             s_detailOverrideActive = true;
             s_playerDetailId       = op.id;
@@ -8026,7 +8313,7 @@ static void DrawScoutingPage(float w, float h) {
             s_detailClubLogo       = sr.clubLogoPath;
             s_detailClubShortName  = sr.clubShortName;
             NavPush(PAGE_PLAYER_DETAIL);
-          } else { if (pr) delete pr; }
+          }
         }
 
         ImGui::SetCursorScreenPos(ImVec2(cardX, cardY + kCardH + kCardGap));
@@ -8300,9 +8587,10 @@ static void DrawSearchDropdown() {
     ImGui::SetCursorScreenPos(ImVec2(badgeLeft, badgeTop));
     DrawTeamBadge(sr.clubLogoPath, sr.clubShortName, kBadgeSz);
 
-    // Name
+    // Name (use nickname if available)
     float textX = wpos.x + 58.0f; // badge(12+36=48) + 10px gap
-    std::string fullName = sr.firstName + " " + sr.lastName;
+    std::string fullName = sr.nickname.empty()
+        ? (sr.firstName + " " + sr.lastName) : sr.nickname;
     PushMgrFont(g_ManagerFontSmall);
     dl->AddText(g_ManagerFontSmall, 14.0f,
                 ImVec2(textX, ry + 9.0f),
@@ -8365,25 +8653,11 @@ static void DrawSearchDropdown() {
     }
   }
 
-  // Handle click — load player data and navigate
+  // Handle click — load full player data and navigate
   if (clicked && clickedIdx >= 0) {
     const SearchPlayerResult &sr = s_searchResults[clickedIdx];
-    // Fill override struct from search result
     CareerHubState::Player op;
-    op.id             = sr.id;
-    op.firstName      = sr.firstName;
-    op.lastName       = sr.lastName;
-    op.role           = sr.role;
-    op.age            = sr.age;
-    op.baseStat       = sr.baseStat;
-    op.potential      = sr.potential;
-    op.foot           = sr.foot;
-    op.stamina        = sr.stamina;
-    op.height         = sr.height;
-    op.reputation     = sr.reputation;
-    op.weeklywage     = sr.weeklywage;
-    op.contractExpiry = sr.contractExpiry;
-    op.formationOrder = sr.formationOrder;
+    LoadPlayerFullDetail(sr.id, op);
     s_detailPlayerOverride       = op;
     s_detailOverrideActive       = true;
     s_playerDetailId             = sr.id;

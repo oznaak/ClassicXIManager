@@ -64,16 +64,36 @@ struct CareerHubState {
 
   struct Player {
     int         id            = 0;
-    std::string firstName, lastName, role, age, ability;
+    std::string firstName, lastName, nickname, role, age, ability;
     int         formationOrder = -1;
     int         weeklywage    = 0;
     std::string contractExpiry;
     float       baseStat      = 0.0f;
     int         potential     = 0;
     std::string foot;          // "L" or "R"
-    int         stamina       = 0; // 0-100
+    int         stamina       = 0; // Stamina attribute 0-99
+    int         currentStamina = 100; // Current fitness bar 0-100
     float       height        = 0.0f; // metres e.g. 1.80
-    float       reputation    = 0.0f; // 1-20 scale
+    float       reputation    = 0.0f; // 1-20 scale (legacy)
+    // New fields
+    std::string alternativePos;  // raw DB value
+    int         skillMoves       = 0; // 1-5
+    int         weakFoot         = 0; // 1-5
+    std::string nationality;
+    float       weight           = 0.0f; // kg
+    int         playerValue      = 0;    // estimated market value
+    int         jerseyNumber     = 0;
+    int         intlReputation   = 0;    // international_reputation 1-5
+    // Outfield attributes (0-99)
+    int atAcceleration = 0, atSprintSpeed = 0, atAgility = 0, atBalance = 0;
+    int atJumping = 0, atStrength = 0, atReactions = 0, atAggression = 0;
+    int atComposure = 0, atInterceptions = 0, atPositioning = 0, atVision = 0;
+    int atBallControl = 0, atCrossing = 0, atDribbling = 0, atFinishing = 0;
+    int atFkAccuracy = 0, atHeadingAccuracy = 0, atLongPassing = 0, atShortPassing = 0;
+    int atDefensiveAwareness = 0, atShotPower = 0, atLongShots = 0;
+    int atStandingTackle = 0, atSlidingTackle = 0, atVolleys = 0, atCurve = 0, atPenalties = 0;
+    // GK attributes (0-99)
+    int atGkDiving = 0, atGkHandling = 0, atGkKicking = 0, atGkReflexes = 0, atGkPositioning = 0;
   };
   std::vector<Player> players;
 

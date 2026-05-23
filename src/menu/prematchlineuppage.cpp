@@ -70,7 +70,7 @@ PreMatchLineupPage::LoadXI(int teamId, int limit, int offset) {
   }
 
   std::stringstream q;
-  q << "SELECT firstname, lastname, role, formationorder"
+  q << "SELECT firstname, lastname, role, formationorder, COALESCE(nickname,'') as nickname"
     << " FROM players WHERE team_id = " << teamId
     << " ORDER BY"
     << "  CASE WHEN formationorder IS NULL OR formationorder < 0 THEN 999"
@@ -91,8 +91,11 @@ PreMatchLineupPage::LoadXI(int teamId, int limit, int offset) {
     PreMatchLineupPlayer p;
     std::string fn = DBCell(r, i, 0);
     std::string ln = DBCell(r, i, 1);
+    std::string nn = DBCell(r, i, 4); // nickname
 
-    if (!fn.empty() || !ln.empty())
+    if (!nn.empty())
+      p.name = nn;
+    else if (!fn.empty() || !ln.empty())
       p.name = fn.empty() ? ln : (ln.empty() ? fn : fn + " " + ln);
     else
       p.name = "Player";
