@@ -1581,7 +1581,7 @@ static void DrawNavItem(const char *label, e_ManagerPage page, int badge = 0) {
   ImVec2 p1 = ImVec2(p0.x + w, p0.y + kH);
 
   char btnId[80];
-  snprintf(btnId, sizeof(btnId), "##navbtn_%d", (int)page);
+  snprintf(btnId, sizeof(btnId), "##navbtn_%d_%s", (int)page, label);
   bool clicked = ImGui::InvisibleButton(btnId, ImVec2(w, kH));
   bool hov     = ImGui::IsItemHovered();
 
