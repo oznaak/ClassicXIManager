@@ -316,7 +316,77 @@ static void SeedClubPlayerKnowledge(int managerId, unsigned int careerSeed) {
   printf("[TRANSFER] SeedClubPlayerKnowledge: manager=%d\n", managerId);
 }
 
-void SeedTransferSystem(int managerId) {}
+static void SeedPlayerMarketStatus(int managerId, unsigned int careerSeed,
+                                    const std::string &currentDate) {
+  DatabaseResult *pr = GetDB()->Query(
+    "SELECT p.id, p.age, p.sofifaPotential, p.international_reputation,"
+    " p.contract_expiry, p.is_transfer_listed, p.base_stat,"
+    " t.international_prestige, t.domestic_prestige"
+    " FROM players p JOIN teams t ON t.id = p.team_id;");
+  if (!pr) return;
+
+  for (unsigned int i = 0; i < pr->data.size(); i++) {
+    int   pid      = atoi(TECell(pr, i, 0).c_str());
+    int   age      = atoi(TECell(pr, i, 1).c_str());
+    int   pot      = atoi(TECell(pr, i, 2).c_str());
+    int   intlRep  = atoi(TECell(pr, i, 3).c_str());
+    std::string expiry = TECell(pr, i, 4);
+    int   listed   = atoi(TECell(pr, i, 5).c_str());
+    float bstat    = atof(TECell(pr, i, 6).c_str());
+
+    std::string status = "normal";
+
+    // transfer_listed
+    if (listed) { status = "transfer_listed"; }
+    // wonderkid: age <= 21, potential >= 85, rep >= 3
+    else if (age <= 21 && pot >= 85 && intlRep >= 3) { status = "wonderkid"; }
+    // franchise_player: team's identity marker (high prestige + high stat + old enough)
+    else if (intlRep >= 4 && bstat >= 80.0f && age >= 24) { status = "franchise_player"; }
+    // expiring_soon: contract within 6 months
+    else if (!expiry.empty() && expiry <= AddDays(currentDate, 180)) {
+      status = "expiring_soon";
+    }
+
+    if (status == "normal") continue; // don't store boring rows
+
+    std::stringstream iq;
+    iq << "INSERT OR REPLACE INTO player_market_status(manager_id,player_id,status,set_date)"
+       << " VALUES(" << managerId << "," << pid << ",'" << status << "','" << currentDate << "');";
+    DatabaseResult *ir = GetDB()->Query(iq.str());
+    delete ir;
+  }
+  delete pr;
+  printf("[TRANSFER] SeedPlayerMarketStatus: manager=%d\n", managerId);
+}
+
+void SeedTransferSystem(int managerId) {
+  // Derive career seed from manager creation timestamp
+  unsigned int careerSeed = 12345u;
+  {
+    std::stringstream q;
+    q << "SELECT strftime('%s', created_at) FROM managers WHERE id=" << managerId << ";";
+    DatabaseResult *r = GetDB()->Query(q.str());
+    if (r && r->data.size() > 0 && !TECell(r, 0, 0).empty())
+      careerSeed = (unsigned int)atoll(TECell(r, 0, 0).c_str());
+    delete r;
+  }
+  // Get current date for status seeding
+  std::string currentDate;
+  {
+    std::stringstream q;
+    q << "SELECT current_date FROM managers WHERE id=" << managerId << ";";
+    DatabaseResult *r = GetDB()->Query(q.str());
+    if (r && r->data.size() > 0) currentDate = TECell(r, 0, 0);
+    delete r;
+  }
+
+  SeedPlayerTraits(managerId, careerSeed);
+  SeedClubTransferIdentity(managerId, careerSeed);
+  SeedClubPlayerKnowledge(managerId, careerSeed);
+  SeedPlayerMarketStatus(managerId, careerSeed, currentDate);
+
+  printf("[TRANSFER] SeedTransferSystem complete: manager=%d\n", managerId);
+}
 
 void ProcessDailyTransfers(int managerId, int userClubId,
                             const std::string &currentDate, int seasonYear) {}
