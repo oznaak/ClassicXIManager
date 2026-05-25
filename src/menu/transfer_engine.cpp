@@ -208,6 +208,69 @@ static void SeedPlayerTraits(int managerId, unsigned int careerSeed) {
   delete pr;
 }
 
+static void SeedClubTransferIdentity(int managerId, unsigned int careerSeed) {
+  DatabaseResult *cr = GetDB()->Query(
+    "SELECT id, international_prestige, domestic_prestige,"
+    " transfer_budget FROM teams WHERE transfer_budget > 0;");
+  if (!cr) return;
+
+  // Max budget for normalisation
+  long long maxBud = 1;
+  for (unsigned int i = 0; i < cr->data.size(); i++) {
+    long long b = atoll(TECell(cr, i, 3).c_str());
+    if (b > maxBud) maxBud = b;
+  }
+
+  static const char *kPersonalities[] = {
+    "patient","fast_closer","hard_negotiator","media_manipulator","desperate","patient"
+  };
+
+  for (unsigned int i = 0; i < cr->data.size(); i++) {
+    int   clubId   = atoi(TECell(cr, i, 0).c_str());
+    int   intlPres = atoi(TECell(cr, i, 1).c_str());
+    int   domPres  = atoi(TECell(cr, i, 2).c_str());
+    long long tbud = atoll(TECell(cr, i, 3).c_str());
+
+    unsigned int seed = careerSeed ^ (unsigned int)(clubId * 31337u);
+    float pf = (intlPres * 0.6f + domPres * 0.4f) / 10.0f;     // 0-1
+    float bf = (float)tbud / (float)maxBud;                      // 0-1
+    float cf = bf * 0.7f + pf * 0.3f;                           // combined factor
+    auto clamp = [](int v){ return std::max(0, std::min(100, v)); };
+
+    int aggression  = clamp((int)(cf * 70) + TERandInt(seed, 0, -15, 15));
+    int wage_will   = clamp((int)(bf * 60) + TERandInt(seed, 1, -15, 20));
+    int age_pref    = TERandInt(seed, 2, -50, 50); // signed, stored as-is
+    int panic       = clamp(80 - (int)(pf * 50) + TERandInt(seed, 3, -10, 10));
+    int loyalty     = clamp((int)(pf * 60) + TERandInt(seed, 4, -15, 15));
+    int risk_tol    = clamp((int)(bf * 55) + TERandInt(seed, 5, -15, 15));
+    int sell_press  = clamp(10 + TERandInt(seed, 6, 0, 20)); // starts low
+    int youth       = clamp(30 + TERandInt(seed, 7, -20, 30));
+    int domestic    = clamp(30 + TERandInt(seed, 8, -15, 25));
+    int resale      = clamp(25 + TERandInt(seed, 9, -15, 25));
+    int prestige    = clamp((int)(pf * 70) + TERandInt(seed, 10, -10, 20));
+    int irrat       = clamp(15 + TERandInt(seed, 11, 0, 35));
+
+    int pIdx        = ((unsigned int)(seed >> 8)) % 6;
+    const char *personality = kPersonalities[pIdx];
+
+    std::stringstream iq;
+    iq << "INSERT OR IGNORE INTO club_transfer_identity"
+       << "(manager_id,club_id,aggression,wage_willingness,age_preference,"
+       << "deadline_panic,loyalty_to_players,financial_risk_tolerance,selling_pressure,"
+       << "youth_focus,domestic_bias,resale_focus,prestige_bias,irrationality,"
+       << "negotiation_personality) VALUES("
+       << managerId << "," << clubId << ","
+       << aggression << "," << wage_will << "," << age_pref << ","
+       << panic << "," << loyalty << "," << risk_tol << "," << sell_press << ","
+       << youth << "," << domestic << "," << resale << "," << prestige << ","
+       << irrat << ",'" << personality << "');";
+    DatabaseResult *ir = GetDB()->Query(iq.str());
+    delete ir;
+  }
+  delete cr;
+  printf("[TRANSFER] SeedClubTransferIdentity: manager=%d\n", managerId);
+}
+
 void SeedTransferSystem(int managerId) {}
 
 void ProcessDailyTransfers(int managerId, int userClubId,
