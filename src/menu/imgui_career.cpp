@@ -113,6 +113,66 @@ static std::string SqlEsc(const std::string &in) {
   return out;
 }
 
+// Returns the currency symbol for the league that owns the given club.
+static std::string ClubCurrency(int clubId) {
+  std::stringstream q;
+  q << "SELECT l.currency FROM leagues l"
+    << " JOIN teams t ON t.league_id = l.id"
+    << " WHERE t.id = " << clubId << ";";
+  DatabaseResult *r = GetDB()->Query(q.str());
+  std::string cur = (r && r->data.size() > 0) ? DBCell(r, 0, 0) : "";
+  delete r;
+  if (cur.empty()) cur = "\xE2\x82\xAC"; // fallback: €
+  return cur;
+}
+
+// Looks up a message_templates row by subcategory, fills placeholders, writes
+// subject/body by reference, and returns the template id (0 if not found).
+static int FillSponsorTemplate(const std::string &subcategory,
+                                const std::string &mgrName,
+                                const std::string &clubNameStr,
+                                const std::string &sponsorName,
+                                const std::string &currency,
+                                long long          weeklyValue,
+                                std::string &outSubject,
+                                std::string &outBody) {
+  std::stringstream q;
+  q << "SELECT id, subject_template, body_template FROM message_templates"
+    << " WHERE subcategory='" << SqlEsc(subcategory) << "' LIMIT 1;";
+  DatabaseResult *r = GetDB()->Query(q.str());
+  int tid = 0;
+  if (r && r->data.size() > 0) {
+    tid         = atoi(DBCell(r, 0, 0).c_str());
+    outSubject  = DBCell(r, 0, 1);
+    outBody     = DBCell(r, 0, 2);
+  }
+  delete r;
+
+  char valBuf[32];
+  snprintf(valBuf, sizeof(valBuf), "%lld", weeklyValue);
+
+  auto replace = [](std::string &s, const std::string &from, const std::string &to) {
+    size_t pos = 0;
+    while ((pos = s.find(from, pos)) != std::string::npos) {
+      s.replace(pos, from.size(), to);
+      pos += to.size();
+    }
+  };
+
+  replace(outSubject, "%ManagerName%",  mgrName);
+  replace(outSubject, "%ClubName%",     clubNameStr);
+  replace(outSubject, "%SponsorName%",  sponsorName);
+  replace(outSubject, "%WeeklyValue%",  valBuf);
+  replace(outSubject, "%Currency%",     currency);
+  replace(outBody,    "%ManagerName%",  mgrName);
+  replace(outBody,    "%ClubName%",     clubNameStr);
+  replace(outBody,    "%SponsorName%",  sponsorName);
+  replace(outBody,    "%WeeklyValue%",  valBuf);
+  replace(outBody,    "%Currency%",     currency);
+
+  return tid;
+}
+
 // ---- Badge texture cache ------------------------------------------------
 
 static std::map<std::string, GLuint> s_BadgeCache;
@@ -1423,7 +1483,7 @@ static void InitAllClubFinances(int managerId) {
     // wage_budget: anchored to transfer_budget (club financial power), not TV income.
     // TV income is league-dependent and causes cross-league distortion.
     // Real clubs pay ~1.6x-2.4x their transfer budget in wages annually.
-    float wage_base_mult = 1.60f + club_factor * 0.80f; // 1.60x (small) to 2.40x (elite)
+    float wage_base_mult = 1.10f + club_factor * 0.55f; // 1.10x (small) to 1.65x (elite)
     float arch_adj[]     = { 1.05f, 1.12f, 1.18f, 0.93f, 0.97f, 1.10f }; // archetype personality
     long long wage_budget = (long long)((float)tbud * wage_base_mult * arch_adj[archetype] / 52.0f);
 
@@ -2119,22 +2179,30 @@ static void CheckSponsorOffers(int managerId, int clubId,
     delete ir;
   }
 
-  // Deliver inbox message
+  // Deliver inbox message using template
   {
-    char valBuf[32];
-    snprintf(valBuf, sizeof(valBuf), "%lld", offerValue);
-    std::string subject = "Sponsorship Offer: " + sponsorName;
-    std::string body    = "Dear Manager,\n\n"
-      + sponsorName + " has approached your club with a sponsorship proposal.\n\n"
-      "Proposed weekly fee: \xC2\xA3" + std::string(valBuf) + "\n\n"
-      "This would be a season-long agreement. If you accept, the payment will be "
-      "added to your weekly income for the remainder of the season.\n\n"
-      "Visit Finances \xe2\x86\x92 Sponsorship to review and respond.\n\n"
-      "Regards,\nSponsorship Coordinator";
+    // Look up manager name and club name for placeholder substitution
+    std::string mgrName, clubName;
+    {
+      std::stringstream mq;
+      mq << "SELECT m.name, t.name FROM managers m"
+         << " JOIN teams t ON t.id = m.club_id"
+         << " WHERE m.id = " << managerId << ";";
+      DatabaseResult *mr = GetDB()->Query(mq.str());
+      if (mr && mr->data.size() > 0) {
+        mgrName  = DBCell(mr, 0, 0);
+        clubName = DBCell(mr, 0, 1);
+      }
+      delete mr;
+    }
+    std::string currency = ClubCurrency(clubId);
+    std::string subject, body;
+    int tid = FillSponsorTemplate("sponsor_offer", mgrName, clubName,
+                                  sponsorName, currency, offerValue, subject, body);
     std::stringstream iq;
     iq << "INSERT INTO manager_inbox"
        << " (manager_id,template_id,sender_type,sender_name,subject,body,category,game_date)"
-       << " VALUES (" << managerId << ",0,'finance','Sponsorship Coordinator',"
+       << " VALUES (" << managerId << "," << tid << ",'finance','Commercial Director',"
        << "'" << SqlEsc(subject) << "','" << SqlEsc(body) << "','finance','" << currentDate << "');";
     DatabaseResult *ir = GetDB()->Query(iq.str());
     delete ir;
@@ -2196,16 +2264,14 @@ static void ProcessSponsorRenewals(int managerId, int clubId, int seasonYear,
       DatabaseResult *blr = GetDB()->Query(blq.str());
       delete blr;
 
-      std::string subject = spName + " Will Not Renew Sponsorship";
-      std::string body    = "Dear " + mgrName + ",\n\n"
-        + spName + " has decided not to renew their sponsorship with " + clubNameStr + ".\n\n"
-        "Following a review of the season's results, they have chosen to redirect their "
-        "sponsorship budget elsewhere. They may reconsider in future seasons based on performance.\n\n"
-        "Regards,\nSponsorship Coordinator";
+      std::string currency = ClubCurrency(clubId);
+      std::string subject, body;
+      int tid = FillSponsorTemplate("sponsor_not_renewing", mgrName, clubNameStr,
+                                    spName, currency, 0LL, subject, body);
       std::stringstream iq;
       iq << "INSERT INTO manager_inbox"
          << " (manager_id,template_id,sender_type,sender_name,subject,body,category,game_date)"
-         << " VALUES (" << managerId << ",0,'finance','Sponsorship Coordinator',"
+         << " VALUES (" << managerId << "," << tid << ",'finance','Commercial Director',"
          << "'" << SqlEsc(subject) << "','" << SqlEsc(body) << "','finance','" << nextSeasonDate << "');";
       DatabaseResult *ir = GetDB()->Query(iq.str());
       delete ir;
@@ -2224,18 +2290,14 @@ static void ProcessSponsorRenewals(int managerId, int clubId, int seasonYear,
       DatabaseResult *ir = GetDB()->Query(iq.str());
       delete ir;
 
-      const char *dir = (newVal > currVal) ? "increased" : (newVal < currVal) ? "reduced" : "maintained";
-      char valBuf[32]; snprintf(valBuf, sizeof(valBuf), "%lld", newVal);
-      std::string subject = spName + " Sponsorship Renewal Offer";
-      std::string body    = "Dear " + mgrName + ",\n\n"
-        + spName + " would like to continue their partnership with " + clubNameStr + ".\n\n"
-        "They are proposing a " + std::string(dir) + " weekly fee of \xC2\xA3" + valBuf + ".\n\n"
-        "Visit Finances \xe2\x86\x92 Sponsorship to accept or decline.\n\n"
-        "Regards,\nSponsorship Coordinator";
+      std::string currency = ClubCurrency(clubId);
+      std::string subject, body;
+      int tid = FillSponsorTemplate("sponsor_renewal", mgrName, clubNameStr,
+                                    spName, currency, newVal, subject, body);
       std::stringstream iq2;
       iq2 << "INSERT INTO manager_inbox"
           << " (manager_id,template_id,sender_type,sender_name,subject,body,category,game_date)"
-          << " VALUES (" << managerId << ",0,'finance','Sponsorship Coordinator',"
+          << " VALUES (" << managerId << "," << tid << ",'finance','Commercial Director',"
           << "'" << SqlEsc(subject) << "','" << SqlEsc(body) << "','finance','" << nextSeasonDate << "');";
       DatabaseResult *ir2 = GetDB()->Query(iq2.str());
       delete ir2;
