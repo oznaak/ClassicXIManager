@@ -177,6 +177,11 @@ struct CareerHubState {
     long long matchdayMax      = 0;  // per match, best case (strong opponent, top of table)
     long long seasonPrize1st   = 0;  // prize for 1st in user's league
     long long seasonPrize2nd   = 0;
+    // New fields
+    long long wageBudget       = 0;   // board-set weekly wage ceiling
+    long long transferBudget   = 0;   // current season transfer allowance
+    long long debtLevel        = 0;   // outstanding obligations
+    int       boardConfidence  = 50;  // 0-100
     std::vector<FinanceTransaction> recent; // last 40 transactions
   } finances;
 

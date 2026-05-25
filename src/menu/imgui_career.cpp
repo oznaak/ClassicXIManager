@@ -13,6 +13,7 @@
 #include <sstream>
 #include <string>
 #include <map>
+#include <set>
 #include <vector>
 #include <algorithm>
 #include <cstdio>
@@ -295,6 +296,74 @@ static float CalcClubQualityFactor(const std::vector<CareerHubState::Player> &sq
   if (factor > 1.0f) factor = 1.0f;
   return factor;
 }
+
+// ---- Multi-club finance system -------------------------------------------
+
+struct ClubFinances {
+  int       club_id               = 0;
+  long long cash_balance          = 0;
+  long long wage_budget           = 0;
+  long long transfer_budget       = 0;
+  int       board_confidence      = 50;
+  float     commercial_strength   = 0.5f;
+  float     institutional_power   = 0.3f;
+  int       style_seed            = 0;
+  long long debt_level            = 0;
+  int       shock_cooldown        = 0;
+  float     commercial_shock_mult = 1.0f;
+  int       bad_contract_weeks    = 0;
+  int       transfer_budget_frozen = 0;
+  int       emergency_credit_used  = 0;
+  int       wage_overrun_weeks    = 0;
+  std::string last_weekly_date;
+  int       season_budget_processed = 0;
+  int       season_prize_paid     = 0;
+};
+
+struct FinancialStyle {
+  float wage_tolerance;
+  float transfer_spend_bias;
+  float commercial_variance;
+  float selling_bias;
+  float risk_appetite;
+  float saving_rate;
+  float shock_vulnerability;
+  float shock_opportunity;
+  int   sell_threshold;
+};
+
+// Deterministic float in [0,1) from a seed + index.
+static float SeededRand(unsigned int seed, int index) {
+  unsigned int s = seed + (unsigned int)(index * 2654435769u);
+  s ^= s >> 16; s *= 0x45d9f3bu; s ^= s >> 16;
+  return (float)(s & 0x7FFFFFFFu) / (float)0x7FFFFFFFu;
+}
+
+// Archetype is derived at runtime — never stored as a label.
+static FinancialStyle DeriveStyle(int style_seed) {
+  switch (((unsigned int)style_seed) % 6) {
+    case 0: return { 0.52f, 0.55f, 0.08f, 0.10f, 0.05f, 0.70f, 0.60f, 1.20f, 25 }; // Conservative
+    case 1: return { 0.68f, 0.85f, 0.15f, 0.15f, 0.35f, 0.25f, 1.10f, 0.90f, 20 }; // Aggressive
+    case 2: return { 0.80f, 1.00f, 0.25f, 0.10f, 0.60f, 0.05f, 1.80f, 0.70f, 15 }; // Gambling
+    case 3: return { 0.45f, 0.40f, 0.10f, 0.35f, 0.08f, 0.55f, 0.75f, 1.40f, 30 }; // Youth-focused
+    case 4: return { 0.48f, 0.25f, 0.08f, 0.65f, 0.05f, 0.60f, 0.50f, 1.10f, 40 }; // Selling
+    default: return { 0.72f, 0.70f, 0.18f, 0.20f, 0.30f, 0.20f, 1.20f, 0.85f, 22 }; // Star-focused
+  }
+}
+
+static void InitAllClubFinances(int managerId);
+static void ProcessWeeklyAllClubs(int managerId, const std::string &currentDate,
+                                  int clubId, const LeagueFP *playerLfp,
+                                  long long playerWageBill);
+static void TriggerDebtCrisis(int managerId, int clubId, ClubFinances &cf,
+                               const LeagueFP *lfp);
+static bool TryFireShock(int managerId, int clubId, ClubFinances &cf,
+                          const LeagueFP *lfp, int seasonYear,
+                          long long estAnnualIncome, int domPrestige, int intlPrestige);
+static void ProcessAnnualCycle(int managerId, int clubId, ClubFinances &cf,
+                                const LeagueFP *lfp, int seasonYear,
+                                int leagueId, float clubFactor,
+                                int domPrestige, int intlPrestige);
 
 // Forward declarations (implementations follow in the player-detail helpers section)
 static void ParsePlayerAttrsFromRow(CareerHubState::Player &p,
@@ -653,71 +722,105 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
 
   const LeagueFP *lfp = GetLeagueFP(club.leagueId);
 
-  // Ensure finance tables exist
+  // ---- Finance schema (create / migrate) ---------------------------------
   {
+    // club_finances (replaces career_finances)
     DatabaseResult *r = GetDB()->Query(
-      "CREATE TABLE IF NOT EXISTS career_finances ("
-      "  manager_id         INTEGER PRIMARY KEY,"
-      "  club_id            INTEGER NOT NULL,"
-      "  balance            INTEGER DEFAULT 0,"
-      "  last_weekly_date   TEXT,"
-      "  season_prize_paid  INTEGER DEFAULT 0"
+      "CREATE TABLE IF NOT EXISTS club_finances ("
+      "  manager_id              INTEGER NOT NULL,"
+      "  club_id                 INTEGER NOT NULL,"
+      "  cash_balance            INTEGER DEFAULT 0,"
+      "  wage_budget             INTEGER DEFAULT 0,"
+      "  transfer_budget         INTEGER DEFAULT 0,"
+      "  board_confidence        INTEGER DEFAULT 50,"
+      "  commercial_strength     REAL    DEFAULT 0.5,"
+      "  institutional_power     REAL    DEFAULT 0.3,"
+      "  style_seed              INTEGER DEFAULT 0,"
+      "  debt_level              INTEGER DEFAULT 0,"
+      "  shock_cooldown          INTEGER DEFAULT 0,"
+      "  commercial_shock_mult   REAL    DEFAULT 1.0,"
+      "  bad_contract_weeks      INTEGER DEFAULT 0,"
+      "  transfer_budget_frozen  INTEGER DEFAULT 0,"
+      "  emergency_credit_used   INTEGER DEFAULT 0,"
+      "  wage_overrun_weeks      INTEGER DEFAULT 0,"
+      "  last_weekly_date        TEXT,"
+      "  season_budget_processed INTEGER DEFAULT 0,"
+      "  season_prize_paid       INTEGER DEFAULT 0,"
+      "  PRIMARY KEY (manager_id, club_id)"
       ");");
     delete r;
+
+    // finance_transactions — ensure table exists with club_id column
     r = GetDB()->Query(
       "CREATE TABLE IF NOT EXISTS finance_transactions ("
       "  id          INTEGER PRIMARY KEY AUTOINCREMENT,"
       "  manager_id  INTEGER NOT NULL,"
-      "  date        TEXT NOT NULL,"
-      "  category    TEXT NOT NULL,"
+      "  club_id     INTEGER NOT NULL DEFAULT 0,"
+      "  date        TEXT    NOT NULL,"
+      "  category    TEXT    NOT NULL,"
       "  description TEXT,"
       "  amount      INTEGER NOT NULL"
       ");");
     delete r;
-  }
 
-  // Insert initial finances row if this manager has none
-  {
-    std::stringstream ck;
-    ck << "SELECT balance FROM career_finances WHERE manager_id=" << mgrId << ";";
-    DatabaseResult *cr = GetDB()->Query(ck.str());
-    bool noRow = (cr->data.empty());
-    delete cr;
-    if (noRow) {
-      // Scale starting balance by club quality within the league range
-      float quality      = CalcClubQualityFactor(players);
-      long long startBal = lfp->minBalance +
-          (long long)((double)(lfp->maxBalance - lfp->minBalance) * quality);
-      printf("[FINANCE] Init balance: league=%d quality=%.2f start=%lld\n",
-             club.leagueId, quality, startBal);
+    // Add club_id to finance_transactions if it's an existing table without it
+    r = GetDB()->Query("PRAGMA table_info(finance_transactions);");
+    bool hasTxClubId = false;
+    for (unsigned int i = 0; i < r->data.size(); i++)
+      if (DBCell(r, i, 1) == "club_id") { hasTxClubId = true; break; }
+    delete r;
+    if (!hasTxClubId) {
+      r = GetDB()->Query(
+        "ALTER TABLE finance_transactions ADD COLUMN club_id INTEGER NOT NULL DEFAULT 0;");
+      delete r;
+    }
 
-      std::stringstream ins;
-      ins << "INSERT INTO career_finances (manager_id, club_id, balance, season_prize_paid)"
-          << " VALUES (" << mgrId << "," << cId << "," << startBal << ",0);";
-      DatabaseResult *ir = GetDB()->Query(ins.str());
-      delete ir;
-      // Record starting balance as a transaction
-      std::stringstream tx;
-      tx << "INSERT INTO finance_transactions (manager_id, date, category, description, amount)"
-         << " VALUES (" << mgrId << ",'" << currentDate << "',"
-         << "'balance','Starting club budget'," << startBal << ");";
-      DatabaseResult *tr = GetDB()->Query(tx.str());
-      delete tr;
+    // Migrate existing career_finances row → club_finances (safe no-op if table absent or already migrated)
+    {
+      DatabaseResult *te = GetDB()->Query(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='career_finances';");
+      bool hasOldTable = (te->data.size() > 0);
+      delete te;
+      if (hasOldTable) {
+        std::stringstream mq;
+        mq << "SELECT balance FROM career_finances WHERE manager_id=" << mgrId << ";";
+        DatabaseResult *mr = GetDB()->Query(mq.str());
+        if (mr->data.size() > 0 && !DBCell(mr, 0, 0).empty()) {
+          long long oldBal = atoll(DBCell(mr, 0, 0).c_str());
+          std::stringstream ins;
+          ins << "INSERT OR IGNORE INTO club_finances (manager_id, club_id, cash_balance)"
+              << " VALUES (" << mgrId << "," << cId << "," << oldBal << ");";
+          DatabaseResult *ir = GetDB()->Query(ins.str());
+          delete ir;
+        }
+        delete mr;
+      }
     }
   }
 
-  // Helper: insert a finance transaction and update balance atomically
+  // Init all clubs on first load for this manager
+  {
+    std::stringstream ck;
+    ck << "SELECT COUNT(*) FROM club_finances WHERE manager_id=" << mgrId << ";";
+    DatabaseResult *cr = GetDB()->Query(ck.str());
+    int rowCount = (cr->data.size() > 0 && !DBCell(cr, 0, 0).empty())
+                  ? atoi(DBCell(cr, 0, 0).c_str()) : 0;
+    delete cr;
+    if (rowCount == 0) InitAllClubFinances(mgrId);
+  }
+
+  // Helper: insert a finance transaction and update club_finances.cash_balance atomically
   auto InsertTx = [&](const std::string &date, const std::string &cat,
                       const std::string &desc, long long amount) {
     std::stringstream tx;
-    tx << "INSERT INTO finance_transactions (manager_id, date, category, description, amount)"
-       << " VALUES (" << mgrId << ",'" << date << "','" << cat << "','"
-       << desc << "'," << amount << ");";
+    tx << "INSERT INTO finance_transactions (manager_id, club_id, date, category, description, amount)"
+       << " VALUES (" << mgrId << "," << cId << ",'" << date << "','"
+       << cat << "','" << desc << "'," << amount << ");";
     DatabaseResult *r = GetDB()->Query(tx.str());
     delete r;
     std::stringstream bq;
-    bq << "UPDATE career_finances SET balance = balance + " << amount
-       << " WHERE manager_id=" << mgrId << ";";
+    bq << "UPDATE club_finances SET cash_balance = cash_balance + " << amount
+       << " WHERE manager_id=" << mgrId << " AND club_id=" << cId << ";";
     r = GetDB()->Query(bq.str());
     delete r;
   };
@@ -730,7 +833,8 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
   // Process weekly finances if at least 7 game-days have passed
   if (!currentDate.empty()) {
     std::stringstream lwq;
-    lwq << "SELECT last_weekly_date FROM career_finances WHERE manager_id=" << mgrId << ";";
+    lwq << "SELECT last_weekly_date FROM club_finances"
+        << " WHERE manager_id=" << mgrId << " AND club_id=" << cId << ";";
     DatabaseResult *lwr = GetDB()->Query(lwq.str());
     std::string lastWeekly = (lwr->data.size() > 0) ? DBCell(lwr, 0, 0) : "";
     delete lwr;
@@ -745,7 +849,7 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
     }
 
     if (doWeekly) {
-      // TV merit: top clubs get +15%, bottom clubs -15%
+      // Player's club: full transaction logging
       float qual     = CalcClubQualityFactor(players);
       long long tv   = (long long)(lfp->weeklyTV * (0.85f + qual * 0.30f));
       InsertTx(currentDate, "tv_rights", "Weekly TV rights distribution", tv);
@@ -754,12 +858,15 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
       InsertTx(currentDate, "operating", "Weekly club operating costs",    -lfp->weeklyOperating);
 
       std::stringstream upd;
-      upd << "UPDATE career_finances SET last_weekly_date='" << currentDate
-          << "' WHERE manager_id=" << mgrId << ";";
+      upd << "UPDATE club_finances SET last_weekly_date='" << currentDate
+          << "' WHERE manager_id=" << mgrId << " AND club_id=" << cId << ";";
       DatabaseResult *ur = GetDB()->Query(upd.str());
       delete ur;
-      printf("[FINANCE] Weekly processed date=%s wages=-%lld TV=+%lld op=-%lld\n",
-             currentDate.c_str(), wageBill, lfp->weeklyTV, lfp->weeklyOperating);
+      printf("[FINANCE] Weekly player_club=%d date=%s wages=-%lld TV=+%lld op=-%lld\n",
+             cId, currentDate.c_str(), wageBill, tv, lfp->weeklyOperating);
+
+      // All other clubs: balance-only tick
+      ProcessWeeklyAllClubs(mgrId, currentDate, cId, lfp, wageBill);
     }
 
     // Matchday income: scan all played fixtures involving this club (home or away).
@@ -839,13 +946,13 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
           int oppId      = atoi(DBCell(mr, i, 2).c_str());
           long long md   = CalcMatchdayAmt(oppId, true);
           std::stringstream tx2;
-          tx2 << "INSERT INTO finance_transactions (manager_id, date, category, description, amount)"
-              << " VALUES (" << mgrId << ",'" << fxDate << "',"
+          tx2 << "INSERT INTO finance_transactions (manager_id, club_id, date, category, description, amount)"
+              << " VALUES (" << mgrId << "," << cId << ",'" << fxDate << "',"
               << "'matchday','H:" << fxId << "'," << md << ");";
           DatabaseResult *tr2 = GetDB()->Query(tx2.str()); delete tr2;
           std::stringstream bq2;
-          bq2 << "UPDATE career_finances SET balance = balance + " << md
-              << " WHERE manager_id=" << mgrId << ";";
+          bq2 << "UPDATE club_finances SET cash_balance = cash_balance + " << md
+              << " WHERE manager_id=" << mgrId << " AND club_id=" << cId << ";";
           DatabaseResult *br2 = GetDB()->Query(bq2.str()); delete br2;
           printf("[FINANCE] Matchday home fixture=%d opp=%d date=%s amount=%lld\n", fxId, oppId, fxDate.c_str(), md);
         }
@@ -868,13 +975,13 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
           int oppId      = atoi(DBCell(mr, i, 2).c_str());
           long long md   = CalcMatchdayAmt(oppId, false);
           std::stringstream tx2;
-          tx2 << "INSERT INTO finance_transactions (manager_id, date, category, description, amount)"
-              << " VALUES (" << mgrId << ",'" << fxDate << "',"
+          tx2 << "INSERT INTO finance_transactions (manager_id, club_id, date, category, description, amount)"
+              << " VALUES (" << mgrId << "," << cId << ",'" << fxDate << "',"
               << "'matchday','A:" << fxId << "'," << md << ");";
           DatabaseResult *tr2 = GetDB()->Query(tx2.str()); delete tr2;
           std::stringstream bq2;
-          bq2 << "UPDATE career_finances SET balance = balance + " << md
-              << " WHERE manager_id=" << mgrId << ";";
+          bq2 << "UPDATE club_finances SET cash_balance = cash_balance + " << md
+              << " WHERE manager_id=" << mgrId << " AND club_id=" << cId << ";";
           DatabaseResult *br2 = GetDB()->Query(bq2.str()); delete br2;
           printf("[FINANCE] Matchday away fixture=%d opp=%d date=%s amount=%lld\n", fxId, oppId, fxDate.c_str(), md);
         }
@@ -882,10 +989,11 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
       }
     }
 
-    // Season-end prize money (pay once per season_year)
+    // Season-end prize money for player's club (pay once per season_year)
     if (hasSeasonEnded && seasonYear > 0) {
       std::stringstream ppq;
-      ppq << "SELECT season_prize_paid FROM career_finances WHERE manager_id=" << mgrId << ";";
+      ppq << "SELECT season_prize_paid FROM club_finances"
+          << " WHERE manager_id=" << mgrId << " AND club_id=" << cId << ";";
       DatabaseResult *ppr = GetDB()->Query(ppq.str());
       int prizePaid = (ppr->data.size() > 0 && !DBCell(ppr, 0, 0).empty())
                       ? atoi(DBCell(ppr, 0, 0).c_str()) : 0;
@@ -915,12 +1023,72 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
         InsertTx(currentDate, "prize", prizeDesc, prizeAmt);
 
         std::stringstream ppu;
-        ppu << "UPDATE career_finances SET season_prize_paid=" << seasonYear
-            << " WHERE manager_id=" << mgrId << ";";
+        ppu << "UPDATE club_finances SET season_prize_paid=" << seasonYear
+            << " WHERE manager_id=" << mgrId << " AND club_id=" << cId << ";";
         DatabaseResult *ppud = GetDB()->Query(ppu.str());
         delete ppud;
         printf("[FINANCE] Prize paid position=%d amount=%lld season=%d\n",
                position, prizeAmt, seasonYear);
+      }
+
+      // Annual budget cycle for ALL clubs (once per season)
+      {
+        std::stringstream acq;
+        acq << "SELECT cf.club_id, cf.season_budget_processed,"
+            << " cf.cash_balance, cf.wage_budget, cf.transfer_budget, cf.board_confidence,"
+            << " cf.commercial_strength, cf.institutional_power, cf.style_seed,"
+            << " cf.debt_level, cf.shock_cooldown, cf.commercial_shock_mult,"
+            << " cf.bad_contract_weeks, cf.transfer_budget_frozen, cf.emergency_credit_used,"
+            << " cf.wage_overrun_weeks,"
+            << " t.league_id, t.domestic_prestige, t.international_prestige,"
+            << " t.transfer_budget as team_tbud"
+            << " FROM club_finances cf JOIN teams t ON cf.club_id=t.id"
+            << " WHERE cf.manager_id=" << mgrId << ";";
+        DatabaseResult *acr = GetDB()->Query(acq.str());
+
+        // Need max transfer_budget once for club_factor calculation
+        DatabaseResult *mxr = GetDB()->Query(
+          "SELECT MAX(transfer_budget) FROM teams WHERE transfer_budget > 0;");
+        long long maxB = 1LL;
+        if (mxr->data.size() > 0 && !DBCell(mxr, 0, 0).empty())
+          maxB = std::max(1LL, atoll(DBCell(mxr, 0, 0).c_str()));
+        delete mxr;
+
+        for (unsigned int i = 0; i < acr->data.size(); i++) {
+          int acClubId   = atoi(DBCell(acr, i,  0).c_str());
+          int seasonDone = atoi(DBCell(acr, i,  1).c_str());
+          if (seasonDone == seasonYear) continue;
+
+          ClubFinances cf;
+          cf.club_id               = acClubId;
+          cf.cash_balance          = atoll(DBCell(acr, i, 2).c_str());
+          cf.wage_budget           = atoll(DBCell(acr, i, 3).c_str());
+          cf.transfer_budget       = atoll(DBCell(acr, i, 4).c_str());
+          cf.board_confidence      = atoi(DBCell(acr, i,  5).c_str());
+          cf.commercial_strength   = (float)atof(DBCell(acr, i, 6).c_str());
+          cf.institutional_power   = (float)atof(DBCell(acr, i, 7).c_str());
+          cf.style_seed            = atoi(DBCell(acr, i,  8).c_str());
+          cf.debt_level            = atoll(DBCell(acr, i, 9).c_str());
+          cf.shock_cooldown        = atoi(DBCell(acr, i, 10).c_str());
+          cf.commercial_shock_mult = (float)atof(DBCell(acr, i, 11).c_str());
+          cf.bad_contract_weeks    = atoi(DBCell(acr, i, 12).c_str());
+          cf.transfer_budget_frozen = atoi(DBCell(acr, i, 13).c_str());
+          cf.emergency_credit_used  = atoi(DBCell(acr, i, 14).c_str());
+          cf.wage_overrun_weeks    = atoi(DBCell(acr, i, 15).c_str());
+          int acLeagueId  = atoi(DBCell(acr, i, 16).c_str());
+          int acDomPres   = atoi(DBCell(acr, i, 17).c_str());
+          int acIntlPres  = atoi(DBCell(acr, i, 18).c_str());
+          long long acTbud = atoll(DBCell(acr, i, 19).c_str());
+
+          const LeagueFP *acLfp = GetLeagueFP(acLeagueId);
+          float bFactor = maxB > 0 ? (float)acTbud / (float)maxB : 0.0f;
+          float pFactor = (acIntlPres * 0.6f + acDomPres * 0.4f) / 10.0f;
+          float clubFac = bFactor * 0.70f + pFactor * 0.30f;
+
+          ProcessAnnualCycle(mgrId, acClubId, cf, acLfp, seasonYear,
+                             acLeagueId, clubFac, acDomPres, acIntlPres);
+        }
+        delete acr;
       }
     }
   }
@@ -928,17 +1096,22 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
   // Load finance state into CareerHubState
   {
     std::stringstream bq;
-    bq << "SELECT balance FROM career_finances WHERE manager_id=" << mgrId << ";";
+    bq << "SELECT cash_balance, wage_budget, transfer_budget, board_confidence, debt_level"
+       << " FROM club_finances WHERE manager_id=" << mgrId << " AND club_id=" << cId << ";";
     DatabaseResult *br = GetDB()->Query(bq.str());
-    finances.balance = (br->data.size() > 0 && !DBCell(br, 0, 0).empty())
-                        ? atoll(DBCell(br, 0, 0).c_str()) : 0LL;
+    if (br->data.size() > 0) {
+      finances.balance         = atoll(DBCell(br, 0, 0).c_str());
+      finances.wageBudget      = atoll(DBCell(br, 0, 1).c_str());
+      finances.transferBudget  = atoll(DBCell(br, 0, 2).c_str());
+      finances.boardConfidence = atoi(DBCell(br, 0, 3).c_str());
+      finances.debtLevel       = atoll(DBCell(br, 0, 4).c_str());
+    }
     delete br;
 
     float qualityForDisplay  = CalcClubQualityFactor(players);
     finances.weeklyTV        = (long long)(lfp->weeklyTV * (0.85f + qualityForDisplay * 0.30f));
     finances.weeklyWages     = wageBill;
     finances.weeklyOperating = lfp->weeklyOperating;
-    // Matchday range: min = weak opponent + poor form, max = strong opponent + top of table
     finances.matchdayMin     = (long long)(lfp->matchdayHome * 0.25f);
     finances.matchdayMax     = (long long)(lfp->matchdayHome * (0.80f + qualityForDisplay * 1.20f));
     finances.seasonPrize1st  = lfp->prize[0];
@@ -948,6 +1121,7 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
     std::stringstream rq;
     rq << "SELECT date, category, description, amount"
        << " FROM finance_transactions WHERE manager_id=" << mgrId
+       << " AND club_id=" << cId
        << " ORDER BY id DESC LIMIT 40;";
     DatabaseResult *rr = GetDB()->Query(rq.str());
     for (unsigned int i = 0; i < rr->data.size(); i++) {
@@ -1056,6 +1230,617 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
   }
 
   active = true;
+}
+
+// ---- Finance function implementations -----------------------------------
+
+static void InitAllClubFinances(int managerId) {
+  // Find the largest transfer_budget across all teams (normalisation denominator)
+  DatabaseResult *mr = GetDB()->Query(
+    "SELECT MAX(transfer_budget) FROM teams WHERE transfer_budget > 0;");
+  long long maxBudget = 1LL;
+  if (mr->data.size() > 0 && !DBCell(mr, 0, 0).empty())
+    maxBudget = std::max(1LL, atoll(DBCell(mr, 0, 0).c_str()));
+  delete mr;
+
+  // Get manager creation time as the career-stable seed base
+  std::stringstream tsq;
+  tsq << "SELECT strftime('%s', created_at) FROM managers WHERE id=" << managerId << ";";
+  DatabaseResult *tsr = GetDB()->Query(tsq.str());
+  unsigned int careerSeed = 12345u;
+  if (tsr->data.size() > 0 && !DBCell(tsr, 0, 0).empty())
+    careerSeed = (unsigned int)atoll(DBCell(tsr, 0, 0).c_str());
+  delete tsr;
+
+  // Load all clubs with financial inputs
+  DatabaseResult *tr = GetDB()->Query(
+    "SELECT id, league_id, transfer_budget, international_prestige, domestic_prestige"
+    " FROM teams WHERE transfer_budget > 0;");
+
+  for (unsigned int i = 0; i < tr->data.size(); i++) {
+    int   clubId   = atoi(DBCell(tr, i, 0).c_str());
+    int   leagueId = atoi(DBCell(tr, i, 1).c_str());
+    long long tbud = atoll(DBCell(tr, i, 2).c_str());
+    int   intlPres = atoi(DBCell(tr, i, 3).c_str());
+    int   domPres  = atoi(DBCell(tr, i, 4).c_str());
+    const LeagueFP *lfp = GetLeagueFP(leagueId);
+
+    float budget_factor   = (float)tbud / (float)maxBudget;
+    float prestige_factor = (intlPres * 0.6f + domPres * 0.4f) / 10.0f;
+    float club_factor     = budget_factor * 0.70f + prestige_factor * 0.30f;
+
+    int style_seed = (int)((unsigned int)(clubId * 31337u) ^ careerSeed);
+    int archetype  = ((unsigned int)style_seed) % 6;
+
+    // commercial_strength (permanent)
+    float comm_var = ((float)(((unsigned int)style_seed >> 8) % 30) / 100.0f) - 0.15f;
+    float commercial_strength = std::max(0.05f, std::min(1.0f, club_factor * 0.70f + comm_var));
+
+    // institutional_power (permanent)
+    float prestige_score    = (intlPres * 0.5f + domPres * 0.3f) / 8.0f;
+    float institutional_power = std::max(0.05f, std::min(1.0f,
+                                           prestige_score * 0.6f + commercial_strength * 0.4f));
+
+    // cash_balance
+    long long range    = lfp->maxBalance - lfp->minBalance;
+    long long baseCash = lfp->minBalance + (long long)((double)range * club_factor);
+    float cash_mults[] = { 1.25f, 0.85f, 0.65f, 1.00f, 1.10f, 0.75f };
+    float var_pct = (float)((style_seed >> 4) % 21 - 10) / 100.0f;
+    long long cash_balance = (long long)(baseCash * cash_mults[archetype] * (1.0f + var_pct));
+
+    // wage_budget
+    long long est_annual = (long long)(lfp->weeklyTV * 52.0f * (0.85f + club_factor * 0.30f))
+                         + (long long)(lfp->weeklyTV * 12.0f * commercial_strength);
+    float wage_ratios[] = { 0.52f, 0.68f, 0.80f, 0.45f, 0.48f, 0.72f };
+    long long wage_budget = (long long)(est_annual * wage_ratios[archetype] / 52.0f);
+
+    // board_confidence
+    int prestige_bonus = (int)(prestige_factor * 15.0f);
+    int conf_var       = (style_seed % 11) - 5;
+    int board_confidence = std::max(35, std::min(75, 50 + prestige_bonus + conf_var));
+
+    // Insert (OR IGNORE — existing saves keep their already-migrated row for manager's club)
+    std::stringstream ins;
+    ins << "INSERT OR IGNORE INTO club_finances"
+        << " (manager_id, club_id, cash_balance, wage_budget, transfer_budget,"
+        << "  board_confidence, commercial_strength, institutional_power, style_seed)"
+        << " VALUES ("
+        << managerId  << "," << clubId        << "," << cash_balance  << ","
+        << wage_budget << "," << tbud          << "," << board_confidence << ","
+        << commercial_strength << "," << institutional_power << "," << style_seed << ");";
+    DatabaseResult *ir = GetDB()->Query(ins.str());
+    delete ir;
+
+    printf("[FINANCE INIT] club=%d factor=%.2f archetype=%d cash=%lld wage_bud=%lld tbud=%lld conf=%d\n",
+           clubId, club_factor, archetype, cash_balance, wage_budget, tbud, board_confidence);
+  }
+  delete tr;
+}
+
+static void TriggerDebtCrisis(int managerId, int clubId, ClubFinances &cf,
+                               const LeagueFP *lfp) {
+  cf.transfer_budget_frozen = 1;
+
+  // Board confidence penalty, softened for large clubs
+  int penalty = (int)(25.0f * (1.0f - cf.institutional_power * 0.40f));
+  cf.board_confidence = std::max(0, cf.board_confidence - penalty);
+
+  if (!cf.emergency_credit_used) {
+    // One-time emergency board loan — size scales with institutional_power
+    long long credit = (long long)(lfp->minBalance
+                     * (0.5f + cf.institutional_power * 1.0f));
+    cf.cash_balance        += credit;
+    cf.debt_level          += credit;
+    cf.emergency_credit_used = 1;
+    cf.shock_cooldown        = 2;
+    printf("[FINANCE CRISIS] club=%d emergency_credit=%lld conf=%d\n",
+           clubId, credit, cf.board_confidence);
+  } else {
+    // Second crisis: no safety net — pin debt at ceiling, drain cash weekly
+    printf("[FINANCE CRISIS] club=%d no_safety_net conf=%d\n",
+           clubId, cf.board_confidence);
+  }
+
+  // Write crisis state back immediately
+  std::stringstream uq;
+  uq << "UPDATE club_finances SET"
+     << "  transfer_budget_frozen=" << cf.transfer_budget_frozen << ","
+     << "  board_confidence="       << cf.board_confidence       << ","
+     << "  emergency_credit_used="  << cf.emergency_credit_used  << ","
+     << "  cash_balance="           << cf.cash_balance           << ","
+     << "  debt_level="             << cf.debt_level             << ","
+     << "  shock_cooldown="         << cf.shock_cooldown
+     << " WHERE manager_id=" << managerId << " AND club_id=" << clubId << ";";
+  DatabaseResult *ur = GetDB()->Query(uq.str());
+  delete ur;
+}
+
+static bool TryFireShock(int managerId, int clubId, ClubFinances &cf,
+                          const LeagueFP *lfp, int seasonYear,
+                          long long estAnnualIncome, int domPrestige, int intlPrestige) {
+  if (cf.shock_cooldown > 0) return false;
+
+  FinancialStyle style = DeriveStyle(cf.style_seed);
+  unsigned int rseed   = (unsigned int)(cf.style_seed) ^ (unsigned int)(seasonYear * 1031);
+  float roll           = SeededRand(rseed, 5);
+  float base_prob      = 0.15f;
+
+  if (roll >= base_prob * style.shock_vulnerability) return false;
+
+  // Bad vs good
+  float bvg       = SeededRand(rseed, 6);
+  float bad_thr   = 0.62f / style.shock_opportunity;
+  bool  is_bad    = (bvg < bad_thr);
+  bool  did_shock = false;
+
+  if (is_bad) {
+    int archetype = ((unsigned int)cf.style_seed) % 6;
+    int bad_id    = (int)(SeededRand(rseed, 7) * 5.99f); // 0-5
+
+    // Only bad contracts fire for aggressive/gambling/star archetypes
+    if (bad_id == 1 && archetype != 1 && archetype != 2 && archetype != 5)
+      bad_id = 0;
+    // Financial investigation only for gambling archetype
+    if (bad_id == 5 && archetype != 2)
+      bad_id = 3;
+
+    switch (bad_id) {
+      case 0: { // Sponsorship collapse
+        float sev = 0.35f + SeededRand(rseed, 8) * 0.20f;
+        sev *= (1.0f - cf.institutional_power * 0.35f);
+        cf.commercial_shock_mult = 1.0f - sev;
+        cf.shock_cooldown = 2;
+        printf("[SHOCK BAD] club=%d sponsorship_collapse mult=%.2f\n", clubId, cf.commercial_shock_mult);
+        did_shock = true; break;
+      }
+      case 1: { // Bad contract
+        long long contract_cost = (long long)(estAnnualIncome
+                                * (0.15f + SeededRand(rseed, 8) * 0.10f));
+        contract_cost = (long long)(contract_cost * (1.0f - cf.institutional_power * 0.25f));
+        cf.debt_level         += contract_cost;
+        cf.bad_contract_weeks  = 104;
+        cf.shock_cooldown      = 3;
+        printf("[SHOCK BAD] club=%d bad_contract cost=%lld\n", clubId, contract_cost);
+        did_shock = true; break;
+      }
+      case 2: { // Ownership crisis
+        if (cf.board_confidence < 45) {
+          int pen = (int)(20.0f * (1.0f - cf.institutional_power * 0.40f));
+          cf.board_confidence = std::max(0, cf.board_confidence - pen);
+          cf.transfer_budget /= 2;
+          cf.shock_cooldown   = 2;
+          printf("[SHOCK BAD] club=%d ownership_crisis conf=%d tbud=%lld\n",
+                 clubId, cf.board_confidence, cf.transfer_budget);
+          did_shock = true;
+        }
+        break;
+      }
+      case 3: { // Stadium emergency (small clubs only)
+        if (domPrestige < 5) {
+          float drain = 0.08f + SeededRand(rseed, 8) * 0.07f;
+          drain *= (1.0f - cf.institutional_power * 0.35f);
+          long long loss = (long long)(cf.cash_balance * drain);
+          cf.cash_balance -= loss;
+          cf.shock_cooldown = 2;
+          printf("[SHOCK BAD] club=%d stadium_emergency loss=%lld\n", clubId, loss);
+          did_shock = true;
+        }
+        break;
+      }
+      case 4: { // Wage revolt
+        if (cf.wage_overrun_weeks > 12) {
+          int pen = (int)(25.0f * (1.0f - cf.institutional_power * 0.40f));
+          cf.board_confidence = std::max(0, cf.board_confidence - pen);
+          cf.shock_cooldown   = 2;
+          printf("[SHOCK BAD] club=%d wage_revolt conf=%d\n", clubId, cf.board_confidence);
+          did_shock = true;
+        }
+        break;
+      }
+      case 5: { // Financial investigation (gambling only)
+        cf.transfer_budget_frozen = 1;
+        long long fine = (long long)(cf.cash_balance * 0.08f);
+        cf.debt_level   += fine;
+        cf.cash_balance -= fine;
+        cf.shock_cooldown = 3;
+        printf("[SHOCK BAD] club=%d financial_investigation fine=%lld\n", clubId, fine);
+        did_shock = true; break;
+      }
+    }
+  } else {
+    // Good shocks
+    int good_id = (int)(SeededRand(rseed, 7) * 4.99f); // 0-4
+
+    switch (good_id) {
+      case 0: { // Sponsorship windfall
+        if (cf.commercial_strength > 0.5f) {
+          cf.commercial_shock_mult = 1.30f + SeededRand(rseed, 8) * 0.20f;
+          cf.shock_cooldown = 2;
+          printf("[SHOCK GOOD] club=%d sponsorship_windfall mult=%.2f\n",
+                 clubId, cf.commercial_shock_mult);
+          did_shock = true;
+        }
+        break;
+      }
+      case 1: { // Ownership injection
+        if (cf.board_confidence > 65) {
+          long long inj = (long long)(cf.transfer_budget
+                        * (0.15f + SeededRand(rseed, 8) * 0.25f));
+          cf.cash_balance  += inj;
+          cf.shock_cooldown = 3;
+          printf("[SHOCK GOOD] club=%d ownership_injection inj=%lld\n", clubId, inj);
+          did_shock = true;
+        }
+        break;
+      }
+      case 2: { // Naming rights
+        if (domPrestige >= 7) {
+          cf.cash_balance  += lfp->prize[2];
+          cf.shock_cooldown = 4;
+          printf("[SHOCK GOOD] club=%d naming_rights cash+=%lld\n", clubId, lfp->prize[2]);
+          did_shock = true;
+        }
+        break;
+      }
+      case 3: { // Youth breakthrough (youth-focused archetype)
+        if (((unsigned int)cf.style_seed) % 6 == 3) {
+          long long youth_val = (long long)(cf.transfer_budget
+                              * (0.05f + SeededRand(rseed, 8) * 0.15f));
+          cf.transfer_budget += youth_val;
+          cf.shock_cooldown   = 2;
+          printf("[SHOCK GOOD] club=%d youth_breakthrough tbud+=%lld\n", clubId, youth_val);
+          did_shock = true;
+        }
+        break;
+      }
+      case 4: { // European windfall
+        if (intlPrestige >= 7) {
+          cf.cash_balance  += lfp->prize[3];
+          cf.shock_cooldown = 2;
+          printf("[SHOCK GOOD] club=%d european_windfall cash+=%lld\n", clubId, lfp->prize[3]);
+          did_shock = true;
+        }
+        break;
+      }
+    }
+  }
+
+  return did_shock;
+}
+
+static void ProcessAnnualCycle(int managerId, int clubId, ClubFinances &cf,
+                                const LeagueFP *lfp, int seasonYear,
+                                int leagueId, float clubFactor,
+                                int domPrestige, int intlPrestige) {
+  FinancialStyle style  = DeriveStyle(cf.style_seed);
+  int archetype         = ((unsigned int)cf.style_seed) % 6;
+  unsigned int rng_seed = (unsigned int)cf.style_seed ^ (unsigned int)seasonYear;
+
+  // --- Estimated annual income (used for debt ceiling and wage_budget)
+  long long est_annual = (long long)(lfp->weeklyTV * 52.0f * (0.85f + clubFactor * 0.30f))
+                       + (long long)(lfp->weeklyTV * 12.0f * cf.commercial_strength);
+
+  // --- Hard debt ceiling check
+  long long max_debt = (long long)(est_annual * 2.5f);
+  if (cf.debt_level > max_debt) {
+    cf.debt_level = max_debt;
+    TriggerDebtCrisis(managerId, clubId, cf, lfp);
+  }
+
+  // --- Season prize money (lookup actual position from standings)
+  long long prize_money = 0LL;
+  int total_clubs = 10;
+  {
+    std::stringstream pq;
+    pq << "SELECT (SELECT COUNT(*)+1 FROM standings s2"
+       << " WHERE s2.manager_id=" << managerId
+       << " AND s2.league_id=" << leagueId
+       << " AND s2.season_year=" << seasonYear
+       << " AND s2.points > s1.points)"
+       << " FROM standings s1"
+       << " WHERE s1.manager_id=" << managerId
+       << " AND s1.league_id=" << leagueId
+       << " AND s1.team_id=" << clubId
+       << " AND s1.season_year=" << seasonYear << ";";
+    DatabaseResult *pr = GetDB()->Query(pq.str());
+    int position = 6;
+    if (pr->data.size() > 0 && !DBCell(pr, 0, 0).empty())
+      position = atoi(DBCell(pr, 0, 0).c_str());
+    delete pr;
+    int prizeIdx = std::max(0, std::min(5, position - 1));
+    prize_money  = lfp->prize[prizeIdx];
+    cf.cash_balance += prize_money;
+
+    std::stringstream cq;
+    cq << "SELECT COUNT(*) FROM standings WHERE manager_id=" << managerId
+       << " AND league_id=" << leagueId << " AND season_year=" << seasonYear << ";";
+    DatabaseResult *cr = GetDB()->Query(cq.str());
+    if (cr->data.size() > 0 && !DBCell(cr, 0, 0).empty())
+      total_clubs = atoi(DBCell(cr, 0, 0).c_str());
+    delete cr;
+
+    // Board confidence: performance component
+    int expected_pos  = (int)((1.0f - clubFactor) * (float)total_clubs) + 1;
+    int pos_delta     = expected_pos - position;
+
+    int perf_delta;
+    if      (pos_delta >=  3) perf_delta = +12;
+    else if (pos_delta >=  1) perf_delta = +6;
+    else if (pos_delta ==  0) perf_delta = +2;
+    else if (pos_delta >= -2) perf_delta = -8;
+    else                      perf_delta = -18;
+
+    if (perf_delta < 0)
+      perf_delta = (int)(perf_delta * (1.0f - cf.institutional_power * 0.40f));
+
+    cf.board_confidence = std::max(0, std::min(100, cf.board_confidence + perf_delta));
+  }
+
+  // --- Annual revenue streams
+  float rng01 = SeededRand(rng_seed, 0);
+  float comm_var = 1.0f + (rng01 * 2.0f - 1.0f) * style.commercial_variance;
+  comm_var *= cf.commercial_shock_mult;
+  cf.commercial_shock_mult = 1.0f; // consume for this season
+
+  long long commercial = (long long)(lfp->weeklyTV * 12.0f
+                       * cf.commercial_strength * comm_var);
+
+  float conf_factor_r = 0.70f + (cf.board_confidence / 100.0f) * 0.60f;
+  float rng02 = SeededRand(rng_seed, 1);
+  long long sponsorship = (long long)(lfp->weeklyTV * 8.0f
+                        * cf.commercial_strength * conf_factor_r
+                        * (0.90f + rng02 * 0.20f));
+
+  float merch_base = (domPrestige / 10.0f) * 0.8f + 0.2f;
+  float rng03 = SeededRand(rng_seed, 2);
+  long long merchandise = (long long)(lfp->weeklyTV * 4.0f
+                         * merch_base * (0.85f + rng03 * 0.30f));
+
+  long long player_sales = 0LL;
+  float rng04 = SeededRand(rng_seed, 3);
+  if (rng04 < style.selling_bias * 0.6f)
+    player_sales = (long long)(cf.transfer_budget * (0.20f + rng04 * 0.40f));
+
+  long long annual_income = commercial + sponsorship + merchandise
+                          + player_sales + prize_money;
+  cf.cash_balance += commercial + sponsorship + merchandise + player_sales;
+
+  // Annual non-weekly expenses
+  long long facilities = (long long)(lfp->weeklyOperating * 8.0f);
+  long long youth_cost = (long long)(lfp->weeklyOperating * (archetype == 3 ? 6.0f : 2.0f));
+  long long season_profit = annual_income - facilities - youth_cost;
+  cf.cash_balance -= (facilities + youth_cost);
+
+  // --- Board confidence: financial health component
+  int fin_delta = 0;
+  if (season_profit > 0)                                     fin_delta += 5;
+  if (cf.cash_balance > lfp->minBalance)                     fin_delta += 3;
+  if (cf.debt_level > (long long)(est_annual * 0.40f))       fin_delta -= 12;
+  if (cf.wage_overrun_weeks > 8)                             fin_delta -= 10;
+  if (cf.cash_balance < 0)                                   fin_delta -= 15;
+  fin_delta = (int)(fin_delta * (1.0f - cf.institutional_power * 0.20f));
+
+  int decay = -1;
+  cf.board_confidence = std::max(0, std::min(100, cf.board_confidence + fin_delta + decay));
+
+  // --- Cash retention
+  if (season_profit > 0) {
+    long long banked = (long long)(season_profit * style.saving_rate);
+    cf.cash_balance += banked;
+  }
+
+  // --- Next season transfer_budget
+  if (!cf.transfer_budget_frozen) {
+    long long rollover    = (long long)(cf.transfer_budget * 0.50f);
+    float conf_factor_t   = (cf.board_confidence - 50) / 50.0f;
+    long long injection   = (long long)(std::max(0LL, cf.cash_balance)
+                          * (0.15f + conf_factor_t * 0.20f));
+    long long prize_slice = (long long)(prize_money * 0.25f);
+    float style_mult = 0.70f + style.transfer_spend_bias * 0.60f;
+    float conf_mult  = 1.00f + conf_factor_t * 0.35f;
+    float rng_t      = SeededRand(rng_seed, 4);
+    float variance   = 0.90f + rng_t * 0.20f;
+
+    long long raw = (long long)((rollover + injection + prize_slice)
+                  * style_mult * conf_mult * variance);
+    long long floor_b = lfp->minBalance / 4LL;
+    long long ceil_b  = (long long)(lfp->maxBalance * 1.20f);
+    cf.transfer_budget = std::max(floor_b, std::min(ceil_b, raw));
+  } else {
+    cf.transfer_budget        = 0LL;
+    cf.transfer_budget_frozen = 0;
+  }
+
+  // --- Next season wage_budget
+  float wage_ratios[] = { 0.52f, 0.68f, 0.80f, 0.45f, 0.48f, 0.72f };
+  long long new_est = (long long)(lfp->weeklyTV * 52.0f * (0.85f + clubFactor * 0.30f))
+                    + commercial + sponsorship;
+  cf.wage_budget = (long long)(new_est * wage_ratios[archetype] / 52.0f);
+
+  // --- Try to fire a shock event
+  TryFireShock(managerId, clubId, cf, lfp, seasonYear, est_annual, domPrestige, intlPrestige);
+
+  // --- Tick shock cooldown and reset seasonal counters
+  if (cf.shock_cooldown > 0) cf.shock_cooldown--;
+  cf.wage_overrun_weeks      = 0;
+  cf.season_budget_processed = seasonYear;
+
+  printf("[ANNUAL CYCLE] club=%d season=%d tbud=%lld conf=%d cash=%lld debt=%lld\n",
+         clubId, seasonYear, cf.transfer_budget, cf.board_confidence,
+         cf.cash_balance, cf.debt_level);
+
+  // --- Write back all fields
+  std::stringstream uq;
+  uq << "UPDATE club_finances SET"
+     << "  cash_balance="           << cf.cash_balance           << ","
+     << "  wage_budget="            << cf.wage_budget            << ","
+     << "  transfer_budget="        << cf.transfer_budget        << ","
+     << "  board_confidence="       << cf.board_confidence       << ","
+     << "  debt_level="             << cf.debt_level             << ","
+     << "  shock_cooldown="         << cf.shock_cooldown         << ","
+     << "  commercial_shock_mult="  << cf.commercial_shock_mult  << ","
+     << "  bad_contract_weeks="     << cf.bad_contract_weeks     << ","
+     << "  transfer_budget_frozen=" << cf.transfer_budget_frozen << ","
+     << "  emergency_credit_used="  << cf.emergency_credit_used  << ","
+     << "  wage_overrun_weeks=0,"
+     << "  season_budget_processed=" << cf.season_budget_processed
+     << " WHERE manager_id=" << managerId << " AND club_id=" << clubId << ";";
+  DatabaseResult *ur = GetDB()->Query(uq.str());
+  delete ur;
+}
+
+static void ProcessWeeklyAllClubs(int managerId, const std::string &currentDate,
+                                   int playerClubId, const LeagueFP *playerLfp,
+                                   long long playerWageBill) {
+  // Batch 1: wage bill per team
+  std::stringstream wq;
+  wq << "SELECT team_id, SUM(weekly_wage) FROM players"
+     << " WHERE team_id IN (SELECT club_id FROM club_finances WHERE manager_id="
+     << managerId << ") GROUP BY team_id;";
+  DatabaseResult *wr = GetDB()->Query(wq.str());
+  std::map<int,long long> wagemap;
+  for (unsigned int i = 0; i < wr->data.size(); i++) {
+    int       tid  = atoi(DBCell(wr, i, 0).c_str());
+    long long bill = atoll(DBCell(wr, i, 1).c_str());
+    wagemap[tid]   = bill;
+  }
+  delete wr;
+
+  // Batch 2: avg base_stat per team (quality approximation for AI clubs)
+  std::stringstream qq;
+  qq << "SELECT team_id, AVG(base_stat) FROM players"
+     << " WHERE team_id IN (SELECT club_id FROM club_finances WHERE manager_id="
+     << managerId << ") GROUP BY team_id;";
+  DatabaseResult *qr = GetDB()->Query(qq.str());
+  std::map<int,float> qualmap;
+  for (unsigned int i = 0; i < qr->data.size(); i++) {
+    int   tid = atoi(DBCell(qr, i, 0).c_str());
+    float avg = DBCell(qr, i, 1).empty() ? 60.0f : (float)atof(DBCell(qr, i, 1).c_str());
+    qualmap[tid] = std::max(0.0f, std::min(1.0f, (avg - 50.0f) / 40.0f));
+  }
+  delete qr;
+
+  // Batch 3: home fixtures played this week (to award matchday income)
+  std::stringstream fq;
+  fq << "SELECT home_team_id FROM fixtures"
+     << " WHERE manager_id=" << managerId
+     << " AND status='played'"
+     << " AND julianday('" << currentDate << "') - julianday(fixture_date) BETWEEN 0 AND 6;";
+  DatabaseResult *fr = GetDB()->Query(fq.str());
+  std::set<int> homeThisWeek;
+  for (unsigned int i = 0; i < fr->data.size(); i++)
+    homeThisWeek.insert(atoi(DBCell(fr, i, 0).c_str()));
+  delete fr;
+
+  // Load all club_finances rows for this manager
+  std::stringstream cfq;
+  cfq << "SELECT club_id, cash_balance, wage_budget, transfer_budget, board_confidence,"
+      << " commercial_strength, institutional_power, style_seed, debt_level,"
+      << " shock_cooldown, bad_contract_weeks, transfer_budget_frozen,"
+      << " emergency_credit_used, wage_overrun_weeks"
+      << " FROM club_finances WHERE manager_id=" << managerId << ";";
+  DatabaseResult *cfr = GetDB()->Query(cfq.str());
+
+  for (unsigned int i = 0; i < cfr->data.size(); i++) {
+    ClubFinances cf;
+    cf.club_id               = atoi(DBCell(cfr, i,  0).c_str());
+    cf.cash_balance          = atoll(DBCell(cfr, i, 1).c_str());
+    cf.wage_budget           = atoll(DBCell(cfr, i, 2).c_str());
+    cf.transfer_budget       = atoll(DBCell(cfr, i, 3).c_str());
+    cf.board_confidence      = atoi(DBCell(cfr, i,  4).c_str());
+    cf.commercial_strength   = (float)atof(DBCell(cfr, i, 5).c_str());
+    cf.institutional_power   = (float)atof(DBCell(cfr, i, 6).c_str());
+    cf.style_seed            = atoi(DBCell(cfr, i,  7).c_str());
+    cf.debt_level            = atoll(DBCell(cfr, i, 8).c_str());
+    cf.shock_cooldown        = atoi(DBCell(cfr, i,  9).c_str());
+    cf.bad_contract_weeks    = atoi(DBCell(cfr, i, 10).c_str());
+    cf.transfer_budget_frozen = atoi(DBCell(cfr, i, 11).c_str());
+    cf.emergency_credit_used  = atoi(DBCell(cfr, i, 12).c_str());
+    cf.wage_overrun_weeks    = atoi(DBCell(cfr, i, 13).c_str());
+
+    // Get league info for this club
+    std::stringstream lq;
+    lq << "SELECT league_id FROM teams WHERE id=" << cf.club_id << ";";
+    DatabaseResult *lr = GetDB()->Query(lq.str());
+    int leagueId = 0;
+    if (lr->data.size() > 0) leagueId = atoi(DBCell(lr, 0, 0).c_str());
+    delete lr;
+    const LeagueFP *lfp = GetLeagueFP(leagueId);
+
+    float qual  = qualmap.count(cf.club_id) ? qualmap[cf.club_id] : 0.35f;
+    long long wages = wagemap.count(cf.club_id) ? wagemap[cf.club_id] : 0LL;
+
+    // TV income
+    long long tv = (long long)(lfp->weeklyTV
+                 * (0.85f + qual * 0.30f)
+                 * (0.80f + cf.commercial_strength * 0.40f));
+
+    // Operating
+    long long operating = lfp->weeklyOperating;
+
+    // Matchday
+    long long matchday = 0LL;
+    if (homeThisWeek.count(cf.club_id)) {
+      float md_qual = 0.50f + qual * 0.50f;
+      matchday = (long long)(lfp->matchdayHome
+                * (0.25f + md_qual * 1.00f)
+                * (0.70f + cf.commercial_strength * 0.60f));
+    }
+
+    long long net = tv - wages - operating + matchday;
+    cf.cash_balance += net;
+
+    // Debt servicing
+    if (cf.debt_level > 0) {
+      long long installment = std::max(1000LL, cf.debt_level / 50LL);
+      cf.cash_balance -= installment;
+      cf.debt_level   -= installment;
+      if (cf.debt_level < 0) cf.debt_level = 0;
+    }
+
+    // Insolvency
+    if (cf.cash_balance < 0) {
+      long long est_annual = (long long)(lfp->weeklyTV * 52.0f * (0.85f + qual * 0.30f));
+      long long max_debt   = (long long)(est_annual * 2.5f);
+      long long shortfall  = -cf.cash_balance;
+      if (cf.debt_level + shortfall > max_debt) {
+        cf.debt_level   = max_debt;
+        cf.cash_balance = 0;
+        TriggerDebtCrisis(managerId, cf.club_id, cf, lfp);
+      } else {
+        cf.debt_level   += shortfall;
+        cf.cash_balance  = 0;
+        cf.board_confidence = std::max(0, cf.board_confidence - 3);
+      }
+    }
+
+    // Wage overrun
+    if (wages > cf.wage_budget) {
+      cf.wage_overrun_weeks++;
+      int overrun_pct = (int)(((float)(wages - cf.wage_budget) / cf.wage_budget) * 100.0f);
+      int penalty     = (int)((1 + overrun_pct / 15) * (1.0f - cf.institutional_power * 0.30f));
+      cf.board_confidence = std::max(0, cf.board_confidence - penalty);
+    }
+
+    // Bad contract countdown
+    if (cf.bad_contract_weeks > 0) cf.bad_contract_weeks--;
+
+    // Write back — AI clubs only (player's club handled by InsertTx path)
+    if (cf.club_id != playerClubId) {
+      std::stringstream uq;
+      uq << "UPDATE club_finances SET"
+         << "  cash_balance="        << cf.cash_balance        << ","
+         << "  board_confidence="    << cf.board_confidence    << ","
+         << "  debt_level="          << cf.debt_level          << ","
+         << "  bad_contract_weeks="  << cf.bad_contract_weeks  << ","
+         << "  wage_overrun_weeks="  << cf.wage_overrun_weeks  << ","
+         << "  last_weekly_date='"   << currentDate << "'"
+         << " WHERE manager_id=" << managerId << " AND club_id=" << cf.club_id << ";";
+      DatabaseResult *ur = GetDB()->Query(uq.str());
+      delete ur;
+    }
+  }
+  delete cfr;
 }
 
 // ---- Navigation state ---------------------------------------------------
@@ -8312,10 +9097,10 @@ static void DrawFinancesPage(float w, float h) {
   float baseY   = win0.y - scrollY + headerTop;
   ImVec2 origin = ImVec2(win0.x + kPad, baseY);
 
-  // Card helper lambda — ox is absolute screen X, sy is absolute screen Y
+  // Card helper lambda — ox/sy are absolute screen coords, cardW defaults to card3W
   auto SummaryCard = [&](float ox, float sy, const char *title, const std::string &value,
-                          ImU32 valCol, const char *sub = nullptr, const char *sub2 = nullptr) {
-    ImVec2 p0(ox, sy), p1(ox+card3W, sy+cardH1);
+                          ImU32 valCol, float cardW, const char *sub = nullptr, const char *sub2 = nullptr) {
+    ImVec2 p0(ox, sy), p1(ox+cardW, sy+cardH1);
     dl->AddRectFilled(p0, p1, C32(kBgCard), 10.0f);
     dl->AddRect(p0, p1, C32(kBorder), 10.0f, 0, 1.0f);
     PushMgrFont(g_ManagerFontSmall);
@@ -8342,7 +9127,7 @@ static void DrawFinancesPage(float w, float h) {
   long long bal = fi.balance;
   ImU32 balCol  = bal >= 0 ? IM_COL32(80, 215, 115, 255) : IM_COL32(220, 70, 70, 255);
   SummaryCard(origin.x, origin.y, "CURRENT BALANCE", FmtMoney(bal), balCol,
-              FmtMoneyFull(bal).c_str());
+              card3W, FmtMoneyFull(bal).c_str());
 
   // Weekly net card
   long long weekIncome  = fi.weeklyTV;
@@ -8350,7 +9135,7 @@ static void DrawFinancesPage(float w, float h) {
   long long weekNet     = weekIncome - weekExpense;
   ImU32 netCol = weekNet >= 0 ? IM_COL32(80, 215, 115, 255) : IM_COL32(220, 70, 70, 255);
   std::string netStr = (weekNet >= 0 ? "+" : "") + FmtMoney(weekNet) + " / wk";
-  SummaryCard(origin.x + card3W + kGap, origin.y, "WEEKLY CASHFLOW", netStr, netCol);
+  SummaryCard(origin.x + card3W + kGap, origin.y, "WEEKLY CASHFLOW", netStr, netCol, card3W);
 
   // Season projection: remaining weeks cashflow + remaining matchday estimate
   long long remainingWeeks = 30;
@@ -8375,11 +9160,34 @@ static void DrawFinancesPage(float w, float h) {
   ImU32 projCol = projBal >= 0 ? IM_COL32(80, 215, 115, 220) : IM_COL32(220, 70, 70, 220);
   SummaryCard(origin.x + (card3W + kGap)*2.0f, origin.y, "SEASON PROJECTION",
               FmtMoney(projBal), projCol,
-              "approx. end-of-season (excl. competitions prizes)");
+              card3W, "approx. end-of-season (excl. competitions prizes)");
+
+  // ── Row 1b: Budget cards (transfer + wage) ──────────────────────────────
+  float card2W  = (cw - kGap) / 2.0f;
+  float row1bY  = headerTop + cardH1 + kGap;
+  ImVec2 orig1b = ImVec2(win0.x + kPad, win0.y - scrollY + row1bY);
+
+  // Transfer budget card
+  {
+    ImU32 tbCol = IM_COL32(147, 197, 253, 255); // sky blue — board allocation
+    SummaryCard(orig1b.x, orig1b.y, "TRANSFER BUDGET",
+                FmtMoney(fi.transferBudget), tbCol, card2W,
+                "season allocation");
+  }
+
+  // Wage budget card
+  {
+    bool overBudget = fi.weeklyWages > fi.wageBudget;
+    ImU32 wbCol = overBudget ? IM_COL32(220, 70, 70, 255) : IM_COL32(147, 197, 253, 255);
+    std::string wbStr = FmtMoney(fi.wageBudget) + " / wk";
+    std::string wbSub = overBudget ? "OVER BUDGET" : "board wage ceiling";
+    SummaryCard(orig1b.x + card2W + kGap, orig1b.y, "WAGE BUDGET",
+                wbStr, wbCol, card2W, wbSub.c_str());
+  }
 
   // ── Row 2: Income / Expenses breakdown ──────────────────────────────────
-  float row2Y  = headerTop + cardH1 + kGap;
-  float col2W  = (cw - kGap) / 2.0f;
+  float row2Y  = row1bY + cardH1 + kGap;
+  float col2W  = card2W;
   float row2H  = 180.0f;
   ImVec2 scr2  = ImVec2(win0.x + kPad, win0.y - scrollY + row2Y);
 
@@ -8481,8 +9289,46 @@ static void DrawFinancesPage(float w, float h) {
     (void)annualTV; (void)annualOp; // suppress unused warning
   }
 
+  // ── Board Status ──────────────────────────────────────────────────────
+  float boardRowH  = 44.0f;
+  float boardRowY  = row2Y + row2H + kGap;
+  float boardRowW  = cw;
+  ImVec2 scrB = ImVec2(win0.x + kPad, win0.y - scrollY + boardRowY);
+  {
+    ImVec2 p0(scrB.x, scrB.y), p1(scrB.x + boardRowW, scrB.y + boardRowH);
+    dl->AddRectFilled(p0, p1, C32(kBgCard), 8.0f);
+    dl->AddRect(p0, p1, C32(kBorder), 8.0f, 0, 1.0f);
+
+    float bx = scrB.x + 14.0f;
+    float by = scrB.y + 13.0f;
+
+    int conf = fi.boardConfidence;
+    const char *confLabel;
+    ImU32       confCol;
+    if      (conf > 80) { confLabel = "Thriving";  confCol = IM_COL32(147,197,253,240); }
+    else if (conf > 60) { confLabel = "Satisfied"; confCol = IM_COL32( 74,222,128,230); }
+    else if (conf > 40) { confLabel = "Stable";    confCol = IM_COL32(250,204, 21,230); }
+    else if (conf > 20) { confLabel = "Concerned"; confCol = IM_COL32(251,146, 60,230); }
+    else                { confLabel = "Crisis";    confCol = IM_COL32(239, 68, 68,230); }
+
+    PushMgrFont(g_ManagerFontSmall);
+    dl->AddText(ImVec2(bx, by), C32(kTextDim), "Board Confidence:");
+    ImVec2 labelSz = ImGui::CalcTextSize("Board Confidence:");
+    dl->AddText(ImVec2(bx + labelSz.x + 8.0f, by), confCol, confLabel);
+    PopMgrFont(g_ManagerFontSmall);
+
+    if (fi.debtLevel > 0) {
+      std::string debtHint = "Financial obligations outstanding: " + FmtMoney(fi.debtLevel);
+      PushMgrFont(g_ManagerFontSmall);
+      ImVec2 debtSz = ImGui::CalcTextSize(debtHint.c_str());
+      dl->AddText(ImVec2(scrB.x + boardRowW - debtSz.x - 14.0f, by),
+                  IM_COL32(239, 68, 68, 210), debtHint.c_str());
+      PopMgrFont(g_ManagerFontSmall);
+    }
+  }
+
   // ── Ledger ────────────────────────────────────────────────────────────
-  float ledgerTop = row2Y + row2H + kGap;
+  float ledgerTop = boardRowY + boardRowH + kGap;
   float ledgerH   = h - ledgerTop - 8.0f;
   if (ledgerH < 60.0f) ledgerH = 60.0f;
 
