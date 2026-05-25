@@ -1480,12 +1480,27 @@ static void InitAllClubFinances(int managerId) {
     float var_pct = (float)((style_seed >> 4) % 21 - 10) / 100.0f;
     long long cash_balance = (long long)(baseCash * cash_mults[archetype] * (1.0f + var_pct));
 
-    // wage_budget: anchored to transfer_budget (club financial power), not TV income.
-    // TV income is league-dependent and causes cross-league distortion.
-    // Real clubs pay ~1.6x-2.4x their transfer budget in wages annually.
-    float wage_base_mult = 1.10f + club_factor * 0.55f; // 1.10x (small) to 1.65x (elite)
-    float arch_adj[]     = { 1.05f, 1.12f, 1.18f, 0.93f, 0.97f, 1.10f }; // archetype personality
-    long long wage_budget = (long long)((float)tbud * wage_base_mult * arch_adj[archetype] / 52.0f);
+    // wage_budget: anchored to actual squad wage bill + a prestige-scaled headroom.
+    // This keeps the budget grounded in reality — the board covers what you already
+    // have, plus a small margin for 1-3 signings depending on club size.
+    long long squadWages = 0;
+    {
+      std::stringstream wq;
+      wq << "SELECT SUM(weekly_wage) FROM players WHERE team_id=" << clubId << ";";
+      DatabaseResult *wr = GetDB()->Query(wq.str());
+      if (wr && wr->data.size() > 0 && !DBCell(wr, 0, 0).empty())
+        squadWages = atoll(DBCell(wr, 0, 0).c_str());
+      delete wr;
+    }
+    long long wage_budget;
+    if (squadWages > 0) {
+      // headroom: 5% (small/poor clubs) to 20% (elite clubs)
+      float headroom = 1.05f + prestige_factor * 0.15f;
+      wage_budget = (long long)((float)squadWages * headroom);
+    } else {
+      // fallback for clubs with no players in DB
+      wage_budget = (long long)((float)tbud * 0.008f); // ~0.8% of transfer budget per week
+    }
 
     // board_confidence
     int prestige_bonus = (int)(prestige_factor * 15.0f);
@@ -1870,11 +1885,24 @@ static void ProcessAnnualCycle(int managerId, int clubId, ClubFinances &cf,
     cf.transfer_budget_frozen = 0;
   }
 
-  // --- Next season wage_budget
-  float wage_ratios[] = { 0.52f, 0.68f, 0.80f, 0.45f, 0.48f, 0.72f };
-  long long new_est = (long long)(lfp->weeklyTV * 52.0f * (0.85f + clubFactor * 0.30f))
-                    + commercial + sponsorship;
-  cf.wage_budget = (long long)(new_est * wage_ratios[archetype] / 52.0f);
+  // --- Next season wage_budget: re-anchor to current squad wage bill
+  {
+    long long squadWages = 0;
+    std::stringstream wq;
+    wq << "SELECT SUM(weekly_wage) FROM players WHERE team_id=" << clubId << ";";
+    DatabaseResult *wr = GetDB()->Query(wq.str());
+    if (wr && wr->data.size() > 0 && !DBCell(wr, 0, 0).empty())
+      squadWages = atoll(DBCell(wr, 0, 0).c_str());
+    delete wr;
+
+    float prestige_factor = (intlPrestige * 0.6f + domPrestige * 0.4f) / 10.0f;
+    if (squadWages > 0) {
+      float headroom = 1.05f + prestige_factor * 0.15f;
+      cf.wage_budget = (long long)((float)squadWages * headroom);
+    } else {
+      cf.wage_budget = (long long)((float)cf.transfer_budget * 0.008f);
+    }
+  }
 
   // --- Try to fire a shock event
   TryFireShock(managerId, clubId, cf, lfp, seasonYear, est_annual, domPrestige, intlPrestige);
