@@ -339,6 +339,135 @@ static void EnsureCareerTables() {
       ");");
     delete r;
   }
+
+  // ---- Transfer system tables -----------------------------------------------
+
+  GetDB()->Query(
+    "CREATE TABLE IF NOT EXISTS player_traits("
+    "manager_id INTEGER NOT NULL,"
+    "player_id  INTEGER NOT NULL,"
+    "ambition INTEGER DEFAULT 50,"
+    "loyalty  INTEGER DEFAULT 50,"
+    "greed    INTEGER DEFAULT 50,"
+    "ego      INTEGER DEFAULT 50,"
+    "trophy_hunger  INTEGER DEFAULT 50,"
+    "adaptability   INTEGER DEFAULT 50,"
+    "professionalism INTEGER DEFAULT 50,"
+    "PRIMARY KEY(manager_id, player_id));"
+  ); delete GetDB()->Query("SELECT 1;"); // flush
+
+  GetDB()->Query(
+    "CREATE TABLE IF NOT EXISTS club_transfer_identity("
+    "manager_id INTEGER NOT NULL,"
+    "club_id    INTEGER NOT NULL,"
+    "aggression INTEGER DEFAULT 50,"
+    "wage_willingness INTEGER DEFAULT 50,"
+    "age_preference   INTEGER DEFAULT 0,"
+    "deadline_panic   INTEGER DEFAULT 30,"
+    "loyalty_to_players INTEGER DEFAULT 50,"
+    "financial_risk_tolerance INTEGER DEFAULT 50,"
+    "selling_pressure INTEGER DEFAULT 20,"
+    "youth_focus   INTEGER DEFAULT 40,"
+    "domestic_bias INTEGER DEFAULT 40,"
+    "resale_focus  INTEGER DEFAULT 30,"
+    "prestige_bias INTEGER DEFAULT 40,"
+    "irrationality INTEGER DEFAULT 25,"
+    "negotiation_personality TEXT DEFAULT 'patient',"
+    "PRIMARY KEY(manager_id, club_id));"
+  ); delete GetDB()->Query("SELECT 1;");
+
+  GetDB()->Query(
+    "CREATE TABLE IF NOT EXISTS club_player_knowledge("
+    "manager_id INTEGER NOT NULL,"
+    "club_id    INTEGER NOT NULL,"
+    "player_id  INTEGER NOT NULL,"
+    "knowledge  INTEGER DEFAULT 0,"
+    "PRIMARY KEY(manager_id, club_id, player_id));"
+  ); delete GetDB()->Query("SELECT 1;");
+
+  GetDB()->Query(
+    "CREATE TABLE IF NOT EXISTS club_player_relationship("
+    "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "manager_id INTEGER NOT NULL,"
+    "club_id    INTEGER NOT NULL,"
+    "player_id  INTEGER NOT NULL,"
+    "relationship_type TEXT NOT NULL,"
+    "created_date TEXT);"
+  ); delete GetDB()->Query("SELECT 1;");
+
+  GetDB()->Query(
+    "CREATE TABLE IF NOT EXISTS player_market_status("
+    "manager_id INTEGER NOT NULL,"
+    "player_id  INTEGER NOT NULL,"
+    "status     TEXT NOT NULL,"
+    "set_date   TEXT,"
+    "PRIMARY KEY(manager_id, player_id));"
+  ); delete GetDB()->Query("SELECT 1;");
+
+  GetDB()->Query(
+    "CREATE TABLE IF NOT EXISTS market_scarcity("
+    "manager_id     INTEGER NOT NULL,"
+    "position_group TEXT NOT NULL,"
+    "scarcity_score INTEGER DEFAULT 0,"
+    "last_updated   TEXT,"
+    "PRIMARY KEY(manager_id, position_group));"
+  ); delete GetDB()->Query("SELECT 1;");
+
+  GetDB()->Query(
+    "CREATE TABLE IF NOT EXISTS transfer_negotiations("
+    "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "manager_id        INTEGER NOT NULL,"
+    "buying_club_id    INTEGER NOT NULL,"
+    "selling_club_id   INTEGER NOT NULL,"
+    "player_id         INTEGER NOT NULL,"
+    "state             TEXT DEFAULT 'initiated',"
+    "offered_fee       INTEGER DEFAULT 0,"
+    "offered_wage      INTEGER DEFAULT 0,"
+    "promised_role     TEXT DEFAULT 'rotation',"
+    "days_in_state     INTEGER DEFAULT 0,"
+    "initiated_date    TEXT,"
+    "deadline_pressure INTEGER DEFAULT 0,"
+    "agent_pressure    INTEGER DEFAULT 0,"
+    "collapse_reason   TEXT,"
+    "competing_bid_club_id INTEGER DEFAULT 0,"
+    "acceptance_score  INTEGER DEFAULT 0,"
+    "irrationality_driven INTEGER DEFAULT 0,"
+    "tier              INTEGER DEFAULT 2,"
+    "counter_offer_count INTEGER DEFAULT 0);"
+  ); delete GetDB()->Query("SELECT 1;");
+
+  GetDB()->Query(
+    "CREATE TABLE IF NOT EXISTS negotiation_cooldowns("
+    "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "manager_id     INTEGER NOT NULL,"
+    "buying_club_id INTEGER NOT NULL,"
+    "player_id      INTEGER NOT NULL,"
+    "cooldown_until TEXT,"
+    "reason         TEXT);"
+  ); delete GetDB()->Query("SELECT 1;");
+
+  GetDB()->Query(
+    "CREATE TABLE IF NOT EXISTS transfer_news("
+    "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "manager_id   INTEGER NOT NULL,"
+    "game_date    TEXT,"
+    "headline     TEXT,"
+    "category     TEXT,"
+    "player_id    INTEGER DEFAULT 0,"
+    "from_club_id INTEGER DEFAULT 0,"
+    "to_club_id   INTEGER DEFAULT 0);"
+  ); delete GetDB()->Query("SELECT 1;");
+
+  GetDB()->Query(
+    "CREATE TABLE IF NOT EXISTS player_unhappiness("
+    "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "manager_id INTEGER NOT NULL,"
+    "player_id  INTEGER NOT NULL,"
+    "reason     TEXT,"
+    "severity   INTEGER DEFAULT 0,"
+    "created_date TEXT,"
+    "resolved   INTEGER DEFAULT 0);"
+  ); delete GetDB()->Query("SELECT 1;");
 }
 
 static void DeleteCareerSeason(int managerId) {
