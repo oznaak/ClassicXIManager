@@ -122,9 +122,106 @@ static void AddUnhappiness(int managerId, int playerId, const std::string &reaso
 
 // ---- Function stubs (implemented in later tasks) ----------------------------
 
+// Maps player role strings to one of the 7 position groups.
+static std::string RoleToGroup(const std::string &role) {
+  if (role == "GK") return "GK";
+  if (role == "CB") return "CB";
+  if (role == "LB" || role == "RB" || role == "LWB" || role == "RWB") return "FB_WB";
+  if (role == "CDM") return "DM";
+  if (role == "CM") return "CM";
+  if (role == "CAM" || role == "LM" || role == "RM" || role == "LW" || role == "RW") return "AM_W";
+  if (role == "CF" || role == "ST") return "ST";
+  return "CM"; // fallback
+}
+
 std::map<std::string, int> EvaluateSquadNeeds(int managerId, int clubId,
                                                int seasonYear) {
-  return {};
+  static const char *kGroups[] = {"GK","CB","FB_WB","DM","CM","AM_W","ST"};
+  std::map<std::string, int> scores;
+  for (const char *g : kGroups) scores[g] = 0;
+
+  // Load club's players
+  std::stringstream pq;
+  pq << "SELECT p.role, p.base_stat, p.age, p.contract_expiry"
+     << " FROM players p WHERE p.team_id=" << clubId << ";";
+  DatabaseResult *pr = GetDB()->Query(pq.str());
+
+  struct GroupData { int count=0; float statSum=0; int ageSum=0; int expiryCount=0; };
+  std::map<std::string, GroupData> gd;
+
+  std::string today;
+  { DatabaseResult *dr = GetDB()->Query("SELECT date('now');");
+    if (dr && dr->data.size()>0) today = TECell(dr,0,0); delete dr; }
+  std::string sixMonths = AddDays(today, 180);
+
+  if (pr) {
+    for (unsigned int i = 0; i < pr->data.size(); i++) {
+      std::string grp = RoleToGroup(TECell(pr,i,0));
+      float stat = atof(TECell(pr,i,1).c_str());
+      int age    = atoi(TECell(pr,i,2).c_str());
+      std::string exp = TECell(pr,i,3);
+      gd[grp].count++;
+      gd[grp].statSum += stat;
+      gd[grp].ageSum  += age;
+      if (!exp.empty() && exp <= sixMonths) gd[grp].expiryCount++;
+    }
+    delete pr;
+  }
+
+  // League average base_stat per group
+  std::map<std::string, float> leagueAvg;
+  {
+    std::stringstream lq;
+    lq << "SELECT p.role, AVG(p.base_stat)"
+       << " FROM players p JOIN teams t ON t.id=p.team_id"
+       << " JOIN teams tc ON tc.id=" << clubId
+       << " WHERE t.league_id=tc.league_id GROUP BY p.role;";
+    DatabaseResult *lr = GetDB()->Query(lq.str());
+    if (lr) {
+      for (unsigned int i=0; i < lr->data.size(); i++) {
+        std::string grp = RoleToGroup(TECell(lr,i,0));
+        float avg = atof(TECell(lr,i,1).c_str());
+        if (leagueAvg.find(grp)==leagueAvg.end()) leagueAvg[grp] = avg;
+        else leagueAvg[grp] = (leagueAvg[grp] + avg) / 2.0f;
+      }
+      delete lr;
+    }
+  }
+
+  // Club identity for age_preference
+  int agePref = 0;
+  {
+    std::stringstream cq;
+    cq << "SELECT age_preference FROM club_transfer_identity"
+       << " WHERE manager_id=" << managerId << " AND club_id=" << clubId << ";";
+    DatabaseResult *cr = GetDB()->Query(cq.str());
+    if (cr && cr->data.size()>0) agePref = atoi(TECell(cr,0,0).c_str());
+    delete cr;
+  }
+
+  for (const char *gName : kGroups) {
+    std::string g(gName);
+    auto &d = gd[g];
+    float lAvg = (leagueAvg.count(g)) ? leagueAvg[g] : 65.0f;
+    float myAvg = d.count > 0 ? d.statSum / d.count : 0.0f;
+    float myAge = d.count > 0 ? (float)d.ageSum / d.count : 25.0f;
+
+    // quality_gap: 0-1 normalised
+    float qgap = std::max(0.0f, (lAvg - myAvg) / lAvg);
+    // depth_gap: 1.0 if 0 players, 0.5 if 1 player, 0 if 2+
+    float dgap = d.count == 0 ? 1.0f : d.count == 1 ? 0.5f : 0.0f;
+    // age_problem: avg age > 30
+    float agap = myAge > 30.0f ? std::min(1.0f, (myAge - 30.0f) / 5.0f) : 0.0f;
+    // expiry_pressure: 2+ players expiring
+    float epres = d.expiryCount >= 2 ? 1.0f : d.expiryCount == 1 ? 0.5f : 0.0f;
+    // identity_fit: desired age vs actual
+    float desiredAge = 25.0f + agePref * 0.1f; // agePref -50..+50
+    float ifit = std::min(1.0f, std::abs(myAge - desiredAge) / 10.0f);
+
+    int score = (int)(qgap*30 + dgap*25 + agap*20 + epres*15 + ifit*10);
+    scores[g] = std::max(0, std::min(100, score));
+  }
+  return scores;
 }
 
 void TriggerTransferCascade(int managerId, int sellingClubId,
