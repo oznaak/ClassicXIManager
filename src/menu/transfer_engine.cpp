@@ -271,6 +271,51 @@ static void SeedClubTransferIdentity(int managerId, unsigned int careerSeed) {
   printf("[TRANSFER] SeedClubTransferIdentity: manager=%d\n", managerId);
 }
 
+static void SeedClubPlayerKnowledge(int managerId, unsigned int careerSeed) {
+  // Load all clubs with their league_id
+  DatabaseResult *cr = GetDB()->Query(
+    "SELECT id, league_id FROM teams WHERE transfer_budget > 0;");
+  if (!cr) return;
+
+  // Load all players with their team's league_id and international_reputation
+  DatabaseResult *pr = GetDB()->Query(
+    "SELECT p.id, p.international_reputation, t.league_id"
+    " FROM players p JOIN teams t ON t.id = p.team_id;");
+  if (!pr) { delete cr; return; }
+
+  for (unsigned int ci = 0; ci < cr->data.size(); ci++) {
+    int clubId      = atoi(TECell(cr, ci, 0).c_str());
+    int clubLeague  = atoi(TECell(cr, ci, 1).c_str());
+
+    for (unsigned int pi = 0; pi < pr->data.size(); pi++) {
+      int pid        = atoi(TECell(pr, pi, 0).c_str());
+      int intlRep    = atoi(TECell(pr, pi, 1).c_str()); // 1-5
+      int pLeague    = atoi(TECell(pr, pi, 2).c_str());
+
+      unsigned int seed = careerSeed ^ (unsigned int)(clubId * 7919u ^ pid * 31337u);
+      int k = TERandInt(seed, 0, 0, 14); // base noise 0-14
+
+      if (pLeague == clubLeague)  k += 60; // same league
+      if (intlRep >= 5)           k += 70; // global superstar
+      else if (intlRep >= 4)      k += 40; // globally known
+      else if (intlRep >= 3)      k += 15;
+
+      k = std::min(k, 100);
+      if (k < 10) continue; // don't store effectively-zero knowledge
+
+      std::stringstream iq;
+      iq << "INSERT OR IGNORE INTO club_player_knowledge"
+         << "(manager_id,club_id,player_id,knowledge)"
+         << " VALUES(" << managerId << "," << clubId << "," << pid << "," << k << ");";
+      DatabaseResult *ir = GetDB()->Query(iq.str());
+      delete ir;
+    }
+  }
+  delete cr;
+  delete pr;
+  printf("[TRANSFER] SeedClubPlayerKnowledge: manager=%d\n", managerId);
+}
+
 void SeedTransferSystem(int managerId) {}
 
 void ProcessDailyTransfers(int managerId, int userClubId,
