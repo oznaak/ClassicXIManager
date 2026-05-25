@@ -1079,13 +1079,14 @@ enum e_ManagerPage {
   PAGE_SETTINGS,
   PAGE_PLAYER_DETAIL,
   PAGE_STAFF_MARKET,
+  PAGE_CLUB_DETAIL,
   PAGE_COUNT
 };
 
 static const char *kPageNames[PAGE_COUNT] = {
   "Home", "Inbox", "News", "Schedule",
   "Squad", "Tactics", "Training", "Staff", "Scouting", "Finances", "Transfers",
-  "Competitions", "Fixtures", "Players", "Teams", "Settings", "Player", "Staff Market"
+  "Competitions", "Fixtures", "Players", "Teams", "Settings", "Player", "Staff Market", "Club"
 };
 
 static e_ManagerPage g_activePage = PAGE_HOME;
@@ -1122,6 +1123,76 @@ static std::string s_detailClubName;
 static std::string s_detailClubLogo;
 static std::string s_detailClubShortName;
 
+// ---- Club detail page state ----------------------------------------------
+struct ClubDetailData {
+  int         id              = -1;
+  std::string name, shortName, logoPath;
+  std::string color1, color2;
+  std::string homeStadium;
+  int         intPrestige     = 0;
+  int         domPrestige     = 0;
+  struct ClubPlayer {
+    int         id            = 0;
+    int         jerseyNumber  = 0;
+    std::string name, role, age;
+    float       ability = 0.0f;
+  };
+  std::vector<ClubPlayer> squad;
+};
+static int            s_clubDetailId     = -1;
+static int            s_clubDetailLastId = -1;
+static ClubDetailData s_clubDetail;
+
+static void LoadClubDetail(int teamId) {
+  s_clubDetail = ClubDetailData();
+  s_clubDetail.id = teamId;
+  {
+    std::stringstream q;
+    q << "SELECT name, shortname, logo_url, color1, color2, home_stadium,"
+      << " international_prestige, domestic_prestige"
+      << " FROM teams WHERE id=" << teamId << " LIMIT 1;";
+    DatabaseResult *r = GetDB()->Query(q.str());
+    if (!r->data.empty()) {
+      s_clubDetail.name         = DBCell(r, 0, 0);
+      s_clubDetail.shortName    = DBCell(r, 0, 1);
+      s_clubDetail.logoPath     = DBCell(r, 0, 2);
+      s_clubDetail.color1       = DBCell(r, 0, 3);
+      s_clubDetail.color2       = DBCell(r, 0, 4);
+      s_clubDetail.homeStadium  = DBCell(r, 0, 5);
+      s_clubDetail.intPrestige  = atoi(DBCell(r, 0, 6).c_str());
+      s_clubDetail.domPrestige  = atoi(DBCell(r, 0, 7).c_str());
+    }
+    delete r;
+  }
+  {
+    std::stringstream q;
+    q << "SELECT id, COALESCE(nickname,''), firstname, lastname, role, age, base_stat,"
+      << " COALESCE(jersey_number,0)"
+      << " FROM players WHERE team_id=" << teamId
+      << " ORDER BY COALESCE(jersey_number,999) ASC, base_stat DESC LIMIT 50;";
+    DatabaseResult *r = GetDB()->Query(q.str());
+    for (unsigned int i = 0; i < r->data.size(); i++) {
+      ClubDetailData::ClubPlayer cp;
+      cp.id      = atoi(DBCell(r, i, 0).c_str());
+      std::string nick  = DBCell(r, i, 1);
+      std::string first = DBCell(r, i, 2);
+      std::string last  = DBCell(r, i, 3);
+      if (!nick.empty())
+        cp.name = nick;
+      else if (!first.empty() && !last.empty())
+        cp.name = first + " " + last;
+      else
+        cp.name = last.empty() ? first : last;
+      cp.role          = DBCell(r, i, 4);
+      cp.age           = DBCell(r, i, 5);
+      cp.ability       = (float)atof(DBCell(r, i, 6).c_str());
+      cp.jerseyNumber  = atoi(DBCell(r, i, 7).c_str());
+      s_clubDetail.squad.push_back(cp);
+    }
+    delete r;
+  }
+}
+
 // ---- Staff market state --------------------------------------------------
 struct StaffMarketEntry {
   int         id         = 0;
@@ -1152,6 +1223,23 @@ static void NavForward() {
   s_navBack.push_back(g_activePage);
   g_activePage = s_navFwd.back();
   s_navFwd.pop_back();
+}
+static void NavToClubDetail(int teamId) {
+  if (teamId <= 0) return;
+  s_clubDetailId = teamId;
+  NavPush(PAGE_CLUB_DETAIL);
+}
+static int LookupTeamIdByName(const std::string &name) {
+  if (name.empty()) return -1;
+  std::string escaped;
+  for (char c : name) { if (c == '\'') escaped += "''"; else escaped += c; }
+  std::stringstream q;
+  q << "SELECT id FROM teams WHERE name='" << escaped << "' LIMIT 1;";
+  DatabaseResult *r = GetDB()->Query(q.str());
+  int id = -1;
+  if (!r->data.empty()) id = atoi(DBCell(r, 0, 0).c_str());
+  delete r;
+  return id;
 }
 static bool          s_calInit    = false;
 static bool          s_compInit   = false;
@@ -1656,11 +1744,13 @@ static void DrawSidebar(float sideW, float winH) {
   DrawNavItem("Transfers", PAGE_TRANSFERS);
   ImGui::Dummy(ImVec2(0, 6.0f));
 
-  DrawNavSectionHeader("WORLD");
-  DrawNavItem("Fixtures",      PAGE_SCHEDULE);
-  DrawNavItem("Competitions",  PAGE_COMPETITIONS);
-  DrawNavItem("Players",       PAGE_PLAYERS);
-  DrawNavItem("Teams",         PAGE_TEAMS);
+  DrawNavSectionHeader("LEAGUE");
+  DrawNavItem("Fixtures",   PAGE_SCHEDULE);
+  DrawNavItem("Standings",  PAGE_COMPETITIONS);
+  ImGui::Dummy(ImVec2(0, 6.0f));
+  DrawNavSectionHeader("CUPS");
+  DrawNavItem("Domestic",   PAGE_COUNT); // placeholder
+  DrawNavItem("European",   PAGE_COUNT); // placeholder
 
   ImGui::EndChild(); // nav_area
 
@@ -2876,6 +2966,9 @@ static const char *PosLabel(int fo); // forward declaration — defined with Squ
 
 static void DrawSquadSnapshotCard(ImVec2 sz) {
   BeginModernCard("##squad_snap", sz);
+  // Capture inner origin right after BeginModernCard so we can anchor the
+  // full-width notice bar to the card edges, not to the padded cursor.
+  ImVec2 cardInner = ImGui::GetCursorScreenPos(); // (card_left+14, card_top+12)
 
   GLuint faceTex = GetDefaultFaceTex();
 
@@ -3000,9 +3093,11 @@ static void DrawSquadSnapshotCard(ImVec2 sz) {
   int activeCount = (int)(xi.size() + subs.size());
   if (activeCount < 20) {
     ImGui::Dummy(ImVec2(0, 4.0f));
-    ImVec2 np = ImGui::GetCursorScreenPos();
-    float  nw = sz.x - 20.0f; // respect card padding
-    const float kNH = 28.0f;
+    float curY = ImGui::GetCursorScreenPos().y;
+    // Anchor to card edges by undoing WindowPadding (14px left)
+    ImVec2 np  = ImVec2(cardInner.x - 14.0f, curY);
+    float  nw  = sz.x; // full card width
+    const float kNH = 32.0f;
     ImDrawList *ndl = ImGui::GetWindowDrawList();
     ndl->AddRectFilled(np, ImVec2(np.x + nw, np.y + kNH),
                        IM_COL32(130, 30, 30, 180), 4.0f);
@@ -3010,13 +3105,15 @@ static void DrawSquadSnapshotCard(ImVec2 sz) {
                        IM_COL32(240, 70, 70, 255), 4.0f);
     char noticeMsg[80];
     snprintf(noticeMsg, sizeof(noticeMsg),
-             "\xe2\x9a\xa0  Select 20 players for active squad (%d/20 selected)", activeCount);
+             "Select 20 players for active squad (%d/20 selected)", activeCount);
     PushMgrFont(g_ManagerFontSmall);
+    const float kNFs = 16.0f;
     ImVec2 tsz = g_ManagerFontSmall
-        ? g_ManagerFontSmall->CalcTextSizeA(12.0f, FLT_MAX, 0, noticeMsg)
+        ? g_ManagerFontSmall->CalcTextSizeA(kNFs, FLT_MAX, 0, noticeMsg)
         : ImGui::CalcTextSize(noticeMsg);
-    ndl->AddText(g_ManagerFontSmall, 12.0f,
-                 ImVec2(np.x + 9.0f, np.y + (kNH - 12.0f) * 0.5f),
+    float tx = np.x + (nw - tsz.x) * 0.5f;
+    ndl->AddText(g_ManagerFontSmall, kNFs,
+                 ImVec2(tx, np.y + (kNH - kNFs) * 0.5f),
                  IM_COL32(255, 190, 190, 240), noticeMsg);
     PopMgrFont(g_ManagerFontSmall);
     ImGui::Dummy(ImVec2(nw, kNH));
@@ -3789,6 +3886,280 @@ static void StartScouting(int managerId, int playerId,
                           const std::string &currentDate);
 static void CancelScouting(int managerId, int playerId);
 
+// ---- DrawClubDetailPage --------------------------------------------------
+
+static ImVec4 ParseColorStr(const std::string &s, ImVec4 fallback) {
+  int ri = (int)(fallback.x*255), gi = (int)(fallback.y*255), bi = (int)(fallback.z*255);
+  if (!s.empty()) sscanf(s.c_str(), "%d , %d , %d", &ri, &gi, &bi);
+  return ImVec4(ri/255.0f, gi/255.0f, bi/255.0f, 1.0f);
+}
+
+static void DrawPrestigeDots(ImDrawList *dl, ImVec2 pos, int val, int maxVal,
+                             ImU32 filledCol, ImU32 emptyCol) {
+  const float r = 5.0f, gap = 4.0f;
+  for (int i = 0; i < maxVal; i++) {
+    float cx = pos.x + i * (r*2.0f + gap) + r;
+    dl->AddCircleFilled(ImVec2(cx, pos.y), r, i < val ? filledCol : emptyCol);
+    if (i >= val)
+      dl->AddCircle(ImVec2(cx, pos.y), r, emptyCol, 12, 1.0f);
+  }
+}
+
+static void DrawClubDetailPage(float w, float h) {
+  if (s_clubDetailId != s_clubDetailLastId) {
+    LoadClubDetail(s_clubDetailId);
+    s_clubDetailLastId = s_clubDetailId;
+  }
+  const ClubDetailData &cd = s_clubDetail;
+  if (cd.id < 0) {
+    ImGui::SetCursorPos(ImVec2(16.0f, 8.0f));
+    PushMgrFont(g_ManagerFontSmall);
+    ImGui::PushStyleColor(ImGuiCol_Text, kTextDim);
+    ImGui::TextUnformatted("Club not found.");
+    ImGui::PopStyleColor();
+    PopMgrFont(g_ManagerFontSmall);
+    return;
+  }
+
+  ImVec4 col1 = ParseColorStr(cd.color1, kAccent);
+  ImVec4 col2 = ParseColorStr(cd.color2, ImVec4(0.9f,0.9f,0.9f,1.0f));
+  ImU32 c1u   = IM_COL32((int)(col1.x*255),(int)(col1.y*255),(int)(col1.z*255),255);
+  ImU32 c2u   = IM_COL32((int)(col2.x*255),(int)(col2.y*255),(int)(col2.z*255),255);
+
+  const float kPad = 16.0f, kGap = 8.0f;
+  ImGui::SetCursorPos(ImVec2(kPad, 8.0f));
+  float usW = w - kPad * 2.0f;
+  float usH = h - 14.0f;
+
+  // ===========================================================
+  // Header card
+  // ===========================================================
+  const float kHdrH = 150.0f;
+  ImVec2 hdrOrg = ImGui::GetCursorScreenPos();
+  BeginModernCard("##clbhdr", ImVec2(usW, kHdrH));
+  ImDrawList *hdl = ImGui::GetWindowDrawList();
+
+  // Color swatch strip at very top of card
+  hdl->AddRectFilled(hdrOrg, ImVec2(hdrOrg.x + usW, hdrOrg.y + 5.0f), c1u, 8.0f);
+  hdl->AddRectFilled(ImVec2(hdrOrg.x + usW * 0.5f, hdrOrg.y),
+                     ImVec2(hdrOrg.x + usW, hdrOrg.y + 5.0f), c2u, 0.0f);
+
+  // Club badge (large)
+  const float kBadgeS = 96.0f;
+  float bx = hdrOrg.x + 20.0f;
+  float by = hdrOrg.y + (kHdrH - kBadgeS) * 0.5f;
+  ImGui::SetCursorScreenPos(ImVec2(bx, by));
+  DrawTeamBadge(cd.logoPath, cd.shortName, kBadgeS);
+
+  // Name block to the right of badge
+  float infoX = bx + kBadgeS + 18.0f;
+  float infoY = hdrOrg.y + 18.0f;
+
+  PushMgrFont(g_ManagerFontTitle);
+  hdl->AddText(g_ManagerFontTitle, 30.0f, ImVec2(infoX, infoY),
+               IM_COL32(225, 232, 252, 255), cd.name.c_str());
+  PopMgrFont(g_ManagerFontTitle);
+
+  // Shortname pill
+  if (!cd.shortName.empty()) {
+    PushMgrFont(g_ManagerFontSmall);
+    ImVec2 snSz = g_ManagerFontSmall
+        ? g_ManagerFontSmall->CalcTextSizeA(14.0f, FLT_MAX, 0, cd.shortName.c_str())
+        : ImGui::CalcTextSize(cd.shortName.c_str());
+    float pillW = snSz.x + 14.0f, pillH = 20.0f;
+    float pillX = infoX, pillY = infoY + 36.0f;
+    hdl->AddRectFilled(ImVec2(pillX, pillY), ImVec2(pillX+pillW, pillY+pillH),
+                       IM_COL32((int)(col1.x*255),(int)(col1.y*255),(int)(col1.z*255),180), 4.0f);
+    hdl->AddText(g_ManagerFontSmall, 14.0f, ImVec2(pillX+7.0f, pillY+(pillH-14.0f)*0.5f),
+                 IM_COL32(255,255,255,230), cd.shortName.c_str());
+    PopMgrFont(g_ManagerFontSmall);
+  }
+
+  // Stadium
+  if (!cd.homeStadium.empty()) {
+    PushMgrFont(g_ManagerFontSmall);
+    char stadBuf[128]; snprintf(stadBuf, sizeof(stadBuf), "Stadium: %s", cd.homeStadium.c_str());
+    hdl->AddText(g_ManagerFontSmall, 15.0f, ImVec2(infoX, infoY + 64.0f),
+                 IM_COL32(155,168,202,220), stadBuf);
+    PopMgrFont(g_ManagerFontSmall);
+  }
+
+  // Prestige — right side
+  float presX = hdrOrg.x + usW * 0.58f;
+  float presY = hdrOrg.y + 30.0f;
+  {
+    PushMgrFont(g_ManagerFontSmall);
+    hdl->AddText(g_ManagerFontSmall, 14.0f, ImVec2(presX, presY),
+                 IM_COL32(138,152,185,200), "International");
+    DrawPrestigeDots(hdl, ImVec2(presX + 2.0f, presY + 26.0f),
+                     cd.intPrestige > 10 ? 10 : cd.intPrestige, 10,
+                     IM_COL32((int)(col1.x*255),(int)(col1.y*255),(int)(col1.z*255),230),
+                     IM_COL32(40,55,90,200));
+    hdl->AddText(g_ManagerFontSmall, 14.0f, ImVec2(presX, presY + 44.0f),
+                 IM_COL32(138,152,185,200), "Domestic");
+    DrawPrestigeDots(hdl, ImVec2(presX + 2.0f, presY + 70.0f),
+                     cd.domPrestige > 10 ? 10 : cd.domPrestige, 10,
+                     c2u, IM_COL32(40,55,90,200));
+    PopMgrFont(g_ManagerFontSmall);
+  }
+
+  // Color swatches (small circles, far right)
+  float swX = hdrOrg.x + usW - 80.0f;
+  float swY = hdrOrg.y + 30.0f;
+  hdl->AddCircleFilled(ImVec2(swX, swY + 12.0f), 12.0f, c1u);
+  hdl->AddCircle(ImVec2(swX, swY + 12.0f), 12.0f, IM_COL32(255,255,255,30));
+  hdl->AddCircleFilled(ImVec2(swX + 40.0f, swY + 12.0f), 12.0f, c2u);
+  hdl->AddCircle(ImVec2(swX + 40.0f, swY + 12.0f), 12.0f, IM_COL32(255,255,255,30));
+  {
+    PushMgrFont(g_ManagerFontSmall);
+    ImVec2 p1sz = g_ManagerFontSmall
+        ? g_ManagerFontSmall->CalcTextSizeA(11.0f, FLT_MAX, 0, "Primary")
+        : ImGui::CalcTextSize("Primary");
+    ImVec2 s1sz = g_ManagerFontSmall
+        ? g_ManagerFontSmall->CalcTextSizeA(11.0f, FLT_MAX, 0, "Secondary")
+        : ImGui::CalcTextSize("Secondary");
+    hdl->AddText(g_ManagerFontSmall, 11.0f,
+                 ImVec2(swX - p1sz.x * 0.5f + 0.0f, swY + 28.0f),
+                 IM_COL32(100,120,160,180), "Primary");
+    hdl->AddText(g_ManagerFontSmall, 11.0f,
+                 ImVec2(swX + 40.0f - s1sz.x * 0.5f, swY + 28.0f),
+                 IM_COL32(100,120,160,180), "Secondary");
+    PopMgrFont(g_ManagerFontSmall);
+  }
+
+  EndModernCard();
+  ImGui::SetCursorPos(ImVec2(kPad, ImGui::GetCursorPos().y));
+  ImGui::Dummy(ImVec2(0, kGap));
+
+  // ===========================================================
+  // Squad list card
+  // ===========================================================
+  float listH = usH - kHdrH - kGap * 2.0f - 14.0f;
+  if (listH < 80.0f) listH = 80.0f;
+  ImGui::SetCursorPos(ImVec2(kPad, ImGui::GetCursorPos().y));
+  BeginModernCard("##clb_squad", ImVec2(usW, listH));
+
+  // Section header
+  ImVec2 sqHdrOrg = ImGui::GetCursorScreenPos();
+  ImDrawList *sdl = ImGui::GetWindowDrawList();
+  const float kSqHdrH = 36.0f;
+  sdl->AddRectFilled(sqHdrOrg, ImVec2(sqHdrOrg.x + usW, sqHdrOrg.y + kSqHdrH),
+                     IM_COL32(14,22,46,220), 0.0f);
+  {
+    char sqTitle[32]; snprintf(sqTitle, sizeof(sqTitle), "Squad  (%d)", (int)cd.squad.size());
+    PushMgrFont(g_ManagerFontBold);
+    sdl->AddText(g_ManagerFontBold, 16.0f,
+                 ImVec2(sqHdrOrg.x + 14.0f, sqHdrOrg.y + (kSqHdrH - 16.0f) * 0.5f),
+                 C32(kAccent), sqTitle);
+    PopMgrFont(g_ManagerFontBold);
+  }
+  ImGui::Dummy(ImVec2(0, kSqHdrH));
+
+  const float kRowH = 34.0f;
+  ImGui::BeginChild("##clb_sq_scroll", ImVec2(0, listH - kSqHdrH - 20.0f), false);
+  PushMgrFont(g_ManagerFontSmall);
+
+  for (int i = 0; i < (int)cd.squad.size(); i++) {
+    const ClubDetailData::ClubPlayer &cp = cd.squad[i];
+    ImVec2 rp = ImGui::GetCursorScreenPos();
+    ImDrawList *rdl = ImGui::GetWindowDrawList();
+
+    bool hovered = ImGui::IsMouseHoveringRect(rp, ImVec2(rp.x + usW - 28.0f, rp.y + kRowH));
+    if (hovered)
+      rdl->AddRectFilled(rp, ImVec2(rp.x + usW - 28.0f, rp.y + kRowH),
+                         IM_COL32(255,255,255,12), 0.0f);
+
+    // Accent left bar
+    rdl->AddRectFilled(ImVec2(rp.x + 6.0f, rp.y + 6.0f),
+                       ImVec2(rp.x + 9.0f, rp.y + kRowH - 6.0f), c1u);
+
+    // Jersey number
+    char nb[8];
+    if (cp.jerseyNumber > 0)
+      snprintf(nb, sizeof(nb), "#%d", cp.jerseyNumber);
+    else
+      nb[0] = '\0';
+    if (nb[0]) {
+      rdl->AddText(g_ManagerFontSmall, 15.0f,
+                   ImVec2(rp.x + 14.0f, rp.y + (kRowH - 15.0f) * 0.5f),
+                   IM_COL32(255, 255, 255, 220), nb);
+    }
+
+    // Position badge
+    if (!cp.role.empty()) {
+      ImVec2 bsz = g_ManagerFontSmall
+          ? g_ManagerFontSmall->CalcTextSizeA(12.0f, FLT_MAX, 0, cp.role.c_str())
+          : ImGui::CalcTextSize(cp.role.c_str());
+      float bw = bsz.x + 10.0f, bh = 18.0f;
+      float bx2 = rp.x + 36.0f, by2 = rp.y + (kRowH - bh) * 0.5f;
+      rdl->AddRectFilled(ImVec2(bx2, by2), ImVec2(bx2+bw, by2+bh),
+                         IM_COL32((int)(col1.x*255),(int)(col1.y*255),(int)(col1.z*255),160), 3.0f);
+      rdl->AddText(g_ManagerFontSmall, 12.0f,
+                   ImVec2(bx2 + 5.0f, by2 + (bh - 12.0f) * 0.5f),
+                   IM_COL32(255,255,255,220), cp.role.c_str());
+    }
+
+    // Player name
+    float nameX = rp.x + 90.0f;
+    rdl->AddText(g_ManagerFontSmall, 16.0f,
+                 ImVec2(nameX, rp.y + (kRowH - 16.0f) * 0.5f),
+                 C32(kTextPri), cp.name.c_str());
+
+    // Age
+    if (!cp.age.empty()) {
+      char ageBuf[12]; snprintf(ageBuf, sizeof(ageBuf), "Age %s", cp.age.c_str());
+      rdl->AddText(g_ManagerFontSmall, 13.0f,
+                   ImVec2(rp.x + usW - 180.0f, rp.y + (kRowH - 13.0f) * 0.5f),
+                   C32(kTextSec), ageBuf);
+    }
+
+    // Ability stars
+    ImGui::SetCursorScreenPos(ImVec2(rp.x + usW - 120.0f, rp.y + (kRowH - 14.0f) * 0.5f));
+    DrawStars(cp.ability, 1.0f, C32(kGold), 1.2f);
+
+    // Invisible click target for navigation to player detail
+    ImGui::SetCursorScreenPos(rp);
+    char btnId[32]; snprintf(btnId, sizeof(btnId), "##clbp_%d", cp.id);
+    if (ImGui::InvisibleButton(btnId, ImVec2(usW - 28.0f, kRowH))) {
+      // Navigate to player detail (read-only / scouting view since it's another club)
+      bool isOwnSquad = false;
+      for (const auto &p : g_CareerHub.players)
+        if (p.id == cp.id) { isOwnSquad = true; break; }
+      s_playerDetailId = cp.id;
+      if (isOwnSquad) {
+        s_detailOverrideActive = false;
+        s_detailClubName = s_detailClubLogo = s_detailClubShortName = "";
+      } else {
+        CareerHubState::Player op;
+        LoadPlayerFullDetail(cp.id, op);
+        s_detailPlayerOverride = op;
+        s_detailOverrideActive = true;
+        s_detailClubName      = cd.name;
+        s_detailClubLogo      = cd.logoPath;
+        s_detailClubShortName = cd.shortName;
+      }
+      NavPush(PAGE_PLAYER_DETAIL);
+    }
+    if (ImGui::IsItemHovered())
+      ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+
+    // Separator
+    rdl->AddLine(ImVec2(rp.x + 6.0f, rp.y + kRowH - 1.0f),
+                 ImVec2(rp.x + usW - 34.0f, rp.y + kRowH - 1.0f),
+                 IM_COL32(255,255,255,10));
+  }
+
+  if (cd.squad.empty()) {
+    ImGui::PushStyleColor(ImGuiCol_Text, kTextDim);
+    ImGui::TextUnformatted("No players found for this club.");
+    ImGui::PopStyleColor();
+  }
+
+  PopMgrFont(g_ManagerFontSmall);
+  ImGui::EndChild();
+  EndModernCard();
+}
+
 // ---- DrawPlayerDetailPage ------------------------------------------------
 
 static void DrawPlayerDetailPage(float w, float h) {
@@ -3952,8 +4323,18 @@ static void DrawPlayerDetailPage(float w, float h) {
   const std::string &dispClubName  = ownPlayer ? g_CareerHub.club.name      : s_detailClubName;
 
   float rx = hdrOrg.x + usW * 0.50f;
-  ImGui::SetCursorScreenPos(ImVec2(rx, hdrOrg.y + (kHdrH - 60.0f) * 0.5f));
-  DrawTeamBadge(dispClubLogo, dispClubShort, 60.0f);
+  {
+    ImVec2 badgePos = ImVec2(rx, hdrOrg.y + (kHdrH - 60.0f) * 0.5f);
+    ImGui::SetCursorScreenPos(badgePos);
+    DrawTeamBadge(dispClubLogo, dispClubShort, 60.0f);
+    // Click on badge → navigate to club detail page
+    ImGui::SetCursorScreenPos(badgePos);
+    if (ImGui::InvisibleButton("##pld_clubbadge", ImVec2(60.0f, 60.0f))) {
+      int tid = ownPlayer ? g_CareerHub.clubId : LookupTeamIdByName(dispClubName);
+      if (tid > 0) NavToClubDetail(tid);
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+  }
 
   float infoX = rx + 70.0f, infoY = hdrOrg.y + 10.0f;
   PushMgrFont(g_ManagerFontSmall);
@@ -5859,10 +6240,36 @@ static void DrawSchedulePage(float w, float h) {
         ImGui::PopStyleColor();
 
         ImGui::TableSetColumnIndex(2);
-        DrawTeamLabel(f.homeLogo, hf, 20.0f);
+        {
+          ImVec2 hp0 = ImGui::GetCursorScreenPos();
+          DrawTeamLabel(f.homeLogo, hf, 20.0f);
+          ImVec2 hp1 = ImGui::GetCursorScreenPos();
+          ImGui::SetCursorScreenPos(hp0);
+          char hbid[48]; snprintf(hbid, sizeof(hbid), "##sch_h_%s_%s", f.home.c_str(), f.matchday.c_str());
+          float hbw = ImGui::GetContentRegionAvail().x;
+          if (ImGui::InvisibleButton(hbid, ImVec2(hbw > 4.0f ? hbw : 120.0f, rH - 4.0f))) {
+            int tid = LookupTeamIdByName(hf);
+            if (tid > 0) NavToClubDetail(tid);
+          }
+          if (ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+          ImGui::SetCursorScreenPos(hp1);
+        }
 
         ImGui::TableSetColumnIndex(3);
-        DrawTeamLabel(f.awayLogo, af, 20.0f);
+        {
+          ImVec2 ap0 = ImGui::GetCursorScreenPos();
+          DrawTeamLabel(f.awayLogo, af, 20.0f);
+          ImVec2 ap1 = ImGui::GetCursorScreenPos();
+          ImGui::SetCursorScreenPos(ap0);
+          char abid[48]; snprintf(abid, sizeof(abid), "##sch_a_%s_%s", f.away.c_str(), f.matchday.c_str());
+          float abw = ImGui::GetContentRegionAvail().x;
+          if (ImGui::InvisibleButton(abid, ImVec2(abw > 4.0f ? abw : 120.0f, rH - 4.0f))) {
+            int tid = LookupTeamIdByName(af);
+            if (tid > 0) NavToClubDetail(tid);
+          }
+          if (ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+          ImGui::SetCursorScreenPos(ap1);
+        }
 
         ImGui::TableSetColumnIndex(4);
         {
@@ -6074,7 +6481,21 @@ static void DrawCompetitionsPage(float w, float h) {
         ImGui::TableSetColumnIndex(1);
         // Use full name when available, fall back to shortname
         const std::string &displayName = s.teamFull.empty() ? s.team : s.teamFull;
-        DrawTeamLabel(s.teamLogo, displayName, 18.0f);
+        {
+          ImVec2 lblPos = ImGui::GetCursorScreenPos();
+          DrawTeamLabel(s.teamLogo, displayName, 18.0f);
+          ImVec2 lblEnd = ImGui::GetCursorScreenPos();
+          // Invisible click target over the team label
+          float lblW = ImGui::GetContentRegionAvail().x;
+          ImGui::SetCursorScreenPos(lblPos);
+          char cpBtnId[48]; snprintf(cpBtnId, sizeof(cpBtnId), "##cp_team_%s", s.team.c_str());
+          if (ImGui::InvisibleButton(cpBtnId, ImVec2(lblW > 4.0f ? lblW : 120.0f, rH - 4.0f))) {
+            int tid = LookupTeamIdByName(displayName);
+            if (tid > 0) NavToClubDetail(tid);
+          }
+          if (ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+          ImGui::SetCursorScreenPos(lblEnd);
+        }
         auto stat = [](const std::string &v) {
           ImGui::PushStyleColor(ImGuiCol_Text, kTextSec);
           ImGui::TextUnformatted(v.c_str());
@@ -6789,14 +7210,16 @@ static void DrawTacticsPage(float w, float h) {
                          IM_COL32(240, 80, 80, 255), 6.0f);
       char banMsg[96];
       snprintf(banMsg, sizeof(banMsg),
-               "\xe2\x9a\xa0  Active squad has %d/20 players — assign 20 players (Squad \xe2\x86\x92 POS badge) to unlock match play.",
+               "Active squad has %d/20 players ! Assign 20 players in Squad.",
                active);
       PushMgrFont(g_ManagerFontSmall);
+      const float kBFs = 17.0f;
       ImVec2 tsz = g_ManagerFontSmall
-          ? g_ManagerFontSmall->CalcTextSizeA(13.0f, FLT_MAX, 0, banMsg)
+          ? g_ManagerFontSmall->CalcTextSizeA(kBFs, FLT_MAX, 0, banMsg)
           : ImGui::CalcTextSize(banMsg);
-      bdl->AddText(g_ManagerFontSmall, 13.0f,
-                   ImVec2(wpos.x + 12.0f, wpos.y + (kBanH - 13.0f) * 0.5f),
+      float btx = wpos.x + (banW - tsz.x) * 0.5f;
+      bdl->AddText(g_ManagerFontSmall, kBFs,
+                   ImVec2(btx, wpos.y + (kBanH - kBFs) * 0.5f),
                    IM_COL32(255, 200, 200, 245), banMsg);
       PopMgrFont(g_ManagerFontSmall);
       ImGui::Dummy(ImVec2(banW, kBanH));
@@ -8546,6 +8969,7 @@ static void DrawWorkspace(float contentW, float workH) {
     case PAGE_SCHEDULE:      DrawSchedulePage(contentW, workH);      break;
     case PAGE_COMPETITIONS:  DrawCompetitionsPage(contentW, workH);  break;
     case PAGE_PLAYER_DETAIL: DrawPlayerDetailPage(contentW, workH);  break;
+    case PAGE_CLUB_DETAIL:   DrawClubDetailPage(contentW, workH);    break;
     case PAGE_STAFF:         DrawStaffPage(contentW, workH);         break;
     case PAGE_STAFF_MARKET:  DrawStaffMarketPage(contentW, workH);   break;
     case PAGE_SCOUTING:      DrawScoutingPage(contentW, workH);      break;
