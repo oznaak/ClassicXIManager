@@ -17,7 +17,7 @@ Guiding rules:
 - The player infers financial health from observed behavior, not transparent dashboards
 - Most financial state is hidden; only `transfer_budget`, `wage spending`, and limited debt/board hints are exposed
 
-**Out of scope for v1:** taxes, amortization, inflation, shareholder simulation, FFP, currency systems, style drift, commercial strength evolution.
+**Out of scope for v1:** taxes, amortization, inflation, shareholder simulation, FFP, currency systems, style drift.
 
 **Core feedback loop (long-term goal):**
 ```
@@ -36,7 +36,7 @@ financial state → transfer behavior → squad quality → performance → fina
 | `wage_budget` | INTEGER (£/wk) | Board-set weekly wage ceiling. Exceeding it costs board confidence. Regenerated each season from income. |
 | `transfer_budget` | INTEGER (£) | Season allowance for buying players. Season 1 = real-world input. Season 2+ = generated output from the annual cycle. |
 | `board_confidence` | INTEGER 0–100 | Board trust in club direction. High = generous budgets. Low = tight purse, forced sales, crisis. |
-| `commercial_strength` | REAL 0.0–1.0 | Permanent hidden modifier for sponsorship, merchandise, commercial deals. Set at career start, never changes. Structural inequality. |
+| `commercial_strength` | REAL 0.0–1.0 | Slowly-evolving hidden modifier for sponsorship, merchandise, commercial deals. Seeded at career start; drifts ±0.005–0.02 per season based on league position. Strong inertia preserves structural inequality. |
 | `style_seed` | INTEGER | Immutable deterministic seed for the entire save. Generates the club's financial archetype and all variance rolls. Never stored as a label. |
 | `debt_level` | INTEGER (£) | Outstanding obligations. Serviced weekly. Compounds if cash goes negative. Hard ceiling enforced. |
 | `institutional_power` | REAL 0.0–1.0 | Hidden permanent modifier derived from prestige + commercial_strength. Grants resilience: softer collapse penalties, better loan access, faster sponsor recovery. |
@@ -135,15 +135,32 @@ archetype = style_seed % 6
 | 4 | Selling | Systematically sells players, maintains healthy cash |
 | 5 | Star-focused | Concentrates budget on 2–3 high earners, ignores depth |
 
-### Step 4 — `commercial_strength` (permanent)
+### Step 4 — `commercial_strength` (seeded, slowly evolving)
 
 ```
+-- Initialization (career start only):
 base_commercial     = club_factor * 0.70
 style_variance      = ((style_seed >> 8) % 30) / 100.0   -- ±15%
 commercial_strength = clamp(base_commercial + style_variance, 0.05, 1.0)
+
+-- Annual update (each season end, inside ProcessAnnualCycle):
+position_score      = 1.0 - ((position - 1) / (total_clubs - 1))  -- 1.0=1st, 0.0=last
+performance_factor  = position_score * 0.5                          -- [0, 0.5]
+drift               = (performance_factor - 0.25) * 0.06            -- ±0.015 typical, ±0.03 max
+
+-- Soft saturation near ceiling (top clubs gain very slowly above 0.80)
+if drift > 0 and commercial_strength > 0.80:
+    drift *= (1.0 - commercial_strength) * 5.0
+
+-- Soft floor protection (small clubs lose brand very slowly below 0.20)
+if drift < 0 and commercial_strength < 0.20:
+    drift *= commercial_strength * 5.0
+
+inertia             = 0.97
+commercial_strength = clamp(old * inertia + drift, 0.05, 1.0)
 ```
 
-Never changes after initialization. Structural inequality is intentional.
+Structural inequality is preserved through seed differences, high inertia, and the asymmetric soft ceiling/floor. No shock-based resets. Change per season: ±0.005–0.02 typical, ±0.03 maximum.
 
 ### Step 5 — `institutional_power` (permanent)
 

@@ -1272,7 +1272,7 @@ static void InitAllClubFinances(int managerId) {
     int style_seed = (int)((unsigned int)(clubId * 31337u) ^ careerSeed);
     int archetype  = ((unsigned int)style_seed) % 6;
 
-    // commercial_strength (permanent)
+    // commercial_strength — seeded at career start, evolves slowly each season via ProcessAnnualCycle
     float comm_var = ((float)(((unsigned int)style_seed >> 8) % 30) / 100.0f) - 0.15f;
     float commercial_strength = std::max(0.05f, std::min(1.0f, club_factor * 0.70f + comm_var));
 
@@ -1530,6 +1530,7 @@ static void ProcessAnnualCycle(int managerId, int clubId, ClubFinances &cf,
   // --- Season prize money (lookup actual position from standings)
   long long prize_money = 0LL;
   int total_clubs = 10;
+  int position    = 6; // default mid-table if no standings found
   {
     std::stringstream pq;
     pq << "SELECT (SELECT COUNT(*)+1 FROM standings s2"
@@ -1543,7 +1544,6 @@ static void ProcessAnnualCycle(int managerId, int clubId, ClubFinances &cf,
        << " AND s1.team_id=" << clubId
        << " AND s1.season_year=" << seasonYear << ";";
     DatabaseResult *pr = GetDB()->Query(pq.str());
-    int position = 6;
     if (pr->data.size() > 0 && !DBCell(pr, 0, 0).empty())
       position = atoi(DBCell(pr, 0, 0).c_str());
     delete pr;
@@ -1574,6 +1574,32 @@ static void ProcessAnnualCycle(int managerId, int clubId, ClubFinances &cf,
       perf_delta = (int)(perf_delta * (1.0f - cf.institutional_power * 0.40f));
 
     cf.board_confidence = std::max(0, std::min(100, cf.board_confidence + perf_delta));
+  }
+
+  // --- commercial_strength annual evolution (slow brand memory drift)
+  {
+    // position_score: 1.0 = finished 1st, 0.0 = finished last
+    float position_score = (total_clubs <= 1)
+        ? 0.5f
+        : 1.0f - ((float)(position - 1) / (float)(total_clubs - 1));
+
+    // trophies/UCL not tracked yet — using 0 for both terms, reducing to position only
+    float performance_factor = position_score * 0.5f; // range [0, 0.5]
+
+    // drift: positive when finishing top-half, negative when bottom-half
+    float drift = (performance_factor - 0.25f) * 0.06f; // ±0.015 typical, ±0.03 max
+
+    // Soft saturation: large clubs near ceiling gain very slowly
+    if (drift > 0.0f && cf.commercial_strength > 0.80f)
+      drift *= (1.0f - cf.commercial_strength) * 5.0f; // tapers to 0 at 1.0
+
+    // Soft floor protection: small clubs lose brand very slowly at the bottom
+    if (drift < 0.0f && cf.commercial_strength < 0.20f)
+      drift *= cf.commercial_strength * 5.0f; // tapers to 0 at 0.0
+
+    const float inertia = 0.97f;
+    cf.commercial_strength = std::max(0.05f, std::min(1.0f,
+        cf.commercial_strength * inertia + drift));
   }
 
   // --- Annual revenue streams
@@ -1676,6 +1702,7 @@ static void ProcessAnnualCycle(int managerId, int clubId, ClubFinances &cf,
      << "  wage_budget="            << cf.wage_budget            << ","
      << "  transfer_budget="        << cf.transfer_budget        << ","
      << "  board_confidence="       << cf.board_confidence       << ","
+     << "  commercial_strength="    << cf.commercial_strength    << ","
      << "  debt_level="             << cf.debt_level             << ","
      << "  shock_cooldown="         << cf.shock_cooldown         << ","
      << "  commercial_shock_mult="  << cf.commercial_shock_mult  << ","
