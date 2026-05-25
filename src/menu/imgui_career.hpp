@@ -173,6 +173,7 @@ struct CareerHubState {
     long long weeklyTV         = 0;  // income per week
     long long weeklyWages      = 0;  // expense per week (players + staff)
     long long weeklyOperating  = 0;  // expense per week (fixed)
+    long long weeklySponsors   = 0;  // income per week from active sponsorships
     long long matchdayMin      = 0;  // per match, worst case (weak opponent, poor form)
     long long matchdayMax      = 0;  // per match, best case (strong opponent, top of table)
     long long seasonPrize1st   = 0;  // prize for 1st in user's league
@@ -184,6 +185,23 @@ struct CareerHubState {
     int       boardConfidence  = 50;  // 0-100
     std::vector<FinanceTransaction> recent; // last 40 transactions
   } finances;
+
+  struct SponsorContract {
+    int         id         = 0;
+    int         sponsorId  = 0;
+    std::string sponsorName;
+    long long   weeklyValue = 0;
+    int         seasonYear  = 0;
+  };
+  std::vector<SponsorContract> activeSponsors;
+
+  struct SponsorOffer {
+    int         id         = 0;
+    int         sponsorId  = 0;
+    std::string sponsorName;
+    long long   weeklyValue = 0;
+  };
+  std::vector<SponsorOffer> pendingOffers;
 
   void Clear();
   void LoadFromDB(int managerId, int clubId);

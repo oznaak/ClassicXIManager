@@ -107,6 +107,12 @@ static std::string DBCell(DatabaseResult *r, unsigned int row, unsigned int col)
   return r->data.at(row).at(col);
 }
 
+static std::string SqlEsc(const std::string &in) {
+  std::string out;
+  for (char c : in) { if (c == '\'') out += "''"; else out += c; }
+  return out;
+}
+
 // ---- Badge texture cache ------------------------------------------------
 
 static std::map<std::string, GLuint> s_BadgeCache;
@@ -203,6 +209,8 @@ void CareerHubState::Clear() {
   scoutQueue.clear();
   scoutReports.clear();
   inbox.clear();
+  activeSponsors.clear();
+  pendingOffers.clear();
   finances = {};
   ClearBadgeCache();
   ResetNavState();
@@ -364,6 +372,11 @@ static void ProcessAnnualCycle(int managerId, int clubId, ClubFinances &cf,
                                 const LeagueFP *lfp, int seasonYear,
                                 int leagueId, float clubFactor,
                                 int domPrestige, int intlPrestige);
+static void CheckSponsorOffers(int managerId, int clubId, const std::string &currentDate,
+                                int seasonYear);
+static void ProcessSponsorRenewals(int managerId, int clubId, int seasonYear,
+                                   int position, int totalClubs, int expectedPos,
+                                   const std::string &mgrName, const std::string &clubName);
 
 // Forward declarations (implementations follow in the player-detail helpers section)
 static void ParsePlayerAttrsFromRow(CareerHubState::Player &p,
@@ -796,6 +809,29 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
         delete mr;
       }
     }
+
+    // Per-career sponsor tables (sponsors reference data lives in the main database.sqlite)
+    DatabaseResult *sp2 = GetDB()->Query(
+      "CREATE TABLE IF NOT EXISTS club_sponsors ("
+      "  id INTEGER PRIMARY KEY AUTOINCREMENT, manager_id INTEGER NOT NULL,"
+      "  club_id INTEGER NOT NULL, sponsor_id INTEGER NOT NULL,"
+      "  sponsor_name TEXT NOT NULL, weekly_value INTEGER NOT NULL DEFAULT 0,"
+      "  season_year INTEGER NOT NULL,"
+      "  UNIQUE(manager_id, club_id, sponsor_id, season_year));");
+    delete sp2;
+    DatabaseResult *sp3 = GetDB()->Query(
+      "CREATE TABLE IF NOT EXISTS pending_sponsor_offers ("
+      "  id INTEGER PRIMARY KEY AUTOINCREMENT, manager_id INTEGER NOT NULL,"
+      "  sponsor_id INTEGER NOT NULL, sponsor_name TEXT NOT NULL,"
+      "  weekly_value INTEGER NOT NULL DEFAULT 0, offered_date TEXT NOT NULL,"
+      "  status TEXT NOT NULL DEFAULT 'pending');");
+    delete sp3;
+    DatabaseResult *sp4 = GetDB()->Query(
+      "CREATE TABLE IF NOT EXISTS sponsor_blacklist ("
+      "  manager_id INTEGER NOT NULL, sponsor_id INTEGER NOT NULL,"
+      "  blacklisted_season INTEGER NOT NULL,"
+      "  PRIMARY KEY (manager_id, sponsor_id, blacklisted_season));");
+    delete sp4;
   }
 
   // Init all clubs on first load for this manager
@@ -857,6 +893,21 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
         InsertTx(currentDate, "wages",    "Weekly player & staff wages",   -wageBill);
       InsertTx(currentDate, "operating", "Weekly club operating costs",    -lfp->weeklyOperating);
 
+      // Sponsor income: sum all active sponsorships for this week
+      if (seasonYear > 0) {
+        std::stringstream spq;
+        spq << "SELECT SUM(weekly_value) FROM club_sponsors"
+            << " WHERE manager_id=" << mgrId << " AND club_id=" << cId
+            << " AND season_year=" << seasonYear << ";";
+        DatabaseResult *spr = GetDB()->Query(spq.str());
+        if (spr->data.size() > 0 && !DBCell(spr, 0, 0).empty()) {
+          long long sponsorIncome = atoll(DBCell(spr, 0, 0).c_str());
+          if (sponsorIncome > 0)
+            InsertTx(currentDate, "sponsorship", "Weekly sponsor income", sponsorIncome);
+        }
+        delete spr;
+      }
+
       std::stringstream upd;
       upd << "UPDATE club_finances SET last_weekly_date='" << currentDate
           << "' WHERE manager_id=" << mgrId << " AND club_id=" << cId << ";";
@@ -864,6 +915,10 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
       delete ur;
       printf("[FINANCE] Weekly player_club=%d date=%s wages=-%lld TV=+%lld op=-%lld\n",
              cId, currentDate.c_str(), wageBill, tv, lfp->weeklyOperating);
+
+      // Check for new sponsor offers (player's club only)
+      if (seasonYear > 0)
+        CheckSponsorOffers(mgrId, cId, currentDate, seasonYear);
 
       // All other clubs: balance-only tick
       ProcessWeeklyAllClubs(mgrId, currentDate, cId, lfp, wageBill);
@@ -1087,6 +1142,27 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
 
           ProcessAnnualCycle(mgrId, acClubId, cf, acLfp, seasonYear,
                              acLeagueId, clubFac, acDomPres, acIntlPres);
+
+          // Sponsor renewals — only for the player's club
+          if (acClubId == cId) {
+            int pos = 6, nClubs = 10;
+            {
+              std::stringstream spq;
+              spq << "SELECT team_id FROM standings"
+                  << " WHERE manager_id=" << mgrId << " AND league_id=" << acLeagueId
+                  << " ORDER BY points DESC, goal_difference DESC, goals_for DESC;";
+              DatabaseResult *spr = GetDB()->Query(spq.str());
+              nClubs = (int)spr->data.size();
+              if (nClubs < 1) nClubs = 1;
+              for (unsigned int k = 0; k < spr->data.size(); k++) {
+                if (atoi(DBCell(spr, k, 0).c_str()) == cId) { pos = (int)k + 1; break; }
+              }
+              delete spr;
+            }
+            int expectedPos = (int)((1.0f - clubFac) * (float)nClubs) + 1;
+            ProcessSponsorRenewals(mgrId, cId, seasonYear, pos, nClubs, expectedPos,
+                                   manager.name, club.name);
+          }
         }
         delete acr;
       }
@@ -1134,6 +1210,62 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
       finances.recent.push_back(ft);
     }
     delete rr;
+
+    // Weekly sponsor income total for display
+    finances.weeklySponsors = 0;
+    if (seasonYear > 0) {
+      std::stringstream spq;
+      spq << "SELECT SUM(weekly_value) FROM club_sponsors"
+          << " WHERE manager_id=" << mgrId << " AND club_id=" << cId
+          << " AND season_year=" << seasonYear << ";";
+      DatabaseResult *spr = GetDB()->Query(spq.str());
+      if (spr->data.size() > 0 && !DBCell(spr, 0, 0).empty())
+        finances.weeklySponsors = atoll(DBCell(spr, 0, 0).c_str());
+      delete spr;
+    }
+  }
+
+  // Load active sponsor contracts
+  activeSponsors.clear();
+  if (seasonYear > 0) {
+    std::stringstream q;
+    q << "SELECT id, sponsor_id, sponsor_name, weekly_value, season_year"
+      << " FROM club_sponsors WHERE manager_id=" << mgrId << " AND club_id=" << cId
+      << " AND season_year=" << seasonYear << " ORDER BY id ASC;";
+    DatabaseResult *r = GetDB()->Query(q.str());
+    if (r) {
+      for (unsigned int i = 0; i < r->data.size(); i++) {
+        SponsorContract sc;
+        sc.id          = atoi(DBCell(r, i, 0).c_str());
+        sc.sponsorId   = atoi(DBCell(r, i, 1).c_str());
+        sc.sponsorName = DBCell(r, i, 2);
+        sc.weeklyValue = atoll(DBCell(r, i, 3).c_str());
+        sc.seasonYear  = atoi(DBCell(r, i, 4).c_str());
+        activeSponsors.push_back(sc);
+      }
+      delete r;
+    }
+  }
+
+  // Load pending sponsor offers
+  pendingOffers.clear();
+  {
+    std::stringstream q;
+    q << "SELECT id, sponsor_id, sponsor_name, weekly_value"
+      << " FROM pending_sponsor_offers WHERE manager_id=" << mgrId
+      << " AND status='pending' ORDER BY id ASC;";
+    DatabaseResult *r = GetDB()->Query(q.str());
+    if (r) {
+      for (unsigned int i = 0; i < r->data.size(); i++) {
+        SponsorOffer so;
+        so.id          = atoi(DBCell(r, i, 0).c_str());
+        so.sponsorId   = atoi(DBCell(r, i, 1).c_str());
+        so.sponsorName = DBCell(r, i, 2);
+        so.weeklyValue = atoll(DBCell(r, i, 3).c_str());
+        pendingOffers.push_back(so);
+      }
+      delete r;
+    }
   }
 
   // Load scout queue (in-progress scouting) — join players + teams for richer display
@@ -1288,11 +1420,12 @@ static void InitAllClubFinances(int managerId) {
     float var_pct = (float)((style_seed >> 4) % 21 - 10) / 100.0f;
     long long cash_balance = (long long)(baseCash * cash_mults[archetype] * (1.0f + var_pct));
 
-    // wage_budget
-    long long est_annual = (long long)(lfp->weeklyTV * 52.0f * (0.85f + club_factor * 0.30f))
-                         + (long long)(lfp->weeklyTV * 12.0f * commercial_strength);
-    float wage_ratios[] = { 0.52f, 0.68f, 0.80f, 0.45f, 0.48f, 0.72f };
-    long long wage_budget = (long long)(est_annual * wage_ratios[archetype] / 52.0f);
+    // wage_budget: anchored to transfer_budget (club financial power), not TV income.
+    // TV income is league-dependent and causes cross-league distortion.
+    // Real clubs pay ~1.6x-2.4x their transfer budget in wages annually.
+    float wage_base_mult = 1.60f + club_factor * 0.80f; // 1.60x (small) to 2.40x (elite)
+    float arch_adj[]     = { 1.05f, 1.12f, 1.18f, 0.93f, 0.97f, 1.10f }; // archetype personality
+    long long wage_budget = (long long)((float)tbud * wage_base_mult * arch_adj[archetype] / 52.0f);
 
     // board_confidence
     int prestige_bonus = (int)(prestige_factor * 15.0f);
@@ -1868,6 +2001,249 @@ static void ProcessWeeklyAllClubs(int managerId, const std::string &currentDate,
     }
   }
   delete cfr;
+}
+
+// ---- Sponsor system -------------------------------------------------------
+
+static void CheckSponsorOffers(int managerId, int clubId,
+                                const std::string &currentDate, int seasonYear) {
+  // Get club prestige
+  int intlPres = 0, domPres = 0;
+  {
+    std::stringstream q;
+    q << "SELECT international_prestige, domestic_prestige FROM teams WHERE id=" << clubId << ";";
+    DatabaseResult *r = GetDB()->Query(q.str());
+    if (r->data.size() > 0) {
+      intlPres = atoi(DBCell(r, 0, 0).c_str());
+      domPres  = atoi(DBCell(r, 0, 1).c_str());
+    }
+    delete r;
+  }
+
+  // Count active sponsors this season
+  int sponsorCount = 0;
+  {
+    std::stringstream q;
+    q << "SELECT COUNT(*) FROM club_sponsors WHERE manager_id=" << managerId
+      << " AND club_id=" << clubId << " AND season_year=" << seasonYear << ";";
+    DatabaseResult *r = GetDB()->Query(q.str());
+    if (r->data.size() > 0 && !DBCell(r, 0, 0).empty())
+      sponsorCount = atoi(DBCell(r, 0, 0).c_str());
+    delete r;
+  }
+  if (sponsorCount >= 4) return;
+
+  // Already has a pending offer?
+  {
+    std::stringstream q;
+    q << "SELECT COUNT(*) FROM pending_sponsor_offers WHERE manager_id=" << managerId
+      << " AND status='pending';";
+    DatabaseResult *r = GetDB()->Query(q.str());
+    bool hasPending = r->data.size() > 0 && !DBCell(r, 0, 0).empty()
+                      && atoi(DBCell(r, 0, 0).c_str()) > 0;
+    delete r;
+    if (hasPending) return;
+  }
+
+  // Respect the 3-day grace period after career start
+  {
+    std::stringstream q;
+    q << "SELECT julianday('" << currentDate
+      << "') - julianday(created_at) FROM managers WHERE id=" << managerId << ";";
+    DatabaseResult *r = GetDB()->Query(q.str());
+    double daysOld = 0.0;
+    if (r->data.size() > 0 && !DBCell(r, 0, 0).empty())
+      daysOld = atof(DBCell(r, 0, 0).c_str());
+    delete r;
+    if (daysOld < 3.0) return;
+  }
+
+  // Determine eligible sponsor rating range from club prestige
+  int presTotal = intlPres + domPres;
+  int maxRating;
+  if      (presTotal >= 15) maxRating = 5;
+  else if (presTotal >= 11) maxRating = 4;
+  else if (presTotal >=  7) maxRating = 3;
+  else if (presTotal >=  4) maxRating = 2;
+  else                      maxRating = 1;
+  int minRating = std::max(1, maxRating - 1);
+
+  // Build exclusion list (already contracted or blacklisted this season)
+  std::string excl = "0";
+  {
+    std::stringstream eq;
+    eq << "SELECT sponsor_id FROM club_sponsors"
+       << " WHERE manager_id=" << managerId << " AND club_id=" << clubId
+       << " AND season_year=" << seasonYear
+       << " UNION SELECT sponsor_id FROM sponsor_blacklist"
+       << " WHERE manager_id=" << managerId << " AND blacklisted_season=" << seasonYear;
+    DatabaseResult *er = GetDB()->Query(eq.str());
+    for (unsigned int i = 0; i < er->data.size(); i++)
+      excl += "," + DBCell(er, i, 0);
+    delete er;
+  }
+
+  // Pick a random eligible sponsor
+  std::stringstream sq;
+  sq << "SELECT id, name, rangelow, rangehigh FROM sponsors"
+     << " WHERE rating BETWEEN " << minRating << " AND " << maxRating
+     << " AND id NOT IN (" << excl << ") ORDER BY RANDOM() LIMIT 1;";
+  DatabaseResult *sr = GetDB()->Query(sq.str());
+  if (!sr || sr->data.size() == 0) { delete sr; return; }
+
+  int         sponsorId   = atoi(DBCell(sr, 0, 0).c_str());
+  std::string sponsorName = DBCell(sr, 0, 1);
+  long long   rangeLow    = atoll(DBCell(sr, 0, 2).c_str());
+  long long   rangeHigh   = atoll(DBCell(sr, 0, 3).c_str());
+  delete sr;
+
+  // Generate offer value with prestige-weighted bias toward higher end
+  float bias = (presTotal >= 14) ? 0.60f : (presTotal >= 9) ? 0.45f : 0.30f;
+  unsigned int rng = (unsigned int)(managerId * 7919u ^ clubId * 31337u) ^ (unsigned int)time(nullptr);
+  float t = bias + ((float)(rng % 1000) / 1000.0f) * (1.0f - bias);
+  if ((rng >> 16) % 3 == 0) t *= 0.75f; // occasional below-midrange offer
+  t = std::max(0.0f, std::min(1.0f, t));
+  long long offerValue = rangeLow + (long long)((rangeHigh - rangeLow) * t);
+  offerValue = (offerValue / 2500) * 2500; // round to nearest £2500
+  if (offerValue < rangeLow)  offerValue = rangeLow;
+  if (offerValue > rangeHigh) offerValue = rangeHigh;
+
+  // Insert pending offer
+  {
+    std::stringstream iq;
+    iq << "INSERT INTO pending_sponsor_offers"
+       << " (manager_id, sponsor_id, sponsor_name, weekly_value, offered_date)"
+       << " VALUES (" << managerId << "," << sponsorId
+       << ",'" << SqlEsc(sponsorName) << "'," << offerValue << ",'" << currentDate << "');";
+    DatabaseResult *ir = GetDB()->Query(iq.str());
+    delete ir;
+  }
+
+  // Deliver inbox message
+  {
+    char valBuf[32];
+    snprintf(valBuf, sizeof(valBuf), "%lld", offerValue);
+    std::string subject = "Sponsorship Offer: " + sponsorName;
+    std::string body    = "Dear Manager,\n\n"
+      + sponsorName + " has approached your club with a sponsorship proposal.\n\n"
+      "Proposed weekly fee: \xC2\xA3" + std::string(valBuf) + "\n\n"
+      "This would be a season-long agreement. If you accept, the payment will be "
+      "added to your weekly income for the remainder of the season.\n\n"
+      "Visit Finances \xe2\x86\x92 Sponsorship to review and respond.\n\n"
+      "Regards,\nSponsorship Coordinator";
+    std::stringstream iq;
+    iq << "INSERT INTO manager_inbox"
+       << " (manager_id,template_id,sender_type,sender_name,subject,body,category,game_date)"
+       << " VALUES (" << managerId << ",0,'finance','Sponsorship Coordinator',"
+       << "'" << SqlEsc(subject) << "','" << SqlEsc(body) << "','finance','" << currentDate << "');";
+    DatabaseResult *ir = GetDB()->Query(iq.str());
+    delete ir;
+  }
+
+  printf("[SPONSOR] Offer generated: manager=%d sponsor='%s' value=%lld presTotal=%d\n",
+         managerId, sponsorName.c_str(), offerValue, presTotal);
+}
+
+static void ProcessSponsorRenewals(int managerId, int clubId, int seasonYear,
+                                   int position, int totalClubs, int expectedPos,
+                                   const std::string &mgrName, const std::string &clubNameStr) {
+  // Get all active contracts expiring this season
+  std::stringstream cq;
+  cq << "SELECT id, sponsor_id, sponsor_name, weekly_value FROM club_sponsors"
+     << " WHERE manager_id=" << managerId << " AND club_id=" << clubId
+     << " AND season_year=" << seasonYear << ";";
+  DatabaseResult *cr = GetDB()->Query(cq.str());
+  if (!cr || cr->data.size() == 0) { delete cr; return; }
+
+  int posDelta = expectedPos - position; // positive = overperformed
+  std::string nextSeasonDate = std::to_string(seasonYear + 1) + "-07-01";
+
+  unsigned int rng = (unsigned int)(managerId * 7919u) ^ (unsigned int)(seasonYear * 31337u);
+  auto NextRng = [&]() -> unsigned int { return rng = rng * 1664525u + 1013904223u; };
+
+  for (unsigned int i = 0; i < cr->data.size(); i++) {
+    int         cid      = atoi(DBCell(cr, i, 0).c_str());
+    int         spId     = atoi(DBCell(cr, i, 1).c_str());
+    std::string spName   = DBCell(cr, i, 2);
+    long long   currVal  = atoll(DBCell(cr, i, 3).c_str());
+
+    int roll = (int)(NextRng() % 100);
+    bool willRenew  = true;
+    float valueMult = 1.0f;
+
+    if      (posDelta >= 3)  { valueMult = 1.10f + (float)(NextRng() % 21) / 100.0f; }
+    else if (posDelta >= 1)  { valueMult = 1.00f + (float)(NextRng() % 11) / 100.0f; }
+    else if (posDelta == 0)  { valueMult = 0.97f + (float)(NextRng() %  7) / 100.0f; }
+    else if (posDelta >= -2) { if (roll < 25) willRenew = false;
+                               else valueMult = 0.80f + (float)(NextRng() % 16) / 100.0f; }
+    else                     { if (roll < 60) willRenew = false;
+                               else valueMult = 0.65f + (float)(NextRng() % 21) / 100.0f; }
+
+    // Remove the expiring contract
+    {
+      std::stringstream dq;
+      dq << "DELETE FROM club_sponsors WHERE id=" << cid << ";";
+      DatabaseResult *dr = GetDB()->Query(dq.str());
+      delete dr;
+    }
+
+    if (!willRenew) {
+      // Blacklist for next season
+      std::stringstream blq;
+      blq << "INSERT OR IGNORE INTO sponsor_blacklist"
+          << " (manager_id, sponsor_id, blacklisted_season)"
+          << " VALUES (" << managerId << "," << spId << "," << (seasonYear + 1) << ");";
+      DatabaseResult *blr = GetDB()->Query(blq.str());
+      delete blr;
+
+      std::string subject = spName + " Will Not Renew Sponsorship";
+      std::string body    = "Dear " + mgrName + ",\n\n"
+        + spName + " has decided not to renew their sponsorship with " + clubNameStr + ".\n\n"
+        "Following a review of the season's results, they have chosen to redirect their "
+        "sponsorship budget elsewhere. They may reconsider in future seasons based on performance.\n\n"
+        "Regards,\nSponsorship Coordinator";
+      std::stringstream iq;
+      iq << "INSERT INTO manager_inbox"
+         << " (manager_id,template_id,sender_type,sender_name,subject,body,category,game_date)"
+         << " VALUES (" << managerId << ",0,'finance','Sponsorship Coordinator',"
+         << "'" << SqlEsc(subject) << "','" << SqlEsc(body) << "','finance','" << nextSeasonDate << "');";
+      DatabaseResult *ir = GetDB()->Query(iq.str());
+      delete ir;
+      printf("[SPONSOR] Renewal declined: manager=%d sponsor='%s' (blacklisted s%d)\n",
+             managerId, spName.c_str(), seasonYear + 1);
+    } else {
+      long long newVal = (long long)((float)currVal * valueMult);
+      newVal = (newVal / 2500) * 2500;
+      if (newVal < 87500) newVal = 87500;
+
+      std::stringstream iq;
+      iq << "INSERT INTO pending_sponsor_offers"
+         << " (manager_id, sponsor_id, sponsor_name, weekly_value, offered_date)"
+         << " VALUES (" << managerId << "," << spId
+         << ",'" << SqlEsc(spName) << "'," << newVal << ",'" << nextSeasonDate << "');";
+      DatabaseResult *ir = GetDB()->Query(iq.str());
+      delete ir;
+
+      const char *dir = (newVal > currVal) ? "increased" : (newVal < currVal) ? "reduced" : "maintained";
+      char valBuf[32]; snprintf(valBuf, sizeof(valBuf), "%lld", newVal);
+      std::string subject = spName + " Sponsorship Renewal Offer";
+      std::string body    = "Dear " + mgrName + ",\n\n"
+        + spName + " would like to continue their partnership with " + clubNameStr + ".\n\n"
+        "They are proposing a " + std::string(dir) + " weekly fee of \xC2\xA3" + valBuf + ".\n\n"
+        "Visit Finances \xe2\x86\x92 Sponsorship to accept or decline.\n\n"
+        "Regards,\nSponsorship Coordinator";
+      std::stringstream iq2;
+      iq2 << "INSERT INTO manager_inbox"
+          << " (manager_id,template_id,sender_type,sender_name,subject,body,category,game_date)"
+          << " VALUES (" << managerId << ",0,'finance','Sponsorship Coordinator',"
+          << "'" << SqlEsc(subject) << "','" << SqlEsc(body) << "','finance','" << nextSeasonDate << "');";
+      DatabaseResult *ir2 = GetDB()->Query(iq2.str());
+      delete ir2;
+      printf("[SPONSOR] Renewal offer: manager=%d sponsor='%s' old=%lld new=%lld\n",
+             managerId, spName.c_str(), currVal, newVal);
+    }
+  }
+  delete cr;
 }
 
 // ---- Navigation state ---------------------------------------------------
@@ -9156,13 +9532,16 @@ static void DrawFinancesPage(float w, float h) {
   SummaryCard(origin.x, origin.y, "CURRENT BALANCE", FmtMoney(bal), balCol,
               card3W, FmtMoneyFull(bal).c_str());
 
-  // Weekly net card
-  long long weekIncome  = fi.weeklyTV;
+  // Weekly net card (TV + sponsors - wages - operating)
+  long long weekIncome  = fi.weeklyTV + fi.weeklySponsors;
   long long weekExpense = fi.weeklyWages + fi.weeklyOperating;
   long long weekNet     = weekIncome - weekExpense;
   ImU32 netCol = weekNet >= 0 ? IM_COL32(80, 215, 115, 255) : IM_COL32(220, 70, 70, 255);
   std::string netStr = (weekNet >= 0 ? "+" : "") + FmtMoney(weekNet) + " / wk";
-  SummaryCard(origin.x + card3W + kGap, origin.y, "WEEKLY CASHFLOW", netStr, netCol, card3W);
+  std::string netSub = fi.weeklySponsors > 0
+    ? ("incl. " + FmtMoney(fi.weeklySponsors) + "/wk sponsors") : "";
+  SummaryCard(origin.x + card3W + kGap, origin.y, "WEEKLY CASHFLOW", netStr, netCol,
+              card3W, netSub.empty() ? nullptr : netSub.c_str());
 
   // Season projection: remaining weeks cashflow + remaining matchday estimate
   long long remainingWeeks = 30;
@@ -9256,13 +9635,27 @@ static void DrawFinancesPage(float w, float h) {
       ImVec2 vsz = ImGui::CalcTextSize(vs.c_str());
       dl->AddText(ImVec2(iRight - vsz.x, ty), IM_COL32(80,215,115,230), vs.c_str());
       PopMgrFont(g_ManagerFontSmall);
-      // Bar shows mid-point as fill fraction relative to TV * 4 (rough 4-game month)
       float barY = ty + ImGui::GetTextLineHeight() + 2.0f;
       long long midVal = (fi.matchdayMin + fi.matchdayMax) / 2;
       long long refVal = fi.weeklyTV > 0 ? fi.weeklyTV : 1;
       float fillF = std::min(1.0f, (float)midVal / (float)refVal);
       dl->AddRectFilled(ImVec2(ix,barY), ImVec2(ix+kBarW,barY+kBarH), IM_COL32(20,28,50,200), 3.0f);
       dl->AddRectFilled(ImVec2(ix,barY), ImVec2(ix+kBarW*fillF,barY+kBarH), IM_COL32(80,200,110,200), 3.0f);
+      ty += ImGui::GetTextLineHeight() + kBarH + 10.0f;
+    }
+
+    // Sponsorship income (if any active)
+    if (fi.weeklySponsors > 0) {
+      PushMgrFont(g_ManagerFontSmall);
+      dl->AddText(ImVec2(ix, ty), IM_COL32(200,215,230,210), "Sponsorships");
+      std::string vs = FmtMoney(fi.weeklySponsors) + "/wk";
+      ImVec2 vsz = ImGui::CalcTextSize(vs.c_str());
+      dl->AddText(ImVec2(iRight - vsz.x, ty), IM_COL32(147,197,253,230), vs.c_str());
+      PopMgrFont(g_ManagerFontSmall);
+      float barY = ty + ImGui::GetTextLineHeight() + 2.0f;
+      float fillF = std::min(1.0f, (float)fi.weeklySponsors / (float)(fi.weeklyTV > 0 ? fi.weeklyTV : 1));
+      dl->AddRectFilled(ImVec2(ix,barY), ImVec2(ix+kBarW,barY+kBarH), IM_COL32(20,28,50,200), 3.0f);
+      dl->AddRectFilled(ImVec2(ix,barY), ImVec2(ix+kBarW*fillF,barY+kBarH), IM_COL32(100,160,240,200), 3.0f);
       ty += ImGui::GetTextLineHeight() + kBarH + 10.0f;
     }
   }
@@ -9354,8 +9747,139 @@ static void DrawFinancesPage(float w, float h) {
     }
   }
 
+  // ── Sponsorship section ───────────────────────────────────────────────
+  float sponsorY     = boardRowY + boardRowH + kGap;
+  const int kMaxSlots = 4;
+  float slotW        = (cw - kGap * 3.0f) / 4.0f;
+  float sponsorCardH = 68.0f;
+  float sponsorHdrH  = 26.0f;
+  bool  hasPending   = !g_CareerHub.pendingOffers.empty();
+  float pendingH     = hasPending ? (44.0f + kGap) : 0.0f;
+  float sponsorPanelH = sponsorHdrH + sponsorCardH + kGap * 2.0f + pendingH;
+
+  ImVec2 scrSp = ImVec2(win0.x + kPad, win0.y - scrollY + sponsorY);
+  dl->AddRectFilled(scrSp, ImVec2(scrSp.x + cw, scrSp.y + sponsorPanelH), C32(kBgCard), 8.0f);
+  dl->AddRect(scrSp,       ImVec2(scrSp.x + cw, scrSp.y + sponsorPanelH), C32(kBorder), 8.0f, 0, 1.0f);
+
+  // Section header
+  {
+    PushMgrFont(g_ManagerFontBold);
+    dl->AddText(ImVec2(scrSp.x + 12.0f, scrSp.y + 5.0f),
+                IM_COL32(200, 215, 240, 230), "SPONSORSHIPS");
+    PopMgrFont(g_ManagerFontBold);
+    char slotTxt[32];
+    snprintf(slotTxt, sizeof(slotTxt), "%d / 4 active",
+             (int)g_CareerHub.activeSponsors.size());
+    PushMgrFont(g_ManagerFontSmall);
+    ImVec2 stSz = ImGui::CalcTextSize(slotTxt);
+    dl->AddText(ImVec2(scrSp.x + cw - stSz.x - 14.0f, scrSp.y + 7.0f),
+                IM_COL32(140, 160, 190, 200), slotTxt);
+    PopMgrFont(g_ManagerFontSmall);
+  }
+
+  // Sponsor slot cards
+  float slotRowY = sponsorY + sponsorHdrH + 4.0f;
+  for (int s = 0; s < kMaxSlots; s++) {
+    float sx = win0.x + kPad + s * (slotW + kGap);
+    float sy = win0.y - scrollY + slotRowY;
+    ImVec2 sp0(sx, sy), sp1(sx + slotW, sy + sponsorCardH);
+    bool active = s < (int)g_CareerHub.activeSponsors.size();
+    ImU32 bgC = active ? IM_COL32(22, 38, 72, 220) : IM_COL32(14, 20, 40, 160);
+    ImU32 bdC = active ? IM_COL32(60, 100, 180, 180) : IM_COL32(40, 50, 80, 120);
+    dl->AddRectFilled(sp0, sp1, bgC, 6.0f);
+    dl->AddRect(sp0, sp1, bdC, 6.0f, 0, 1.0f);
+    if (active) {
+      const auto &sc = g_CareerHub.activeSponsors[s];
+      std::string nm = sc.sponsorName;
+      if (nm.size() > 15) nm = nm.substr(0, 14) + ".";
+      PushMgrFont(g_ManagerFontSmall);
+      dl->AddText(ImVec2(sx + 8.0f, sy + 8.0f), IM_COL32(200, 220, 255, 220), nm.c_str());
+      PopMgrFont(g_ManagerFontSmall);
+      PushMgrFont(g_ManagerFontMedium);
+      std::string vs = FmtMoney(sc.weeklyValue) + "/wk";
+      dl->AddText(ImVec2(sx + 8.0f, sy + 28.0f), IM_COL32(80, 215, 115, 230), vs.c_str());
+      PopMgrFont(g_ManagerFontMedium);
+      PushMgrFont(g_ManagerFontSmall);
+      dl->AddText(ImVec2(sx + 8.0f, sy + 52.0f), IM_COL32(100, 130, 170, 180), "Active");
+      PopMgrFont(g_ManagerFontSmall);
+    } else {
+      PushMgrFont(g_ManagerFontSmall);
+      dl->AddText(ImVec2(sx + 8.0f, sy + 28.0f), IM_COL32(70, 90, 130, 150), "Open slot");
+      PopMgrFont(g_ManagerFontSmall);
+    }
+  }
+
+  // Pending offer strip
+  if (hasPending) {
+    const auto &offer = g_CareerHub.pendingOffers[0];
+    float offerRowY   = slotRowY + sponsorCardH + kGap;
+    float offerScrY   = win0.y - scrollY + offerRowY;
+    float offerH      = 44.0f;
+    float btnW        = 88.0f, btnH = 28.0f;
+
+    dl->AddRectFilled(ImVec2(scrSp.x + 6.0f, offerScrY),
+                      ImVec2(scrSp.x + cw - 6.0f, offerScrY + offerH),
+                      IM_COL32(18, 32, 68, 230), 6.0f);
+    dl->AddRect(ImVec2(scrSp.x + 6.0f, offerScrY),
+                ImVec2(scrSp.x + cw - 6.0f, offerScrY + offerH),
+                IM_COL32(80, 130, 220, 160), 6.0f, 0, 1.0f);
+
+    PushMgrFont(g_ManagerFontSmall);
+    std::string offerLine = "Offer: " + offer.sponsorName;
+    dl->AddText(ImVec2(scrSp.x + 16.0f, offerScrY + 5.0f),
+                IM_COL32(200, 220, 255, 230), offerLine.c_str());
+    std::string valLine = FmtMoney(offer.weeklyValue) + " / week";
+    dl->AddText(ImVec2(scrSp.x + 16.0f, offerScrY + 23.0f),
+                IM_COL32(80, 215, 115, 230), valLine.c_str());
+    PopMgrFont(g_ManagerFontSmall);
+
+    float bx = scrSp.x + cw - btnW * 2.0f - kGap * 2.5f;
+    float by = offerScrY + (offerH - btnH) * 0.5f;
+
+    ImGui::SetCursorScreenPos(ImVec2(bx, by));
+    ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(30, 120, 60, 220));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(40, 160, 80, 240));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  IM_COL32(20, 100, 50, 255));
+    if (ImGui::Button("Accept##spA", ImVec2(btnW, btnH))) {
+      int sYear = g_CareerHub.seasonYear;
+      std::stringstream aiq;
+      aiq << "INSERT OR IGNORE INTO club_sponsors"
+          << " (manager_id,club_id,sponsor_id,sponsor_name,weekly_value,season_year)"
+          << " VALUES (" << g_CareerHub.managerId << "," << g_CareerHub.clubId << ","
+          << offer.sponsorId << ",'" << SqlEsc(offer.sponsorName) << "',"
+          << offer.weeklyValue << "," << sYear << ");";
+      DatabaseResult *air = GetDB()->Query(aiq.str());
+      delete air;
+      std::stringstream adq;
+      adq << "UPDATE pending_sponsor_offers SET status='accepted' WHERE id=" << offer.id << ";";
+      DatabaseResult *adr = GetDB()->Query(adq.str());
+      delete adr;
+      CareerHubState::SponsorContract nsc;
+      nsc.id = 0; nsc.sponsorId = offer.sponsorId;
+      nsc.sponsorName = offer.sponsorName; nsc.weeklyValue = offer.weeklyValue;
+      nsc.seasonYear  = sYear;
+      g_CareerHub.activeSponsors.push_back(nsc);
+      g_CareerHub.finances.weeklySponsors += offer.weeklyValue;
+      g_CareerHub.pendingOffers.erase(g_CareerHub.pendingOffers.begin());
+    }
+    ImGui::PopStyleColor(3);
+
+    ImGui::SetCursorScreenPos(ImVec2(bx + btnW + kGap, by));
+    ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(100, 30, 30, 200));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(150, 45, 45, 230));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  IM_COL32(80, 20, 20, 255));
+    if (ImGui::Button("Decline##spD", ImVec2(btnW, btnH))) {
+      std::stringstream ddq;
+      ddq << "UPDATE pending_sponsor_offers SET status='declined' WHERE id=" << offer.id << ";";
+      DatabaseResult *ddr = GetDB()->Query(ddq.str());
+      delete ddr;
+      g_CareerHub.pendingOffers.erase(g_CareerHub.pendingOffers.begin());
+    }
+    ImGui::PopStyleColor(3);
+  }
+
   // ── Ledger ────────────────────────────────────────────────────────────
-  float ledgerTop = boardRowY + boardRowH + kGap;
+  float ledgerTop = sponsorY + sponsorPanelH + kGap;
   float ledgerH   = h - ledgerTop - 8.0f;
   if (ledgerH < 60.0f) ledgerH = 60.0f;
 

@@ -299,6 +299,46 @@ static void EnsureCareerTables() {
       ");");
     delete r;
   }
+
+  // Per-career sponsorship tables
+  // (sponsors reference data lives in the main database.sqlite, not created here)
+  {
+    DatabaseResult *r = GetDB()->Query(
+      "CREATE TABLE IF NOT EXISTS club_sponsors ("
+      "  id           INTEGER PRIMARY KEY AUTOINCREMENT,"
+      "  manager_id   INTEGER NOT NULL,"
+      "  club_id      INTEGER NOT NULL,"
+      "  sponsor_id   INTEGER NOT NULL,"
+      "  sponsor_name TEXT    NOT NULL,"
+      "  weekly_value INTEGER NOT NULL DEFAULT 0,"
+      "  season_year  INTEGER NOT NULL,"
+      "  UNIQUE(manager_id, club_id, sponsor_id, season_year)"
+      ");");
+    delete r;
+  }
+  {
+    DatabaseResult *r = GetDB()->Query(
+      "CREATE TABLE IF NOT EXISTS pending_sponsor_offers ("
+      "  id           INTEGER PRIMARY KEY AUTOINCREMENT,"
+      "  manager_id   INTEGER NOT NULL,"
+      "  sponsor_id   INTEGER NOT NULL,"
+      "  sponsor_name TEXT    NOT NULL,"
+      "  weekly_value INTEGER NOT NULL DEFAULT 0,"
+      "  offered_date TEXT    NOT NULL,"
+      "  status       TEXT    NOT NULL DEFAULT 'pending'"
+      ");");
+    delete r;
+  }
+  {
+    DatabaseResult *r = GetDB()->Query(
+      "CREATE TABLE IF NOT EXISTS sponsor_blacklist ("
+      "  manager_id         INTEGER NOT NULL,"
+      "  sponsor_id         INTEGER NOT NULL,"
+      "  blacklisted_season INTEGER NOT NULL,"
+      "  PRIMARY KEY (manager_id, sponsor_id, blacklisted_season)"
+      ");");
+    delete r;
+  }
 }
 
 static void DeleteCareerSeason(int managerId) {
