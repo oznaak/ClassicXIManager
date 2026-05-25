@@ -6,6 +6,7 @@
 #include "menutask.hpp"
 
 #include "base/utils.hpp"
+#include "transfer_engine.hpp"
 #include <boost/bind/bind.hpp>
 #include <sstream>
 #include <cstdlib>
@@ -746,6 +747,9 @@ void GenerateCareerSeason(int managerId, int seasonYear) {
       Fill("Dear %ManagerName%,\n\nThe %SeasonYear% season is now officially underway. Fixtures have been confirmed and the schedule has been distributed to all clubs.\n\nWe wish %ClubName% the best of luck this season.\n\nLeague Administration"),
       "competition", 0);
   }
+
+  // Seed transfer system (player traits, club identity, knowledge, market status)
+  SeedTransferSystem(managerId);
 
   printf("[CAREER] New season generated manager=%d season_year=%d current_date=%s\n",
          managerId, seasonYear, careerDate);
