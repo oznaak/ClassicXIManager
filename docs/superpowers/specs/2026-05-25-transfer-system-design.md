@@ -8,6 +8,8 @@
 
 Transfers are driven by pressure, ambition, finance, reputation, ego, timing, and irrationality — not by pure squad optimisation. The engine must produce believable chaos: panic buys, vanity signings, clubs behaving differently from each other, deals that collapse at the last second, and cascade effects that ripple across the market. Perfect logic is forbidden. Controlled irrationality is a first-class requirement.
 
+**Anti-optimisation rule:** The AI must never become mathematically efficient. If the AI always buys the best-value player for each need, the market becomes dead and predictable. Mistakes, ego, panic, reputation bias, irrationality, and bad timing are not edge cases — they are core outputs the system must protect at every stage of implementation.
+
 ---
 
 ## Transfer Windows
@@ -22,15 +24,19 @@ Transfers are driven by pressure, ambition, finance, reputation, ego, timing, an
 ## Architecture Overview
 
 ```
-player_traits            — hidden per-player personality (seeded at career start)
-club_transfer_identity   — hidden per-club DNA (seeded at career start)
-club_player_knowledge    — which clubs know which players (scouting visibility)
-transfer_negotiations    — state machine rows for every deal in flight
-transfer_news            — minimal headline log for the news page
-player_unhappiness       — tracks broken promises, benching, blocked moves
+player_traits              — hidden per-player personality (seeded at career start)
+club_transfer_identity     — hidden per-club DNA + negotiation personality (seeded at career start)
+club_player_knowledge      — which clubs know which players (scouting visibility)
+club_player_relationship   — relationship memory between clubs and players
+player_market_status       — hidden flags: untouchable, wonderkid, franchise_player, etc.
+transfer_negotiations      — state machine rows for every deal in flight
+negotiation_cooldowns      — blocks same buyer/player pair after collapse
+market_scarcity            — per-position global scarcity tracking (price inflation)
+transfer_news              — minimal headline log for the news page
+player_unhappiness         — tracks broken promises, benching, blocked moves
 ```
 
-All tables are per-`manager_id`. Daily processor `ProcessDailyTransfers()` drives everything.
+All tables are per-`manager_id` except `market_scarcity` which is global per career. Daily processor `ProcessDailyTransfers()` drives everything.
 
 ---
 
@@ -98,9 +104,25 @@ Created at career start. Seeded from existing `style_seed`, `institutional_power
 | `prestige_bias` | high `institutional_power` | Prefers famous names over pure quality |
 | `irrationality` | `style_seed % 6` extreme values + `deadline_panic` | Controls vanity/panic/nostalgia move probability |
 
+### Negotiation Personality
+
+Each club has a hidden negotiation style derived from identity traits. This is a second layer that shapes how they behave specifically during talks — not just whether to pursue a player, but how they negotiate once a deal is in motion.
+
+Five personalities (one assigned per club, never exposed directly):
+
+| Personality | Derived from | Behavior |
+|---|---|---|
+| `hard_negotiator` | high `loyalty_to_players` + low `selling_pressure` | Starts high, moves slowly, rarely panics |
+| `fast_closer` | high `aggression` + high `wage_willingness` | Overpays quickly to end negotiations; hates stalling |
+| `media_manipulator` | high `irrationality` + high `prestige_bias` | Leaks interest publicly; uses competing bids as leverage even when none exist |
+| `patient` | high `financial_risk_tolerance` + low `deadline_panic` | Waits out stalls; never panic buys; walks away cleanly |
+| `desperate` | high `selling_pressure` + low `board_confidence` | Accepts below-value; rushes through counter-offers; deadline panic is severe |
+
+Negotiation personality modifies: counter-offer increment size, stall tolerance, `competing_bid` fabrication chance (media_manipulator only), and collapse/accept thresholds.
+
 ### Club Archetypes (hidden, never shown directly)
 
-Derived from trait combinations at career start. Used to seed narrative flavor only — the underlying traits are what the engine actually uses:
+Derived from trait combinations at career start. Used only for seeding personality narrative flavor:
 
 - `conservative` — low aggression, low irrationality, high loyalty_to_players
 - `aggressive` — high aggression, high wage_willingness, low loyalty_to_players
@@ -108,7 +130,7 @@ Derived from trait combinations at career start. Used to seed narrative flavor o
 - `youth_factory` — high youth_focus, high resale_focus, low prestige_bias
 - `selling_club` — high selling_pressure, low loyalty_to_players, high resale_focus
 - `prestige_driven` — high prestige_bias, high wage_willingness, low resale_focus
-- `opportunistic` — high irrationality, mid aggression, high adaptability to market shifts
+- `opportunistic` — high irrationality, mid aggression
 - `rebuild` — triggered when board_confidence < 35: selling_pressure spikes, youth_focus rises
 
 ### Controlled Irrationality
@@ -123,7 +145,7 @@ If triggered, the club may:
 - **Vanity signing:** target a famous player regardless of squad need (prestige_bias > 60)
 - **Panic buy:** sign any available player at the needed position regardless of quality or fee (deadline_panic > 60)
 - **Duplicate depth signing:** buy a 3rd player at a position already covered (aggression > 70)
-- **Nostalgia move:** re-sign a former player now at a different club (loyalty_to_players > 65, player age > 28)
+- **Nostalgia move:** re-sign a former player now at a different club (relationship memory: `former_player` flag)
 - **Reputation trap:** overpay for a declining veteran still carrying a famous name (prestige_bias > 70, player age > 30)
 
 Irrationality rolls use the daily RNG seed so each save produces different irrational decisions.
@@ -158,24 +180,71 @@ When a club selects a transfer target: filter candidate pool to `knowledge >= 30
 
 ---
 
-## Section 4 — Squad Need Engine
+## Section 4 — Relationship Memory
+
+Table: `club_player_relationship`
+Columns: `manager_id`, `club_id`, `player_id`, `relationship_type TEXT`, `created_date TEXT`.
+
+Relationship types:
+
+| Type | Set when | Effect |
+|---|---|---|
+| `former_player` | Transfer completes away from club | Nostalgia move trigger; acceptance bonus if returning |
+| `rejected_offer` | Offer collapsed or player rejected terms | Asking price +15% on next approach; player acceptance −10 |
+| `fan_favourite` | Player at club > 3 seasons + high reputation | `loyalty_to_players` effectively +20 for this player; selling generates news |
+| `transfer_listed_by_us` | Club sets player as surplus | Acceptance score for leaving +20; agent pressure +15 |
+| `unhappy_at_club` | `player_unhappiness.severity > 60` | Available at reduced price; acceptance for any move +15 |
+| `blocked_move` | 3+ collapses on same player | Unhappiness +25; player pushes for exit regardless of loyalty |
+| `failed_medical` | Medical pending → collapsed | Buying club has 30-day cooldown on this player; news item generated |
+
+Multiple relationship types can exist for the same club/player pair.
+
+---
+
+## Section 5 — Player Market Status
+
+Table: `player_market_status`
+Columns: `manager_id`, `player_id`, `status TEXT`, `set_date TEXT`.
+
+One row per player per career. Status is a hidden flag that overrides normal market behavior.
+
+| Status | Set when | Effect |
+|---|---|---|
+| `transfer_listed` | Club marks player surplus (`is_transfer_listed = 1` or `surplus_to_requirements`) | Visible signal; accepting clubs get reduced asking price |
+| `untouchable` | High `loyalty_to_players` + `fan_favourite` relationship | Club refuses all bids; selling_pressure must be > 70 to override |
+| `surplus_to_requirements` | Squad size > 28 + player in bottom third of squad rating | Transfer aggression reduced; club accepts lower fees |
+| `wonderkid` | Age ≤ 21 + `sofifaPotential >= 85` + `international_reputation >= 3` | Globally known regardless of knowledge; multiple clubs monitor; price inflated |
+| `franchise_player` | Captain equivalent: team's highest-rated player at club > 2 seasons | `untouchable` behavior; sale triggers board confidence hit + fan backlash news |
+| `expiring_soon` | `contract_expiry` within 6 months | Selling club's asking price drops 40%; player's acceptance of any move +20 |
+
+Status is re-evaluated every 30 days by `ProcessDailyTransfers`.
+
+---
+
+## Section 6 — Squad Need Engine
 
 Runs at: career load, window open, and after every completed or collapsed transfer (cascade trigger).
 
-### Position Groups
+### Position Groups (7 groups — fine-grained to prevent unrealistic position saturation)
 
-Map player `role` to four groups:
-- `GK` — goalkeepers
-- `DEF` — CB, LB, RB, LWB, RWB
-- `MID` — CDM, CM, CAM, LM, RM
-- `ATT` — LW, RW, CF, ST
+| Group | Roles included |
+|---|---|
+| `GK` | GK |
+| `CB` | CB |
+| `FB_WB` | LB, RB, LWB, RWB |
+| `DM` | CDM |
+| `CM` | CM |
+| `AM_W` | CAM, LM, RM, LW, RW |
+| `ST` | CF, ST |
+
+This prevents clubs from buying a 6th striker because LW and ST were merged. Each group is evaluated independently.
 
 ### Need Score Formula
 
 For each group per club:
 
 ```
-need = quality_gap     * 30   // group avg base_stat below league avg for position
+need = quality_gap     * 30   // group avg base_stat below league avg for that group
      + depth_gap       * 25   // fewer than 2 players in group
      + age_problem     * 20   // group avg age > 30
      + expiry_pressure * 15   // 2+ players with contract_expiry within 6 months
@@ -183,6 +252,26 @@ need = quality_gap     * 30   // group avg base_stat below league avg for positi
 ```
 
 Clamped 0–100.
+
+### Squad Size Pressure
+
+Ideal squad size: 24–28 players. Checked after every transfer completion.
+
+- **Squad > 28:** Transfer aggression reduced by 30%; `selling_pressure` increased by 20%; bottom-rated rotation players automatically flagged `surplus_to_requirements`.
+- **Squad > 32:** No new signings initiated regardless of need score or irrationality roll. Club actively lists players.
+- **Squad < 18:** Emergency override — need scores doubled, irrationality suppressed (pure survival mode).
+
+### Target Prioritisation Tiers
+
+When a club decides to act on a need, targets are ranked into three tiers before selection:
+
+**Tier 1 — Dream targets:** knowledge ≥ 70, quality significantly above current group average, matches club identity (prestige_bias, age_preference). Club will offer above contextual value. Patience is long.
+
+**Tier 2 — Realistic targets:** knowledge ≥ 40, quality at or above group average, affordable (within 60% of transfer_budget). Standard negotiation behavior.
+
+**Tier 3 — Panic alternatives:** Any visible player (knowledge ≥ 30) at the needed position. Triggered when Tier 1 and Tier 2 deals collapse and deadline pressure > 60. Clubs may seriously overpay or accept poor quality.
+
+Clubs start at Tier 1. Failed deals cascade down: Tier 1 collapse → try Tier 2. Tier 2 collapse near deadline → Tier 3. This creates realistic desperation without random jumps.
 
 ### Action Thresholds
 
@@ -194,35 +283,66 @@ Clamped 0–100.
 
 ### Imperfection Rules
 
-- Clubs with `professionalism < 30` may ignore a score of 70+
+- Clubs with `irrationality > 70` may ignore need scores entirely (irrational buy regardless of squad state)
 - Clubs with `financial_risk_tolerance < 20` won't act above score 50 if cash is tight
 - Irrationality roll can override threshold entirely (vanity/panic buys)
 - A club already running 2+ negotiations won't start a third unless `aggression > 75`
 
 ---
 
-## Section 5 — Improved Valuation
+## Section 7 — Improved Valuation
 
-Player transfer value is dynamic — not a static `playervalue` field. Calculated per negotiation context.
+Player transfer value is dynamic. Calculated per negotiation context.
 
 ```
 contextual_value =
   base_playervalue
   × contract_factor       // 1.3 if 3+ years left, 0.7 if < 1 year, 1.0 otherwise
-  × scarcity_factor       // 1.0–1.4: fewer players of same quality/position = higher
+  × scarcity_factor       // 1.0–1.5: from market_scarcity table (global position scarcity)
   × seller_factor         // 0.7–1.0: selling_pressure reduces asking price
   × buyer_urgency         // 1.0–1.3: need_score > 70 = buyer overpays
   × deadline_factor       // 1.0–1.5: climbs in final 5 days of window
   × hype_factor           // 1.0–1.3: agent_pressure inflates price
+  × status_factor         // wonderkid = 1.4, expiring_soon = 0.6, untouchable = 2.0 (rarely sells)
 ```
 
-Selling club's ask = `contextual_value × (1.0 + loyalty_to_players * 0.003)` (loyal clubs overvalue own players).
+Selling club's ask = `contextual_value × (1.0 + loyalty_to_players * 0.003)`.
 
 Buying club's offer starts at 80% of contextual_value, steps up in negotiation.
 
+Rejected offer relationship adds 15% to contextual_value on next approach from same club.
+
 ---
 
-## Section 6 — Agent Pressure
+## Section 8 — Market Scarcity Memory
+
+Table: `market_scarcity`
+Columns: `manager_id`, `position_group TEXT`, `scarcity_score INTEGER` (0–100), `last_updated TEXT`.
+
+Tracks global availability of quality players per position group across all clubs.
+
+### Scarcity Calculation (re-run at window open)
+
+For each position group:
+```
+available_supply = count of players in group with base_stat > league_avg
+                   AND (transfer_listed OR expiring_soon OR surplus_to_requirements)
+scarcity_score = max(0, 100 - (available_supply * 8))
+```
+
+Scarcity score feeds directly into `scarcity_factor` in contextual valuation:
+- scarcity 0–30: factor 1.0 (normal market)
+- scarcity 31–60: factor 1.15
+- scarcity 61–80: factor 1.30
+- scarcity > 80: factor 1.50 (elite players in this position command enormous fees)
+
+This creates organic "crazy transfer years" — if many top strikers sign long contracts or move to the same club, ST prices spike league-wide. Clubs buying in that window pay a premium.
+
+Scarcity persists across windows within a season and decays slowly into the next (youth matures, market adjusts).
+
+---
+
+## Section 9 — Agent Pressure
 
 Hidden per-negotiation factor. Not a full agent system — simulates agent behavior as a modifier.
 
@@ -235,15 +355,35 @@ Column `agent_pressure` (0–100) on `transfer_negotiations`. Seeded from:
 
 | Pressure level | Effect |
 |---|---|
-| > 70 | Wage demand inflated 1.2–1.4×; media leak triggers (news item: "Agent confirms interest") |
+| > 70 | Wage demand inflated 1.2–1.4×; media leak triggers (`agent_leak` news item) |
 | 50–70 | Asking price rises 10–20% mid-negotiation; deal volatility increases |
 | < 30 | Clean negotiation; player accepts reasonable offer quickly |
 
-Agent pressure increases by +5 per day the deal stays in `negotiating` or `stalled` states. Represents agent stirring the pot over time.
+Agent pressure increases by +5 per day the deal stays in `negotiating` or `stalled` states.
+
+`media_manipulator` clubs can fabricate competing bid pressure (raise agent_pressure +15 without an actual competing deal existing) to force faster decisions.
 
 ---
 
-## Section 7 — Negotiation State Machine
+## Section 10 — Financial Protection
+
+Hard limits that prevent AI clubs from imploding permanently due to irrationality or deadline chaos.
+
+### Per-Club Limits (enforced before any transfer commitment)
+
+| Guard | Rule |
+|---|---|
+| **Operating reserve** | Club cannot spend below `min_reserve = weekly_wages * 8`. If a transfer would breach this, it is blocked even for gambling archetypes. |
+| **Max wage/revenue ratio** | `total_weekly_wages / weekly_revenue` must not exceed 0.85 after any signing. Revenue = weeklyTV + weeklySponsors. |
+| **Transfer budget floor** | Transfer budget cannot go negative. Clubs can offer only what they have. |
+| **Debt panic threshold** | If `debt_level > transfer_budget * 2`: selling_pressure set to 80, no new signings initiated (survival mode), board_confidence −10. |
+| **Wage overrun block** | If current squad wages already exceed `wage_budget`: no new wage commitments unless `financial_risk_tolerance > 75`. |
+
+These guards are checked inside the daily processor before any `initiated` → `offer_made` transition. Irrational clubs can still behave emotionally — they just cannot physically bankrupt themselves into a non-recoverable state.
+
+---
+
+## Section 11 — Negotiation State Machine
 
 Table: `transfer_negotiations`
 
@@ -262,6 +402,8 @@ collapse_reason TEXT                -- populated on collapse
 competing_bid_club_id INTEGER       -- club competing for same player (if any)
 acceptance_score INTEGER            -- last calculated player acceptance (0–100)
 irrationality_driven INTEGER        -- 1 if this deal was triggered by irrationality roll
+tier INTEGER                        -- 1, 2, or 3 (target priority tier)
+counter_offer_count INTEGER         -- how many times buyer has raised bid
 ```
 
 ### States
@@ -272,14 +414,13 @@ initiated
 offer_made
   ↓ (1–4 days) selling club accepts/rejects
 negotiating
-  ↓↗ (loops)
-counter_offer      ← selling club wants more
+  ↓↗ (loops — deals sit, revive, restart)
+counter_offer      ← selling club wants more / buyer raises
 stalled            ← neither side moves (patience expired)
 competing_bid      ← another club enters for same player
+player_waiting     ← player taking time to decide (high loyalty, weighing options)
   ↓
 medical_pending    ← deal agreed, 1-day medical check
-  ↓
-agreed             ← 1-day confirmation
   ↓
 completed          ← player moves; cascade triggers
   OR
@@ -289,43 +430,47 @@ collapsed          ← at any state after offer_made
 ### State Transition Logic
 
 **initiated → offer_made:**
-Days = `3 - (club.aggression / 50)` clamped 1–3.
+Days = `3 - (club.aggression / 50)` clamped 1–3. Fast_closer personality: always 1 day.
 
 **offer_made → negotiating or collapsed:**
-Selling club evaluates: `loyalty_to_players` (high = rejects low bids), `selling_pressure` (high = accepts), contextual value vs offered fee. If offered_fee < 60% of contextual_value and selling_pressure < 40: collapsed. Otherwise: negotiating.
+Selling club evaluates `loyalty_to_players`, `selling_pressure`, contextual value vs offered fee, and player market status (`untouchable` = auto-reject unless selling_pressure > 70). If fee < 60% of contextual_value and selling_pressure < 40: collapsed. Otherwise: negotiating.
 
 **negotiating (daily tick):**
-Calculate `acceptance_score` (see Section 8). If score > 65: → `medical_pending`. If score 40–65: → `counter_offer`. If score < 40: → `collapsed`. Roll for `competing_bid` (15% daily chance if player knowledge > 60 at any other club with matching need).
+Calculate `acceptance_score` (see Section 12). If score > 65: → `player_waiting` (high loyalty player) or `medical_pending` (everyone else). If score 40–65: → `counter_offer`. If score < 40: → `collapsed`. 15% daily roll for `competing_bid` if player knowledge ≥ 60 at another club with matching need.
 
 **counter_offer:**
-Buying club raises fee by 5–15% and wage by 5–10% (modulated by `wage_willingness`). Returns to `negotiating`. If buying club has already counter-offered 3+ times and score still < 50: → `collapsed`.
+Buyer raises fee 5–15% and wage 5–10% (modulated by `wage_willingness`). `fast_closer` raises 20% immediately. Returns to `negotiating`. After `counter_offer_count > 3` and score still < 50: → `collapsed` unless deadline_pressure > 80 (desperation override).
 
 **stalled:**
-Triggered when `days_in_state > 5` in `negotiating` with no score movement. Deal sits. 30% daily revival chance. Agent pressure increases +10. If stalled > 10 days: collapsed.
+Triggered when `days_in_state > 5` in `negotiating` with no score movement. Deal sits. 30% daily revival chance (60% during deadline week). `patient` clubs wait; `desperate` clubs collapse after 5 stalled days. Agent pressure +10 per stalled day.
 
 **competing_bid:**
-Another club enters. Raises `agent_pressure` by 20. Original buyer must increase offer (aggression-weighted) or lose player. Can loop back to `negotiating` or produce `collapsed` for the losing club.
+Another club enters. `agent_pressure` +20. Original buyer must increase offer (aggression-weighted) or withdraw. `media_manipulator` clubs can fabricate this state to pressure deals. Can loop back to `negotiating`.
+
+**player_waiting:**
+Player with loyalty > 65 takes 2–4 days before deciding. During this window: competing_bid chance rises to 25% daily. If another offer arrives: → `competing_bid`. Otherwise resolves to `medical_pending` or `collapsed`.
 
 **medical_pending:**
-1 day. 95% pass rate. 5% collapse (collapse_reason = "failed_medical"). Memorable rare event.
+1 day. Pass rate: **normal = 98%, deadline day (final 3 days) = 95%**. Collapse on failure; collapse_reason = `failed_medical`.
 
 **collapsed:**
-Sets `collapse_reason`. Triggers cascade for buying club (need re-evaluation). If player was listed by selling club and collapses 3+ times: player_unhappiness +20 for selling club (blocked move).
+Sets `collapse_reason`. Inserts cooldown row. Triggers cascade. Updates player_unhappiness if relevant. Updates club_player_relationship (`rejected_offer` or `blocked_move`).
 
 ### Deadline Day Special Rules
 
-When `deadline_pressure > 80` (final ~4 days):
-- Clubs with `deadline_panic > 50`: aggression +30, wage_willingness +25, patience −40
+When `deadline_pressure > 80` (final ~4 days of window):
+- Clubs with `deadline_panic > 50`: effective aggression +30, wage_willingness +25, stall tolerance −40
 - `stalled` deals revival chance rises to 60%
-- `counter_offer` loops reduced by 1 (less patience for back-and-forth)
-- `medical_pending` collapse chance rises to 12% (rushed medicals)
+- `counter_offer` loops reduced by 1 (less patience)
+- Medical collapse chance: 5% (up from 2%)
 - Irrationality roll fires daily for panicking clubs regardless of need score
+- Tier 3 targeting unlocked for clubs whose Tier 1 and 2 deals collapsed
 
 ---
 
-## Section 8 — Player Acceptance Score
+## Section 12 — Player Acceptance Score
 
-Calculated during `negotiating` state. Score 0–100. Above 65 = player agrees. 40–65 = counter. Below 40 = rejection.
+Calculated during `negotiating` state. Score 0–100. Above 65 = moves to medical/waiting. 40–65 = counter. Below 40 = rejection.
 
 ```
 acceptance_score =
@@ -333,9 +478,9 @@ acceptance_score =
   + role_fit        * 0.18   // promised_role vs ego threshold
   + prestige_fit    * 0.18   // buying club institutional_power vs player trophy_hunger
   + league_fit      * 0.10   // buying club league reputation vs player adaptability
-  + playtime_fit    * 0.14   // squad depth at player position (playing time likelihood)
-  + ambition_pull   * 0.10   // ambition trait × prestige delta from current club
-  − loyalty_drag    * 0.10   // loyalty trait (cost to leave current club)
+  + playtime_fit    * 0.14   // squad depth at player position
+  + ambition_pull   * 0.10   // ambition × prestige delta from current club
+  − loyalty_drag    * 0.10   // loyalty trait cost to leave
 ```
 
 ### Component Formulas
@@ -352,30 +497,74 @@ acceptance_score =
 
 **league_fit:** `league_reputation_score × (adaptability / 100.0f)`. Cross-continental move penalised unless adaptability > 60.
 
-**playtime_fit:** Inverse of how crowded the player's position is at buying club. Fewer incumbents = higher score. Weighted by ego.
+**playtime_fit:** Inverse of how crowded the player's position group is at buying club. Fewer incumbents = higher score. Ego amplifies this.
 
 **ambition_pull:** `(ambition / 100.0f) × max(0, buying_club.institutional_power − selling_club.institutional_power)`.
 
-**loyalty_drag:** `(loyalty / 100.0f) × 100` — subtracted raw. High loyalty makes every move harder.
+**loyalty_drag:** `(loyalty / 100.0f) × 100` — subtracted raw.
 
-Agent pressure modifies final score: `acceptance_score += (agent_pressure - 50) × 0.10f` (high pressure pushes player toward accepting faster; moderate pressure is neutral).
+**Relationship modifiers (applied after base score):**
+- `former_player` relationship: +8
+- `rejected_offer` previously: −10
+- `unhappy_at_club` status: +15
+- `fan_favourite` at selling club: loyalty_drag ×1.3
+
+**Agent pressure modifier:** `acceptance_score += (agent_pressure − 50) × 0.10f`.
 
 ---
 
-## Section 9 — Squad Role Promises
+## Section 13 — Squad Role Promises
 
 `promised_role` column on `transfer_negotiations`: `star_player | important | rotation | prospect`.
 
-Role is set by buying club based on:
-- How desperate they are (need_score): high need → generous promise
-- Ego of player: high ego → forced to promise `star_player` or player rejects
-- Club's current depth at position: no competitors → `important` minimum
+Role set by buying club:
+- High need_score → generous promise
+- High ego player → must promise `star_player` or `important` or player auto-rejects
+- Current squad depth at position → fewer incumbents = more generous promise
 
-**Promise tracking:** When a deal completes, the promised role is stored. Phase 3 will track whether promises are kept. Phase 1+2 seeds the data; unhappiness for broken promises is handled now.
+Promise stored on completed deal. Phase 3 will track fulfillment. Phase 1+2 seeds the promise and evaluates unhappiness for violations detected during AI processing (e.g., club buys another player at same position within 30 days of a `star_player` promise).
 
 ---
 
-## Section 10 — Player Unhappiness
+## Section 14 — Negotiation Cooldowns
+
+Table: `negotiation_cooldowns`
+Columns: `manager_id`, `buying_club_id`, `player_id`, `cooldown_until TEXT` (YYYY-MM-DD), `reason TEXT`.
+
+After a deal collapses:
+- Same buyer cannot initiate on same player for **7–14 days** (randomised: 7 + rng()%8).
+- `rejected_offer` relationship is written simultaneously.
+- Selling club's `loyalty_to_players` effectively +15 for this buyer for the rest of the window.
+
+Cooldown also applied after `failed_medical`: 30-day block from same buyer.
+
+During the daily processor, target selection skips any player with an active cooldown for that buyer.
+
+---
+
+## Section 15 — Contract Renewal AI
+
+Without AI contract renewals, the market becomes distorted after 2–3 seasons as all contracts expire simultaneously.
+
+`ProcessContractRenewals(managerId, currentDate)` runs monthly (1st of each month), outside transfer windows.
+
+### Rules
+
+**Key player renewal (loyalty_to_players > 50):**
+If a player has `contract_expiry` within 12 months AND `player_market_status` is `franchise_player` or `fan_favourite`: club initiates renewal. Offered wage = current wage × 1.05–1.20 (based on player's recent performance tier).
+
+**Proactive selling of expiring players (resale_focus > 60):**
+If contract < 8 months and player is NOT a key player: club lists player (`transfer_listed` status). Avoids losing player for free.
+
+**Veteran walk (age > 32, contract expiring):**
+Club offers minimal renewal or allows expiry depending on `loyalty_to_players`. Low loyalty_to_players clubs let veterans walk; high loyalty clubs over-extend aging stars (irrational but realistic).
+
+**Player triggers:**
+High `ambition` (> 70) players in the final year of contract push for move rather than renewal. High `loyalty` (> 70) players accept below-market renewals. `greed` > 70 players demand 30%+ wage increase.
+
+---
+
+## Section 16 — Player Unhappiness
 
 Table: `player_unhappiness`
 Columns: `manager_id`, `player_id`, `reason TEXT`, `severity INTEGER` (0–100), `created_date TEXT`, `resolved INTEGER` (0/1).
@@ -386,36 +575,37 @@ Columns: `manager_id`, `player_id`, `reason TEXT`, `severity INTEGER` (0–100),
 |---|---|---|
 | Transfer collapsed 3+ times (selling club blocked) | +25 | `blocked_move` |
 | Player listed but no buyer after 30+ days | +15 | `unwanted` |
-| Contract expiring within 3 months, no offer made | +10 | `contract_stall` |
-| Negotiation collapsed in `medical_pending` | +10 | `failed_medical_stress` |
+| Contract expiring within 3 months, no renewal offer | +10 | `contract_stall` |
+| `medical_pending` collapse | +10 | `failed_medical_stress` |
+| Star player promise + club signs competitor at same position within 30 days | +20 | `broken_promise` |
 
-Severity accumulates per player per career. Above 60: player generates a transfer_news item ("Player X pushing for move"). Above 80: treated as transfer-listed regardless of club's `loyalty_to_players`. Phase 3 will add playing time and bench triggers.
+Severity accumulates. Above 60: `player_unrest` news item fires. Above 80: player treated as `transfer_listed` regardless of `loyalty_to_players`. Phase 3 adds playing time and bench triggers.
 
 ---
 
-## Section 11 — Transfer Cascade
+## Section 17 — Transfer Cascade
 
 Every completed transfer triggers:
-1. Re-run squad need evaluation for selling club
-2. Re-run squad need evaluation for any club that lost a `competing_bid` for the same player
-3. If selling club's need score jumps > 50 in any group: they immediately enter `initiated` state for a replacement
-4. News item: completed transfer headline
+1. Re-evaluate squad needs for selling club (lost a player)
+2. Re-evaluate squad needs for any club that lost a `competing_bid` on same player
+3. Re-evaluate market scarcity for affected position group
+4. If selling club's need > 50: immediately enter `initiated` for a replacement (cascade depth +1)
+5. News item: completed transfer
 
 Every collapsed transfer triggers:
-1. Re-run need for buying club (may try different target)
-2. If collapse_reason = `competing_bid`: winning club gets news item; losing club's need_score urgency flagged
-3. Player unhappiness +10 if it was their 2nd+ collapse this window
+1. Re-evaluate needs for buying club
+2. If `collapse_reason = competing_bid`: winning club news item; losing club's need urgency flagged
+3. Player unhappiness +10 if 2nd+ collapse this window
+4. Cascade depth +1 if replacement search begins
 
-Cascades are capped at depth 3 (a transfer causes a transfer causes a transfer, no further) to prevent infinite loops.
+**Cascade depth cap: 3.** A transfer triggers at most 2 further transfers in a single chain. Prevents infinite loops while still allowing realistic ripple effects.
 
 ---
 
-## Section 12 — Transfer News
+## Section 18 — Transfer News
 
 Table: `transfer_news`
 Columns: `id`, `manager_id`, `game_date TEXT`, `headline TEXT`, `category TEXT`, `player_id INTEGER`, `from_club_id INTEGER`, `to_club_id INTEGER`.
-
-Categories and when they fire:
 
 | Category | Trigger |
 |---|---|
@@ -427,12 +617,15 @@ Categories and when they fire:
 | `competing_bid` | `competing_bid` state entered |
 | `agent_leak` | `agent_pressure > 70` during `negotiating` |
 | `player_unrest` | `player_unhappiness.severity > 60` |
+| `medical_fail` | `failed_medical` collapse |
+| `contract_renewal` | Key player renews contract |
+| `player_listed` | `transfer_listed` or `surplus_to_requirements` set |
 
-Headlines are generated strings: `"{PlayerName} linked with move to {Club}"`, `"{Club} agree fee for {PlayerName}"`, etc. No template table needed — generated inline from player/club names.
+Headlines generated inline: `"{PlayerName} linked with move to {Club}"`, `"{Club} agree fee for {PlayerName}"`, `"Deal collapses — {PlayerName} stays at {Club}"`, etc.
 
 ---
 
-## Section 13 — Daily Processor
+## Section 19 — Daily Processor
 
 Function: `ProcessDailyTransfers(int managerId, const std::string &currentDate)`
 
@@ -441,35 +634,45 @@ Called from the existing day advance path, after weekly/annual processors.
 ```
 1. Determine window status (in_window, days_to_deadline)
 2. Calculate deadline_pressure = max(0, 100 − (days_to_deadline * 5))
-3. If in_window:
-   a. For each club (all, not just user's):
-      - Re-check need scores (cached from last evaluation)
+3. Update player_market_status flags (re-evaluate every 30 days)
+4. If in_window:
+   a. Update market_scarcity (at window open only; cached thereafter)
+   b. For each club (all clubs, not just user's):
+      - Check financial guards (Section 10) — skip if in debt panic or at wage limit
+      - Check squad size (Section 6) — suppress new signings if squad > 32
+      - Re-check need scores
       - Roll irrationality
-      - If eligible (need or irrationality): attempt to initiate negotiation
-        → select target from knowledge pool (knowledge >= 30, weighted)
-        → apply identity filters (age_preference, domestic_bias, youth_focus)
-        → insert row into transfer_negotiations (state='initiated')
-   b. Advance all in-flight negotiations:
+      - If eligible: select target tier → filter by knowledge + cooldowns + identity traits
+        → insert transfer_negotiations row (state='initiated')
+   c. Advance all in-flight negotiations:
       - Increment days_in_state
-      - Run state transition logic (see Section 7)
-      - Update deadline_pressure on each row
-      - Update agent_pressure (+5 per day in negotiating/stalled)
-   c. Complete agreed deals:
-      - UPDATE players SET team_id=buying_club_id
-      - Deduct offered_fee from buying club transfer_budget
-      - Add offered_wage to buying club weekly wage bill
+      - Run state transition logic (Section 11)
+      - Update deadline_pressure per row
+      - Update agent_pressure (+5/day in negotiating/stalled)
+      - Apply negotiation personality modifiers
+   d. Complete deals (state='completed'):
+      - UPDATE players SET team_id = buying_club_id
+      - Deduct offered_fee from transfer_budget
+      - Add offered_wage to squad wage bill
+      - Write club_player_relationship (former_player for selling club)
       - Insert transfer_news (completed)
-      - Trigger cascade (Section 11)
-   d. Handle collapses:
+      - Trigger cascade (Section 17)
+   e. Handle collapses:
+      - Set collapse_reason
+      - Insert negotiation_cooldowns row
+      - Write club_player_relationship (rejected_offer or blocked_move)
       - Insert transfer_news (collapsed)
       - Update player_unhappiness if relevant
       - Trigger cascade need re-evaluation
-4. If NOT in_window:
-   - Only process deals already in flight (window may have closed mid-negotiation)
-   - No new initiations
+5. Contract renewal check (1st of month, outside window):
+   - Run ProcessContractRenewals (Section 15)
+6. If NOT in_window:
+   - Only process deals already in flight (window closed mid-negotiation)
+   - Free-agent signings eligible (rare roll, low probability)
+   - No new competitive signings initiated
 ```
 
-RNG: all probabilistic decisions use `rng = (unsigned int)(managerId * 7919u ^ clubId * 31337u ^ date_seed)` where `date_seed` is derived from the current date string. Non-deterministic across saves, deterministic within a save for the same inputs.
+**RNG:** All probabilistic decisions use `rng = (unsigned int)(managerId * 7919u ^ clubId * 31337u ^ date_seed)` where `date_seed` = days since epoch from current date string. Non-deterministic across saves, deterministic within a save for identical inputs.
 
 ---
 
@@ -477,39 +680,67 @@ RNG: all probabilistic decisions use `rng = (unsigned int)(managerId * 7919u ^ c
 
 ```sql
 -- Seeded at career start
-player_traits (manager_id, player_id, ambition, loyalty, greed, ego,
-               trophy_hunger, adaptability, professionalism)
+player_traits (manager_id, player_id,
+               ambition, loyalty, greed, ego, trophy_hunger, adaptability, professionalism)
 
-club_transfer_identity (manager_id, club_id, aggression, wage_willingness,
-                        age_preference, deadline_panic, loyalty_to_players,
-                        financial_risk_tolerance, selling_pressure, youth_focus,
-                        domestic_bias, resale_focus, prestige_bias, irrationality)
+club_transfer_identity (manager_id, club_id,
+                        aggression, wage_willingness, age_preference, deadline_panic,
+                        loyalty_to_players, financial_risk_tolerance, selling_pressure,
+                        youth_focus, domestic_bias, resale_focus, prestige_bias,
+                        irrationality, negotiation_personality TEXT)
 
 club_player_knowledge (manager_id, club_id, player_id, knowledge)
 
--- Live during career
+-- Live relationship and status memory
+club_player_relationship (manager_id, club_id, player_id, relationship_type, created_date)
+
+player_market_status (manager_id, player_id, status, set_date)
+
+-- Live transfer engine
 transfer_negotiations (manager_id, buying_club_id, selling_club_id, player_id,
                        state, offered_fee, offered_wage, promised_role,
-                       days_in_state, initiated_date, deadline_pressure,
-                       agent_pressure, collapse_reason, competing_bid_club_id,
-                       acceptance_score, irrationality_driven)
+                       days_in_state, initiated_date, deadline_pressure, agent_pressure,
+                       collapse_reason, competing_bid_club_id, acceptance_score,
+                       irrationality_driven, tier, counter_offer_count)
 
+negotiation_cooldowns (manager_id, buying_club_id, player_id, cooldown_until, reason)
+
+market_scarcity (manager_id, position_group, scarcity_score, last_updated)
+
+-- Output
 transfer_news (manager_id, game_date, headline, category,
                player_id, from_club_id, to_club_id)
 
-player_unhappiness (manager_id, player_id, reason, severity,
-                    created_date, resolved)
+player_unhappiness (manager_id, player_id, reason, severity, created_date, resolved)
 ```
+
+---
+
+## DB Migration Order
+
+1. `player_traits`
+2. `club_transfer_identity`
+3. `club_player_knowledge`
+4. `club_player_relationship`
+5. `player_market_status`
+6. `market_scarcity`
+7. `transfer_negotiations`
+8. `negotiation_cooldowns`
+9. `transfer_news`
+10. `player_unhappiness`
+
+Seed in this order at career start: identity tables first (1–3), then relationship/status (4–5), then market state (6). Live tables (7–10) start empty.
 
 ---
 
 ## What This Is NOT (Phase 3+4)
 
-- User negotiation UI (browsing market, making bids, viewing counteroffers)
-- Transfer window phases with market inflation tracking
-- Special scripted events (galactico signing, financial collapse sale, wonderkid explosion)
-- Scouting system evolution (knowledge growing over seasons via staff)
+- User-facing negotiation UI (browsing market, making bids, viewing counteroffers)
+- Transfer window market inflation tracking visible to player
+- Special scripted events (galactico, financial collapse sale, wonderkid explosion trigger)
+- Scouting system growth (knowledge evolving via staff over seasons)
 - Playing time tracking for promise fulfillment / unhappiness from benching
 - Loan system
+- Transfer fee installment / add-ons
 
-Phase 3 builds the player-facing negotiation experience on top of this engine. Phase 4 adds the scripted special events and inflation dynamics.
+Phase 3 builds the player-facing negotiation experience on top of this engine. Phase 4 adds scripted special events and inflation dynamics visible to the player.
