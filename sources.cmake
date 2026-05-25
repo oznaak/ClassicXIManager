@@ -529,6 +529,8 @@ set(MENU_SOURCES
    src/menu/mainmenu.cpp
    src/menu/managercareer.cpp
    src/menu/imgui_career.cpp
+   src/menu/transfer_engine.hpp
+   src/menu/transfer_engine.cpp
    src/menu/prematchlineuppage.cpp
    src/menu/imgui_menu.cpp
    src/menu/careermatchcontext.cpp
