@@ -226,9 +226,94 @@ std::map<std::string, int> EvaluateSquadNeeds(int managerId, int clubId,
 
 void TriggerTransferCascade(int managerId, int sellingClubId,
                              int affectedClubId, const std::string &currentDate,
-                             int seasonYear, int depth) {}
+                             int seasonYear, int depth) {
+  if (depth > 3) return; // cap at depth 3
 
-void ProcessContractRenewals(int managerId, const std::string &currentDate) {}
+  if (sellingClubId > 0) {
+    auto needs = EvaluateSquadNeeds(managerId, sellingClubId, seasonYear);
+    for (auto &kv : needs) {
+      if (kv.second > 50) {
+        printf("[TRANSFER CASCADE] club=%d needs %s (score=%d depth=%d)\n",
+               sellingClubId, kv.first.c_str(), kv.second, depth);
+        break;
+      }
+    }
+  }
+
+  if (affectedClubId > 0) {
+    auto needs = EvaluateSquadNeeds(managerId, affectedClubId, seasonYear);
+    (void)needs;
+  }
+}
+
+void ProcessContractRenewals(int managerId, const std::string &currentDate) {
+  // Only run on 1st of month
+  if (currentDate.size() < 10 || currentDate.substr(8,2) != "01") return;
+
+  std::stringstream q;
+  q << "SELECT p.id, p.weekly_wage, p.contract_expiry, p.age,"
+    << " pt.loyalty, pt.greed, pt.ambition,"
+    << " cti.loyalty_to_players, cti.resale_focus,"
+    << " p.team_id"
+    << " FROM players p"
+    << " JOIN player_traits pt ON pt.player_id=p.id AND pt.manager_id=" << managerId
+    << " JOIN club_transfer_identity cti ON cti.club_id=p.team_id AND cti.manager_id=" << managerId
+    << " WHERE p.contract_expiry IS NOT NULL AND p.contract_expiry != ''"
+    << " AND p.contract_expiry <= date('" << currentDate << "', '+12 months');";
+  DatabaseResult *r = GetDB()->Query(q.str());
+  if (!r) return;
+
+  for (unsigned int i=0; i < r->data.size(); i++) {
+    int   pid        = atoi(TECell(r,i,0).c_str());
+    long long wage   = atoll(TECell(r,i,1).c_str());
+    std::string exp  = TECell(r,i,2);
+    int   age        = atoi(TECell(r,i,3).c_str());
+    int   loyalty    = atoi(TECell(r,i,4).c_str());
+    int   greed      = atoi(TECell(r,i,5).c_str());
+    int   ambition   = atoi(TECell(r,i,6).c_str());
+    int   clubLoyalty = atoi(TECell(r,i,7).c_str());
+    int   resale     = atoi(TECell(r,i,8).c_str());
+    int   clubId     = atoi(TECell(r,i,9).c_str());
+
+    bool within6Mo = (!exp.empty() && exp <= AddDays(currentDate, 180));
+
+    if (clubLoyalty > 50 && loyalty > 40) {
+      float mult = 1.05f + greed / 500.0f;
+      long long newWage = (long long)(wage * mult);
+      std::string newExpiry = AddDays(currentDate, 365*3);
+      std::stringstream uq;
+      uq << "UPDATE players SET weekly_wage=" << newWage
+         << ",contract_expiry='" << newExpiry << "'"
+         << " WHERE id=" << pid << ";";
+      DatabaseResult *ur = GetDB()->Query(uq.str()); delete ur;
+      std::stringstream sq;
+      sq << "DELETE FROM player_market_status WHERE manager_id=" << managerId
+         << " AND player_id=" << pid << " AND status='expiring_soon';";
+      DatabaseResult *sr = GetDB()->Query(sq.str()); delete sr;
+      InsertTransferNews(managerId, currentDate, "Contract renewal agreed", "contract_renewal",
+                         pid, clubId, clubId);
+      continue;
+    }
+
+    if (ambition > 70 && within6Mo) {
+      AddUnhappiness(managerId, pid, "contract_stall", 10, currentDate);
+      continue;
+    }
+
+    if (resale > 60 && within6Mo) {
+      std::stringstream lq;
+      lq << "UPDATE players SET is_transfer_listed=1 WHERE id=" << pid << ";";
+      DatabaseResult *lr = GetDB()->Query(lq.str()); delete lr;
+      InsertTransferNews(managerId, currentDate, "Player made available for transfer",
+                         "player_listed", pid, clubId, 0);
+    }
+
+    if (age > 32 && clubLoyalty < 40 && within6Mo) {
+      AddUnhappiness(managerId, pid, "contract_stall", 5, currentDate);
+    }
+  }
+  delete r;
+}
 
 static void SeedPlayerTraits(int managerId, unsigned int careerSeed) {
   DatabaseResult *pr = GetDB()->Query(
