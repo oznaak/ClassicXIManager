@@ -880,5 +880,291 @@ static void AttemptInitiateNegotiations(int managerId, int clubId,
          managerId, clubId, sellingClub, targetId, tier, irrational?1:0);
 }
 
+static void AdvanceNegotiations(int managerId, const std::string &currentDate,
+                                 int seasonYear, int deadlinePressure) {
+  std::stringstream nq;
+  nq << "SELECT id,buying_club_id,selling_club_id,player_id,state,"
+     << "offered_fee,offered_wage,promised_role,days_in_state,agent_pressure,"
+     << "acceptance_score,counter_offer_count,tier,competing_bid_club_id"
+     << " FROM transfer_negotiations"
+     << " WHERE manager_id=" << managerId
+     << " AND state NOT IN ('completed','collapsed');";
+  DatabaseResult *nr = GetDB()->Query(nq.str());
+  if (!nr) return;
+
+  struct NegRow {
+    int id, buyer, seller, player, days, agentP, acceptScore, coCount, tier, competingClub;
+    std::string state, offWage, offFee, role;
+  };
+  std::vector<NegRow> rows;
+  for (unsigned int i=0; i < nr->data.size(); i++) {
+    NegRow n;
+    n.id           = atoi(TECell(nr,i,0).c_str());
+    n.buyer        = atoi(TECell(nr,i,1).c_str());
+    n.seller       = atoi(TECell(nr,i,2).c_str());
+    n.player       = atoi(TECell(nr,i,3).c_str());
+    n.state        = TECell(nr,i,4);
+    n.offFee       = TECell(nr,i,5);
+    n.offWage      = TECell(nr,i,6);
+    n.role         = TECell(nr,i,7);
+    n.days         = atoi(TECell(nr,i,8).c_str());
+    n.agentP       = atoi(TECell(nr,i,9).c_str());
+    n.acceptScore  = atoi(TECell(nr,i,10).c_str());
+    n.coCount      = atoi(TECell(nr,i,11).c_str());
+    n.tier         = atoi(TECell(nr,i,12).c_str());
+    n.competingClub= atoi(TECell(nr,i,13).c_str());
+    rows.push_back(n);
+  }
+  delete nr;
+
+  unsigned int dateSeed = (unsigned int)DateToJulian(currentDate);
+
+  for (auto &n : rows) {
+    unsigned int rng = (unsigned int)(managerId*7919u ^ n.buyer*31337u ^ n.player*1999u ^ dateSeed);
+    std::string newState = n.state;
+    std::string collapseReason;
+    bool didComplete = false;
+    long long fee  = atoll(n.offFee.c_str());
+    long long wage = atoll(n.offWage.c_str());
+
+    int newAgentP = n.agentP;
+    if (n.state == "negotiating" || n.state == "stalled" || n.state == "player_waiting")
+      newAgentP = std::min(100, n.agentP + 5);
+
+    if (n.state == "initiated") {
+      int waitDays = 3;
+      { std::stringstream q;
+        q << "SELECT aggression FROM club_transfer_identity WHERE manager_id=" << managerId
+          << " AND club_id=" << n.buyer << ";";
+        DatabaseResult *r = GetDB()->Query(q.str());
+        if (r && r->data.size()>0) {
+          int agg = atoi(TECell(r,0,0).c_str());
+          waitDays = 3 - (agg / 50);
+          waitDays = std::max(1, std::min(3, waitDays));
+        }
+        delete r; }
+      if (n.days >= waitDays) newState = "offer_made";
+
+    } else if (n.state == "offer_made") {
+      int sellPressure=20, loyalty=50;
+      { std::stringstream q;
+        q << "SELECT selling_pressure,loyalty_to_players FROM club_transfer_identity"
+          << " WHERE manager_id=" << managerId << " AND club_id=" << n.seller << ";";
+        DatabaseResult *r = GetDB()->Query(q.str());
+        if (r && r->data.size()>0) {
+          sellPressure = atoi(TECell(r,0,0).c_str());
+          loyalty      = atoi(TECell(r,0,1).c_str());
+        }
+        delete r; }
+      long long ctxVal = CalculateContextualValue(managerId, n.player, n.seller,
+                                                   n.buyer, 50, deadlinePressure, n.agentP);
+      bool untouchable = false;
+      { std::stringstream q;
+        q << "SELECT status FROM player_market_status WHERE manager_id=" << managerId
+          << " AND player_id=" << n.player << ";";
+        DatabaseResult *r = GetDB()->Query(q.str());
+        if (r && r->data.size()>0 && TECell(r,0,0)=="franchise_player") untouchable=true;
+        delete r; }
+      if (untouchable && sellPressure < 70) {
+        newState = "collapsed"; collapseReason = "untouchable";
+      } else if (n.days >= 2) {
+        if (fee < (long long)(ctxVal * 0.60f) && sellPressure < 40)
+          { newState = "collapsed"; collapseReason = "fee_too_low"; }
+        else
+          newState = "negotiating";
+      }
+
+    } else if (n.state == "negotiating") {
+      int score = CalculateAcceptanceScore(managerId, n.player, n.buyer, n.seller,
+                                            wage, n.role, n.agentP);
+      if (n.competingClub == 0 && (int)(rng % 100) < 15) {
+        std::stringstream cq;
+        cq << "SELECT club_id FROM club_player_knowledge"
+           << " WHERE manager_id=" << managerId << " AND player_id=" << n.player
+           << " AND knowledge >= 60 AND club_id != " << n.buyer
+           << " AND club_id != " << n.seller
+           << " ORDER BY RANDOM() LIMIT 1;";
+        DatabaseResult *cr = GetDB()->Query(cq.str());
+        if (cr && cr->data.size()>0) {
+          int cBid = atoi(TECell(cr,0,0).c_str());
+          std::stringstream uq;
+          uq << "UPDATE transfer_negotiations SET competing_bid_club_id=" << cBid
+             << ",state='competing_bid' WHERE id=" << n.id << ";";
+          DatabaseResult *ur = GetDB()->Query(uq.str()); delete ur;
+          std::string pName, cName;
+          { std::stringstream q; q << "SELECT firstname||' '||lastname FROM players WHERE id=" << n.player << ";";
+            DatabaseResult *r = GetDB()->Query(q.str()); if(r&&r->data.size()>0) pName=TECell(r,0,0); delete r; }
+          { std::stringstream q; q << "SELECT name FROM teams WHERE id=" << cBid << ";";
+            DatabaseResult *r = GetDB()->Query(q.str()); if(r&&r->data.size()>0) cName=TECell(r,0,0); delete r; }
+          InsertTransferNews(managerId, currentDate, cName + " enter race for " + pName,
+                             "competing_bid", n.player, n.seller, cBid);
+          newAgentP = std::min(100, newAgentP + 20);
+        }
+        delete cr;
+        goto update_row;
+      }
+      { std::stringstream uq;
+        uq << "UPDATE transfer_negotiations SET acceptance_score=" << score
+           << " WHERE id=" << n.id << ";";
+        DatabaseResult *ur = GetDB()->Query(uq.str()); delete ur; }
+      if (score > 65)
+        newState = (n.role == "star_player" && score < 80) ? "player_waiting" : "medical_pending";
+      else if (score >= 40) newState = "counter_offer";
+      else if (n.days > 12) { newState = "collapsed"; collapseReason = "player_rejected"; }
+      if (n.state == "negotiating" && n.days > 5 && newState == "negotiating")
+        newState = "stalled";
+
+    } else if (n.state == "counter_offer") {
+      int wageWill = 50;
+      { std::stringstream q;
+        q << "SELECT wage_willingness,negotiation_personality FROM club_transfer_identity"
+          << " WHERE manager_id=" << managerId << " AND club_id=" << n.buyer << ";";
+        DatabaseResult *r = GetDB()->Query(q.str());
+        if (r && r->data.size()>0) {
+          wageWill = atoi(TECell(r,0,0).c_str());
+          if (TECell(r,0,1) == "fast_closer") wageWill = std::min(100, wageWill+20);
+        }
+        delete r; }
+      float feePct  = 0.05f + (wageWill / 200.0f);
+      float wagePct = 0.03f + (wageWill / 500.0f);
+      fee  = (long long)(fee  * (1.0f + feePct));
+      wage = (long long)(wage * (1.0f + wagePct));
+      { std::stringstream uq;
+        uq << "UPDATE transfer_negotiations SET offered_fee=" << fee
+           << ",offered_wage=" << wage
+           << ",counter_offer_count=" << (n.coCount+1)
+           << " WHERE id=" << n.id << ";";
+        DatabaseResult *ur = GetDB()->Query(uq.str()); delete ur; }
+      if (n.coCount > 3) {
+        int score = CalculateAcceptanceScore(managerId, n.player, n.buyer, n.seller,
+                                              wage, n.role, n.agentP);
+        if (score < 50) { newState = "collapsed"; collapseReason = "negotiation_failed"; }
+        else newState = "negotiating";
+      } else {
+        newState = "negotiating";
+      }
+
+    } else if (n.state == "stalled") {
+      int reviveChance = (deadlinePressure > 80) ? 60 : 30;
+      if ((int)(rng % 100) < reviveChance) newState = "negotiating";
+      else if (n.days > 10) { newState = "collapsed"; collapseReason = "stalled_too_long"; }
+
+    } else if (n.state == "competing_bid") {
+      int agg = 50;
+      { std::stringstream q;
+        q << "SELECT aggression FROM club_transfer_identity WHERE manager_id=" << managerId
+          << " AND club_id=" << n.buyer << ";";
+        DatabaseResult *r = GetDB()->Query(q.str());
+        if (r && r->data.size()>0) agg = atoi(TECell(r,0,0).c_str()); delete r; }
+      if ((int)(rng % 100) < agg) {
+        fee = (long long)(fee * 1.12f);
+        std::stringstream uq;
+        uq << "UPDATE transfer_negotiations SET offered_fee=" << fee
+           << ",competing_bid_club_id=0,state='negotiating' WHERE id=" << n.id << ";";
+        DatabaseResult *ur = GetDB()->Query(uq.str()); delete ur;
+        goto update_row;
+      } else {
+        newState = "collapsed"; collapseReason = "lost_to_competitor";
+      }
+
+    } else if (n.state == "player_waiting") {
+      if (n.days >= 3) newState = "medical_pending";
+
+    } else if (n.state == "medical_pending") {
+      int failChance = (deadlinePressure > 80) ? 5 : 2;
+      if ((int)(rng % 100) < failChance) {
+        newState = "collapsed"; collapseReason = "failed_medical";
+        AddUnhappiness(managerId, n.player, "failed_medical_stress", 10, currentDate);
+        std::stringstream rq;
+        rq << "INSERT INTO club_player_relationship(manager_id,club_id,player_id,relationship_type,created_date)"
+           << " VALUES(" << managerId << "," << n.buyer << "," << n.player
+           << ",'failed_medical','" << currentDate << "');";
+        DatabaseResult *rr = GetDB()->Query(rq.str()); delete rr;
+        std::stringstream cq;
+        cq << "INSERT INTO negotiation_cooldowns(manager_id,buying_club_id,player_id,cooldown_until,reason)"
+           << " VALUES(" << managerId << "," << n.buyer << "," << n.player
+           << ",'" << AddDays(currentDate,30) << "','failed_medical');";
+        DatabaseResult *cr = GetDB()->Query(cq.str()); delete cr;
+      } else {
+        std::stringstream pq;
+        pq << "UPDATE players SET team_id=" << n.buyer << " WHERE id=" << n.player << ";";
+        DatabaseResult *pr = GetDB()->Query(pq.str()); delete pr;
+        std::stringstream fq;
+        fq << "UPDATE club_finances SET transfer_budget=MAX(0,transfer_budget-" << fee << ")"
+           << " WHERE manager_id=" << managerId << " AND club_id=" << n.buyer << ";";
+        DatabaseResult *fr = GetDB()->Query(fq.str()); delete fr;
+        std::stringstream rlq;
+        rlq << "INSERT INTO club_player_relationship(manager_id,club_id,player_id,relationship_type,created_date)"
+            << " VALUES(" << managerId << "," << n.seller << "," << n.player
+            << ",'former_player','" << currentDate << "');";
+        DatabaseResult *rlr = GetDB()->Query(rlq.str()); delete rlr;
+        newState = "completed";
+        didComplete = true;
+        std::string pName, bName, sName;
+        { std::stringstream q; q << "SELECT firstname||' '||lastname FROM players WHERE id=" << n.player << ";";
+          DatabaseResult *r = GetDB()->Query(q.str()); if(r&&r->data.size()>0) pName=TECell(r,0,0); delete r; }
+        { std::stringstream q; q << "SELECT name FROM teams WHERE id=" << n.buyer << ";";
+          DatabaseResult *r = GetDB()->Query(q.str()); if(r&&r->data.size()>0) bName=TECell(r,0,0); delete r; }
+        { std::stringstream q; q << "SELECT name FROM teams WHERE id=" << n.seller << ";";
+          DatabaseResult *r = GetDB()->Query(q.str()); if(r&&r->data.size()>0) sName=TECell(r,0,0); delete r; }
+        InsertTransferNews(managerId, currentDate,
+          pName + " joins " + bName + " from " + sName,
+          "completed", n.player, n.seller, n.buyer);
+        printf("[TRANSFER] Completed: player=%d buyer=%d seller=%d fee=%lld\n",
+               n.player, n.buyer, n.seller, fee);
+      }
+    }
+
+    if (newState == "collapsed") {
+      std::string pName, cName;
+      { std::stringstream q; q << "SELECT firstname||' '||lastname FROM players WHERE id=" << n.player << ";";
+        DatabaseResult *r = GetDB()->Query(q.str()); if(r&&r->data.size()>0) pName=TECell(r,0,0); delete r; }
+      { std::stringstream q; q << "SELECT name FROM teams WHERE id=" << n.buyer << ";";
+        DatabaseResult *r = GetDB()->Query(q.str()); if(r&&r->data.size()>0) cName=TECell(r,0,0); delete r; }
+      InsertTransferNews(managerId, currentDate,
+        "Deal collapses — " + pName + " stays at current club",
+        "collapsed", n.player, n.seller, n.buyer);
+      unsigned int cd = 7 + (rng % 8);
+      std::stringstream cdq;
+      cdq << "INSERT INTO negotiation_cooldowns(manager_id,buying_club_id,player_id,cooldown_until,reason)"
+          << " VALUES(" << managerId << "," << n.buyer << "," << n.player
+          << ",'" << AddDays(currentDate, (int)cd) << "','" << TESql(collapseReason) << "');";
+      DatabaseResult *cdr = GetDB()->Query(cdq.str()); delete cdr;
+      std::stringstream rrq;
+      rrq << "INSERT OR IGNORE INTO club_player_relationship(manager_id,club_id,player_id,relationship_type,created_date)"
+          << " VALUES(" << managerId << "," << n.buyer << "," << n.player
+          << ",'rejected_offer','" << currentDate << "');";
+      DatabaseResult *rrr = GetDB()->Query(rrq.str()); delete rrr;
+      { std::stringstream q;
+        q << "SELECT COUNT(*) FROM transfer_negotiations WHERE manager_id=" << managerId
+          << " AND player_id=" << n.player
+          << " AND selling_club_id=" << n.seller << " AND state='collapsed';";
+        DatabaseResult *r = GetDB()->Query(q.str());
+        if (r && r->data.size()>0 && atoi(TECell(r,0,0).c_str()) >= 3)
+          AddUnhappiness(managerId, n.player, "blocked_move", 25, currentDate);
+        delete r; }
+      TriggerTransferCascade(managerId, n.seller, n.buyer, currentDate, seasonYear, 1);
+    }
+
+    update_row:
+    {
+      bool stateChanged = newState != n.state;
+      std::stringstream uq;
+      uq << "UPDATE transfer_negotiations SET"
+         << " state='" << newState << "'"
+         << ",days_in_state=" << (stateChanged ? 0 : n.days+1)
+         << ",agent_pressure=" << newAgentP
+         << ",deadline_pressure=" << deadlinePressure
+         << ",collapse_reason='" << TESql(collapseReason) << "'"
+         << " WHERE id=" << n.id << ";";
+      DatabaseResult *ur = GetDB()->Query(uq.str());
+      delete ur;
+    }
+
+    if (didComplete)
+      TriggerTransferCascade(managerId, n.seller, 0, currentDate, seasonYear, 1);
+  }
+}
+
 void ProcessDailyTransfers(int managerId, int userClubId,
                             const std::string &currentDate, int seasonYear) {}
