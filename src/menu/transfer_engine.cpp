@@ -1251,5 +1251,110 @@ static void AdvanceNegotiations(int managerId, const std::string &currentDate,
   }
 }
 
+static void CalculateMarketScarcity(int managerId, const std::string &currentDate) {
+  static const struct { const char *group; const char *roles; } kGroupRoles[] = {
+    {"GK",    "'GK'"},
+    {"CB",    "'CB'"},
+    {"FB_WB", "'LB','RB','LWB','RWB'"},
+    {"DM",    "'CDM'"},
+    {"CM",    "'CM'"},
+    {"AM_W",  "'CAM','LM','RM','LW','RW'"},
+    {"ST",    "'CF','ST'"},
+    {nullptr, nullptr}
+  };
+
+  std::map<std::string,float> leagueAvg;
+  { DatabaseResult *r = GetDB()->Query(
+      "SELECT role, AVG(base_stat) FROM players GROUP BY role;");
+    if (r) { for (unsigned int i=0; i<r->data.size(); i++)
+      leagueAvg[RoleToGroup(TECell(r,i,0))] = atof(TECell(r,i,1).c_str());
+    delete r; } }
+
+  for (int gi=0; kGroupRoles[gi].group; gi++) {
+    std::string grp(kGroupRoles[gi].group);
+    float avg = leagueAvg.count(grp) ? leagueAvg[grp] : 65.0f;
+    std::stringstream q;
+    q << "SELECT COUNT(*) FROM players p"
+      << " LEFT JOIN player_market_status pms ON pms.player_id=p.id AND pms.manager_id=" << managerId
+      << " WHERE p.role IN (" << kGroupRoles[gi].roles << ")"
+      << " AND p.base_stat >= " << avg
+      << " AND (p.is_transfer_listed=1 OR pms.status IN ('expiring_soon','surplus_to_requirements','transfer_listed'));";
+    DatabaseResult *r = GetDB()->Query(q.str());
+    int supply = 0;
+    if (r && r->data.size()>0) supply = atoi(TECell(r,0,0).c_str());
+    delete r;
+    int scarcity = std::max(0, std::min(100, 100 - supply * 8));
+    std::stringstream uq;
+    uq << "INSERT OR REPLACE INTO market_scarcity(manager_id,position_group,scarcity_score,last_updated)"
+       << " VALUES(" << managerId << ",'" << grp << "'," << scarcity << ",'" << currentDate << "');";
+    DatabaseResult *ur = GetDB()->Query(uq.str()); delete ur;
+  }
+}
+
 void ProcessDailyTransfers(int managerId, int userClubId,
-                            const std::string &currentDate, int seasonYear) {}
+                            const std::string &currentDate, int seasonYear) {
+  bool inWindow = InTransferWindow(currentDate);
+  int  daysLeft  = DaysToWindowEnd(currentDate);
+  int  deadline  = inWindow ? std::max(0, 100 - daysLeft * 5) : 0;
+
+  // Update market scarcity if stale
+  if (inWindow) {
+    std::stringstream sq;
+    sq << "SELECT last_updated FROM market_scarcity WHERE manager_id=" << managerId
+       << " AND position_group='ST' LIMIT 1;";
+    DatabaseResult *sr = GetDB()->Query(sq.str());
+    bool needsUpdate = true;
+    if (sr && sr->data.size()>0 && TECell(sr,0,0) == currentDate) needsUpdate = false;
+    delete sr;
+    if (needsUpdate) CalculateMarketScarcity(managerId, currentDate);
+  }
+
+  // Contract renewals (monthly)
+  ProcessContractRenewals(managerId, currentDate);
+
+  // Advance all in-flight negotiations
+  AdvanceNegotiations(managerId, currentDate, seasonYear, deadline);
+
+  if (!inWindow) return;
+
+  // For each club, attempt to initiate new negotiations
+  DatabaseResult *cr = GetDB()->Query(
+    "SELECT id FROM teams WHERE transfer_budget > 0;");
+  if (!cr) return;
+
+  unsigned int dateSeed = (unsigned int)DateToJulian(currentDate);
+
+  for (unsigned int i=0; i < cr->data.size(); i++) {
+    int clubId = atoi(TECell(cr,i,0).c_str());
+
+    // Financial guard: skip if in debt panic
+    bool debtPanic = false;
+    { std::stringstream q;
+      q << "SELECT debt_level, transfer_budget FROM club_finances"
+        << " WHERE manager_id=" << managerId << " AND club_id=" << clubId << ";";
+      DatabaseResult *r = GetDB()->Query(q.str());
+      if (r && r->data.size()>0) {
+        long long debt = atoll(TECell(r,0,0).c_str());
+        long long tbud = atoll(TECell(r,0,1).c_str());
+        if (debt > tbud * 2) debtPanic = true;
+      }
+      delete r; }
+    if (debtPanic) continue;
+
+    int agg = 40;
+    { std::stringstream q;
+      q << "SELECT aggression FROM club_transfer_identity WHERE manager_id=" << managerId
+        << " AND club_id=" << clubId << ";";
+      DatabaseResult *r = GetDB()->Query(q.str());
+      if (r && r->data.size()>0) agg = atoi(TECell(r,0,0).c_str()); delete r; }
+
+    unsigned int rng = (unsigned int)(managerId*7919u ^ clubId*31337u ^ dateSeed);
+    int actChance = 10 + agg/4 + (deadline > 80 ? 20 : 0);
+    if ((int)(rng % 100) >= actChance) continue;
+
+    auto needs = EvaluateSquadNeeds(managerId, clubId, seasonYear);
+    AttemptInitiateNegotiations(managerId, clubId, currentDate, seasonYear,
+                                 needs, deadline, rng);
+  }
+  delete cr;
+}
