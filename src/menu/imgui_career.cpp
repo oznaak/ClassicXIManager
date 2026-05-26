@@ -4163,76 +4163,39 @@ static GLuint GetDefaultFaceTex() {
 }
 
 static void DrawTransfersCard(ImVec2 sz) {
-  BeginModernCard("##transfers_ph", sz);
-
-  struct OfferEntry {
-    const char *name;
-    const char *club;
-    const char *nat;
-    const char *amount;
-  };
-  static const OfferEntry kOffers[] = {
-    { "Xavier Chavalerin", "Troyes AC",     "FRA", "216K EUR p/a" },
-    { "Yannik Moker",      "FC Groningen",  "GER", "220K EUR p/a" },
-  };
-
-  GLuint faceTex = GetDefaultFaceTex();
-
+  BeginModernCard("##transfers_card", sz);
   ImDrawList *dl = ImGui::GetWindowDrawList();
   PushMgrFont(g_ManagerFontSmall);
   float lh = ImGui::GetTextLineHeight();
 
-  const float kAvatarSz = lh * 2.4f;
-  const float kRowH     = kAvatarSz + 12.0f;
-  const float kSepH     = 1.0f + 4.0f;  // separator + dummy
-  float totalH = 2.0f * kRowH + kSepH;
-  float avail  = ImGui::GetContentRegionAvail().y;
-  float topOff = (avail - totalH) * 0.5f;
-  if (topOff > 0.0f) ImGui::Dummy(ImVec2(0, topOff));
-
-  for (int i = 0; i < 2; i++) {
-    const OfferEntry &o = kOffers[i];
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 6.0f);
-    ImVec2 rowStart = ImGui::GetCursorScreenPos();
-
-    // Face image (rounded square)
-    if (faceTex) {
-      dl->AddImageRounded((ImTextureID)(intptr_t)faceTex,
-                          rowStart,
-                          ImVec2(rowStart.x + kAvatarSz, rowStart.y + kAvatarSz),
-                          ImVec2(0,0), ImVec2(1,1),
-                          IM_COL32(255,255,255,255), kAvatarSz * 0.35f);
-    } else {
-      dl->AddRectFilled(rowStart,
-                        ImVec2(rowStart.x + kAvatarSz, rowStart.y + kAvatarSz),
-                        IM_COL32(60,70,100,200), kAvatarSz * 0.35f);
+  std::vector<std::pair<std::string,std::string>> items;
+  {
+    std::stringstream q;
+    q << "SELECT headline, category FROM transfer_news"
+      << " WHERE manager_id=" << g_CareerHub.managerId
+      << " ORDER BY id DESC LIMIT 6;";
+    DatabaseResult *r = GetDB()->Query(q.str());
+    if (r) {
+      for (unsigned int i=0; i < r->data.size(); i++)
+        items.push_back({DBCell(r,i,0), DBCell(r,i,1)});
+      delete r;
     }
+  }
 
-    // Text block
-    float tx = rowStart.x + kAvatarSz + 10.0f;
-    float ty = rowStart.y + (kAvatarSz - lh * 2.0f - 3.0f) * 0.5f;
-
-    dl->AddText(ImGui::GetFont(), lh, ImVec2(tx, ty),
-                IM_COL32(230,230,240,230), o.name);
-    char sub[64]; snprintf(sub, sizeof(sub), "%s  %s", o.club, o.nat);
-    dl->AddText(ImGui::GetFont(), lh * 0.85f, ImVec2(tx, ty + lh + 2.0f),
-                IM_COL32(140,145,165,200), sub);
-
-    // Amount — right-aligned, accent colour
-    float avail = ImGui::GetContentRegionAvail().x - 6.0f;
-    float amtW  = ImGui::CalcTextSize(o.amount).x;
-    float amtX  = rowStart.x + avail - amtW;
-    float amtY  = rowStart.y + (kAvatarSz - lh) * 0.5f;
-    dl->AddText(ImGui::GetFont(), lh, ImVec2(amtX, amtY),
-                IM_COL32((int)(kAccent.x*255),(int)(kAccent.y*255),(int)(kAccent.z*255),220),
-                o.amount);
-
-    ImGui::Dummy(ImVec2(0, kRowH));
-    if (i < 1) {
-      ImGui::PushStyleColor(ImGuiCol_Separator, kBorder);
-      ImGui::Separator();
-      ImGui::PopStyleColor();
-      ImGui::Dummy(ImVec2(0, 2.0f));
+  if (items.empty()) {
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    dl->AddText(p, IM_COL32(160,160,160,180), "No transfer activity yet.");
+    ImGui::Dummy(ImVec2(0, lh));
+  } else {
+    for (auto &item : items) {
+      ImVec2 p = ImGui::GetCursorScreenPos();
+      ImU32 col = IM_COL32(200,200,200,220);
+      if (item.second == "completed")      col = IM_COL32(100,220,140,255);
+      else if (item.second == "collapsed") col = IM_COL32(230,80,80,220);
+      else if (item.second == "rumour")    col = IM_COL32(180,180,100,200);
+      std::string hl = item.first.size() > 58 ? item.first.substr(0,58) + ".." : item.first;
+      dl->AddText(p, col, hl.c_str());
+      ImGui::Dummy(ImVec2(0, lh + 4.0f));
     }
   }
 
