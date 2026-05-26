@@ -1,4 +1,5 @@
 #include "transfer_engine.hpp"
+#include "user_transfer.hpp"
 #include "imgui_career.hpp"
 #include "managercareer.hpp"
 #include "imgui_menu.hpp"
@@ -40,7 +41,7 @@ static int TERandInt(unsigned int seed, int index, int lo, int hi) {
 }
 
 // Date helpers
-static int DateToJulian(const std::string &d) {
+int DateToJulian(const std::string &d) {
   // Returns approximate days since epoch for ordering. Format: YYYY-MM-DD.
   if (d.size() < 10) return 0;
   int y = atoi(d.substr(0,4).c_str());
@@ -49,7 +50,7 @@ static int DateToJulian(const std::string &d) {
   return y*365 + m*30 + dy;
 }
 
-static std::string AddDays(const std::string &date, int n) {
+std::string AddDays(const std::string &date, int n) {
   // Simple add — delegates to SQLite for correctness.
   std::stringstream q;
   q << "SELECT date('" << date << "', '+" << n << " days');";
@@ -59,7 +60,7 @@ static std::string AddDays(const std::string &date, int n) {
   return out;
 }
 
-static bool InTransferWindow(const std::string &date) {
+bool InTransferWindow(const std::string &date) {
   if (date.size() < 10) return false;
   int m  = atoi(date.substr(5,2).c_str());
   // Summer: Jul 1 – Aug 31
@@ -70,7 +71,7 @@ static bool InTransferWindow(const std::string &date) {
 }
 
 // Days remaining until window end (0 if not in window or on last day).
-static int DaysToWindowEnd(const std::string &date) {
+int DaysToWindowEnd(const std::string &date) {
   if (!InTransferWindow(date)) return 0;
   int m  = atoi(date.substr(5,2).c_str());
   int dy = atoi(date.substr(8,2).c_str());
@@ -80,7 +81,7 @@ static int DaysToWindowEnd(const std::string &date) {
   return 0;
 }
 
-static void InsertTransferNews(int managerId, const std::string &date,
+void InsertTransferNews(int managerId, const std::string &date,
                                 const std::string &headline,
                                 const std::string &category,
                                 int playerId, int fromClub, int toClub) {
@@ -93,7 +94,7 @@ static void InsertTransferNews(int managerId, const std::string &date,
   delete r;
 }
 
-static void AddUnhappiness(int managerId, int playerId, const std::string &reason,
+void AddUnhappiness(int managerId, int playerId, const std::string &reason,
                             int severity, const std::string &date) {
   std::stringstream q;
   q << "SELECT severity FROM player_unhappiness WHERE manager_id=" << managerId
@@ -123,7 +124,7 @@ static void AddUnhappiness(int managerId, int playerId, const std::string &reaso
 // ---- Function stubs (implemented in later tasks) ----------------------------
 
 // Maps player role strings to one of the 7 position groups.
-static std::string RoleToGroup(const std::string &role) {
+std::string RoleToGroup(const std::string &role) {
   if (role == "GK") return "GK";
   if (role == "CB") return "CB";
   if (role == "LB" || role == "RB" || role == "LWB" || role == "RWB") return "FB_WB";
@@ -570,7 +571,7 @@ void SeedTransferSystem(int managerId) {
   printf("[TRANSFER] SeedTransferSystem complete: manager=%d\n", managerId);
 }
 
-static long long CalculateContextualValue(int managerId, int playerId,
+long long CalculateContextualValue(int managerId, int playerId,
                                            int sellingClubId, int buyingClubId,
                                            int needScore, int deadlinePressure,
                                            int agentPressure) {
@@ -672,7 +673,7 @@ static long long CalculateContextualValue(int managerId, int playerId,
   return std::max(50000LL, val);
 }
 
-static int CalculateAcceptanceScore(int managerId, int playerId,
+int CalculateAcceptanceScore(int managerId, int playerId,
                                      int buyingClubId, int sellingClubId,
                                      long long offeredWage, const std::string &promisedRole,
                                      int agentPressure) {
@@ -973,6 +974,7 @@ static void AdvanceNegotiations(int managerId, const std::string &currentDate,
      << "acceptance_score,counter_offer_count,tier,competing_bid_club_id"
      << " FROM transfer_negotiations"
      << " WHERE manager_id=" << managerId
+     << " AND is_user_bid=0"
      << " AND state NOT IN ('completed','collapsed');";
   DatabaseResult *nr = GetDB()->Query(nq.str());
   if (!nr) return;
@@ -1312,8 +1314,45 @@ void ProcessDailyTransfers(int managerId, int userClubId,
   // Contract renewals (monthly)
   ProcessContractRenewals(managerId, currentDate);
 
-  // Advance all in-flight negotiations
+  // Deadline day chaos scaling (final 48h of window)
+  if (inWindow && daysLeft <= 2) {
+    // Boost deadline_panic for all clubs by 40 (capped at 100)
+    std::stringstream dpq;
+    dpq << "UPDATE club_transfer_identity SET deadline_panic=MIN(100,deadline_panic+40)"
+        << " WHERE manager_id=" << managerId << ";";
+    DatabaseResult *dpr = GetDB()->Query(dpq.str()); delete dpr;
+    // Revive stalled negotiations: 70% chance to re-enter negotiating
+    std::stringstream revq;
+    revq << "SELECT id FROM transfer_negotiations WHERE manager_id=" << managerId
+         << " AND state='stalled' AND is_user_bid=0;";
+    DatabaseResult *revr = GetDB()->Query(revq.str());
+    if (revr) {
+      unsigned int dseed = (unsigned int)DateToJulian(currentDate);
+      for (unsigned int i = 0; i < revr->data.size(); i++) {
+        int nid = atoi(TECell(revr,i,0).c_str());
+        if ((int)((dseed ^ (unsigned int)nid) % 100) < 70) {
+          std::stringstream uq; uq << "UPDATE transfer_negotiations SET state='negotiating',days_in_state=0 WHERE id=" << nid << ";";
+          DatabaseResult *ur = GetDB()->Query(uq.str()); delete ur;
+        }
+      }
+      delete revr;
+    }
+  }
+
+  // Advance all in-flight AI negotiations (user bids handled by TickUserNegotiations)
   AdvanceNegotiations(managerId, currentDate, seasonYear, deadline);
+
+  // User negotiations (buy-side async state machine)
+  TickUserNegotiations(managerId, userClubId, currentDate, seasonYear);
+
+  // Special events (galactico, collapse sale, wonderkid explosion)
+  ProcessSpecialEvents(managerId, currentDate, seasonYear);
+
+  // Media pressure resolution and trigger checks
+  ProcessMediaPressure(managerId, currentDate);
+
+  // Loan clause daily checks (recall, buy-back warnings, option deadlines)
+  ProcessLoanClauses(managerId, currentDate, seasonYear);
 
   if (!inWindow) return;
 

@@ -531,6 +531,8 @@ set(MENU_SOURCES
    src/menu/imgui_career.cpp
    src/menu/transfer_engine.hpp
    src/menu/transfer_engine.cpp
+   src/menu/user_transfer.hpp
+   src/menu/user_transfer.cpp
    src/menu/prematchlineuppage.cpp
    src/menu/imgui_menu.cpp
    src/menu/careermatchcontext.cpp

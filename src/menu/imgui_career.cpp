@@ -1,5 +1,7 @@
 #include "imgui_career.hpp"
 #include "imgui_manager_fonts.hpp"
+#include "user_transfer.hpp"
+#include "transfer_engine.hpp"
 
 #include "imgui.h"
 #include <SDL2/SDL_image.h>
@@ -10358,6 +10360,393 @@ static void DrawScoutingPage(float w, float h) {
   ImGui::Dummy(ImVec2(usW, 1.0f));
 }
 
+// ---- DrawTransfersPage --------------------------------------------------
+
+static void DrawTransfersPage(float w, float h) {
+  const float kPad = 16.0f;
+  float cw = w - kPad * 2.0f;
+  int managerId = g_CareerHub.managerId;
+  int userClubId = g_CareerHub.clubId;
+
+  ImGui::SetCursorPos(ImVec2(kPad, 8.0f));
+
+  // Sub-panel selector
+  static int s_transferPanel = 0;
+  static const char *kPanels[] = { "Available", "Scouted", "My Bids", "Incoming", "Squad Mgmt" };
+  ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.1f, 0.15f, 0.25f, 1.0f));
+  ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.15f, 0.22f, 0.35f, 1.0f));
+  ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.8f));
+  for (int i = 0; i < 5; i++) {
+    if (i > 0) ImGui::SameLine(0.0f, 4.0f);
+    bool sel = (s_transferPanel == i);
+    if (sel) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(kAccent.x*0.8f, kAccent.y*0.8f, kAccent.z*0.8f, 1.0f));
+    if (ImGui::Button(kPanels[i], ImVec2(cw/5.0f - 4.0f, 28.0f))) s_transferPanel = i;
+    if (sel) ImGui::PopStyleColor();
+  }
+  ImGui::PopStyleColor(3);
+  ImGui::Spacing();
+
+  // ---- Bid composer state (shared across panels) --------------------------
+  static int s_bidPlayerId = 0, s_bidSellerClubId = 0;
+  static int s_bidFee = 0, s_bidWage = 0;
+  static int s_bidRoleIdx = 1; // 0=rotation 1=important 2=star_player 3=prospect
+  static bool s_showBidComposer = false;
+  static char s_bidFeeStr[32] = "", s_bidWageStr[32] = "";
+
+  if (s_showBidComposer) {
+    static const char *kRoles[] = { "rotation", "important", "star_player", "prospect" };
+    ImGui::Separator();
+    ImGui::TextColored(ImVec4(kAccent.x, kAccent.y, kAccent.z, 1.0f), "BID COMPOSER");
+    ImGui::SameLine(cw - 60.0f);
+    if (ImGui::SmallButton("Cancel")) s_showBidComposer = false;
+    ImGui::SetNextItemWidth(140.0f);
+    ImGui::InputText("Transfer Fee", s_bidFeeStr, sizeof(s_bidFeeStr));
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(140.0f);
+    ImGui::InputText("Weekly Wage", s_bidWageStr, sizeof(s_bidWageStr));
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(120.0f);
+    ImGui::Combo("Role", &s_bidRoleIdx, kRoles, 4);
+    ImGui::SameLine();
+    if (ImGui::Button("Submit Bid", ImVec2(90.0f, 22.0f))) {
+      int fee  = atoi(s_bidFeeStr);
+      int wage = atoi(s_bidWageStr);
+      if (fee > 0 && wage > 0 && s_bidPlayerId > 0) {
+        InitiateUserBid(managerId, userClubId, s_bidPlayerId, s_bidSellerClubId,
+                        fee, wage, kRoles[s_bidRoleIdx], 0, 0,
+                        g_CareerHub.currentDate, g_CareerHub.seasonYear);
+        s_showBidComposer = false;
+        s_bidPlayerId = 0;
+      }
+    }
+    ImGui::Separator();
+    ImGui::Spacing();
+  }
+
+  float tableH = h - 120.0f;
+  if (s_showBidComposer) tableH -= 50.0f;
+
+  // ---- Panel: Available ---------------------------------------------------
+  if (s_transferPanel == 0) {
+    std::stringstream sq;
+    sq << "SELECT p.id, p.firstname||' '||p.lastname, p.role, p.age,"
+       << " t.name, p.playervalue, p.weekly_wage, p.contract_expiry, p.team_id"
+       << " FROM players p JOIN teams t ON t.id=p.team_id"
+       << " WHERE (p.is_transfer_listed=1"
+       << "   OR EXISTS(SELECT 1 FROM player_market_status pms"
+       << "             WHERE pms.player_id=p.id AND pms.manager_id=" << managerId
+       << "             AND pms.status IN ('transfer_listed','expiring_soon')))"
+       << " AND p.team_id != " << userClubId
+       << " ORDER BY p.base_stat DESC LIMIT 50;";
+    DatabaseResult *pr = GetDB()->Query(sq.str().c_str());
+    if (ImGui::BeginTable("##avail", 7, ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY |
+                           ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp,
+                           ImVec2(cw, tableH))) {
+      ImGui::TableSetupScrollFreeze(0,1);
+      ImGui::TableSetupColumn("Name",    ImGuiTableColumnFlags_WidthStretch);
+      ImGui::TableSetupColumn("Pos",     ImGuiTableColumnFlags_WidthFixed, 40.0f);
+      ImGui::TableSetupColumn("Age",     ImGuiTableColumnFlags_WidthFixed, 32.0f);
+      ImGui::TableSetupColumn("Club",    ImGuiTableColumnFlags_WidthStretch);
+      ImGui::TableSetupColumn("Value",   ImGuiTableColumnFlags_WidthFixed, 80.0f);
+      ImGui::TableSetupColumn("Wage/wk", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+      ImGui::TableSetupColumn("",        ImGuiTableColumnFlags_WidthFixed, 60.0f);
+      ImGui::TableHeadersRow();
+      if (pr) {
+        for (unsigned int i = 0; i < pr->data.size(); i++) {
+          int pid     = atoi(DBCell(pr,i,0).c_str());
+          ImGui::TableNextRow(0, 24.0f);
+          ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted(DBCell(pr,i,1).c_str());
+          ImGui::TableSetColumnIndex(1); ImGui::TextUnformatted(DBCell(pr,i,2).c_str());
+          ImGui::TableSetColumnIndex(2); ImGui::TextUnformatted(DBCell(pr,i,3).c_str());
+          ImGui::TableSetColumnIndex(3); ImGui::TextUnformatted(DBCell(pr,i,4).c_str());
+          long long val = atoll(DBCell(pr,i,5).c_str());
+          ImGui::TableSetColumnIndex(4); ImGui::Text("%s", FmtMoney(val).c_str());
+          long long wg  = atoll(DBCell(pr,i,6).c_str());
+          ImGui::TableSetColumnIndex(5); ImGui::Text("%s", FmtMoney(wg).c_str());
+          ImGui::TableSetColumnIndex(6);
+          ImGui::PushID(pid);
+          if (ImGui::SmallButton("Bid")) {
+            s_bidPlayerId    = pid;
+            s_bidSellerClubId= atoi(DBCell(pr,i,8).c_str());
+            s_bidFee         = (int)(val * 0.80);
+            s_bidWage        = (int)(wg  * 1.10);
+            snprintf(s_bidFeeStr,  sizeof(s_bidFeeStr),  "%d", s_bidFee);
+            snprintf(s_bidWageStr, sizeof(s_bidWageStr), "%d", s_bidWage);
+            s_showBidComposer = true;
+          }
+          ImGui::PopID();
+        }
+        delete pr;
+      }
+      ImGui::EndTable();
+    }
+  }
+
+  // ---- Panel: Scouted -----------------------------------------------------
+  else if (s_transferPanel == 1) {
+    std::stringstream sq;
+    sq << "SELECT DISTINCT p.id, p.firstname||' '||p.lastname, p.role, p.age,"
+       << " t.name, p.playervalue, p.weekly_wage, p.team_id"
+       << " FROM players p"
+       << " JOIN teams t ON t.id=p.team_id"
+       << " JOIN scout_reports sr ON sr.player_id=p.id AND sr.manager_id=" << managerId
+       << " WHERE p.team_id != " << userClubId
+       << " ORDER BY p.base_stat DESC LIMIT 50;";
+    DatabaseResult *pr = GetDB()->Query(sq.str().c_str());
+    if (ImGui::BeginTable("##scouted", 7, ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY |
+                           ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp,
+                           ImVec2(cw, tableH))) {
+      ImGui::TableSetupScrollFreeze(0,1);
+      ImGui::TableSetupColumn("Name",    ImGuiTableColumnFlags_WidthStretch);
+      ImGui::TableSetupColumn("Pos",     ImGuiTableColumnFlags_WidthFixed, 40.0f);
+      ImGui::TableSetupColumn("Age",     ImGuiTableColumnFlags_WidthFixed, 32.0f);
+      ImGui::TableSetupColumn("Club",    ImGuiTableColumnFlags_WidthStretch);
+      ImGui::TableSetupColumn("Value",   ImGuiTableColumnFlags_WidthFixed, 80.0f);
+      ImGui::TableSetupColumn("Wage/wk", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+      ImGui::TableSetupColumn("",        ImGuiTableColumnFlags_WidthFixed, 60.0f);
+      ImGui::TableHeadersRow();
+      if (pr) {
+        for (unsigned int i = 0; i < pr->data.size(); i++) {
+          int pid = atoi(DBCell(pr,i,0).c_str());
+          ImGui::TableNextRow(0, 24.0f);
+          ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted(DBCell(pr,i,1).c_str());
+          ImGui::TableSetColumnIndex(1); ImGui::TextUnformatted(DBCell(pr,i,2).c_str());
+          ImGui::TableSetColumnIndex(2); ImGui::TextUnformatted(DBCell(pr,i,3).c_str());
+          ImGui::TableSetColumnIndex(3); ImGui::TextUnformatted(DBCell(pr,i,4).c_str());
+          long long val = atoll(DBCell(pr,i,5).c_str());
+          ImGui::TableSetColumnIndex(4); ImGui::Text("%s", FmtMoney(val).c_str());
+          long long wg  = atoll(DBCell(pr,i,6).c_str());
+          ImGui::TableSetColumnIndex(5); ImGui::Text("%s", FmtMoney(wg).c_str());
+          ImGui::TableSetColumnIndex(6);
+          ImGui::PushID(pid + 10000);
+          if (ImGui::SmallButton("Bid")) {
+            s_bidPlayerId     = pid;
+            s_bidSellerClubId = atoi(DBCell(pr,i,7).c_str());
+            s_bidFee          = (int)(val * 0.80);
+            s_bidWage         = (int)(wg  * 1.10);
+            snprintf(s_bidFeeStr,  sizeof(s_bidFeeStr),  "%d", s_bidFee);
+            snprintf(s_bidWageStr, sizeof(s_bidWageStr), "%d", s_bidWage);
+            s_showBidComposer = true;
+          }
+          ImGui::PopID();
+        }
+        delete pr;
+      }
+      ImGui::EndTable();
+    }
+  }
+
+  // ---- Panel: My Bids -----------------------------------------------------
+  else if (s_transferPanel == 2) {
+    std::stringstream sq;
+    sq << "SELECT tn.id, p.firstname||' '||p.lastname, t.name,"
+       << " tn.offered_fee, tn.state, tn.days_in_state, tn.negotiation_momentum,"
+       << " tn.user_pending_action"
+       << " FROM transfer_negotiations tn"
+       << " JOIN players p ON p.id=tn.player_id"
+       << " JOIN teams t ON t.id=tn.selling_club_id"
+       << " WHERE tn.manager_id=" << managerId
+       << " AND tn.buying_club_id=" << userClubId
+       << " AND tn.is_user_bid=1"
+       << " AND tn.state NOT IN ('completed','collapsed')"
+       << " ORDER BY tn.id DESC;";
+    DatabaseResult *nr = GetDB()->Query(sq.str().c_str());
+    if (ImGui::BeginTable("##mybids", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY |
+                           ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp,
+                           ImVec2(cw, tableH))) {
+      ImGui::TableSetupScrollFreeze(0,1);
+      ImGui::TableSetupColumn("Player",   ImGuiTableColumnFlags_WidthStretch);
+      ImGui::TableSetupColumn("Seller",   ImGuiTableColumnFlags_WidthStretch);
+      ImGui::TableSetupColumn("Offer",    ImGuiTableColumnFlags_WidthFixed, 80.0f);
+      ImGui::TableSetupColumn("Status",   ImGuiTableColumnFlags_WidthFixed, 120.0f);
+      ImGui::TableSetupColumn("Days",     ImGuiTableColumnFlags_WidthFixed, 36.0f);
+      ImGui::TableSetupColumn("Momentum", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+      ImGui::TableHeadersRow();
+      if (nr) {
+        for (unsigned int i = 0; i < nr->data.size(); i++) {
+          int nid  = atoi(DBCell(nr,i,0).c_str());
+          std::string state = DBCell(nr,i,4);
+          ImGui::TableNextRow(0, 24.0f);
+          ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted(DBCell(nr,i,1).c_str());
+          ImGui::TableSetColumnIndex(1); ImGui::TextUnformatted(DBCell(nr,i,2).c_str());
+          long long fee = atoll(DBCell(nr,i,3).c_str());
+          ImGui::TableSetColumnIndex(2); ImGui::Text("%s", FmtMoney(fee).c_str());
+          ImGui::TableSetColumnIndex(3);
+          ImVec4 stateCol = kTextSec;
+          if (state == "counter_offer") stateCol = kWarning;
+          else if (state == "player_talks" || state == "medical_pending") stateCol = kSuccess;
+          ImGui::TextColored(stateCol, "%s", state.c_str());
+          ImGui::TableSetColumnIndex(4); ImGui::TextUnformatted(DBCell(nr,i,5).c_str());
+          int mom = atoi(DBCell(nr,i,6).c_str());
+          ImGui::TableSetColumnIndex(5);
+          ImVec4 momCol = mom > 20 ? kSuccess : (mom < -20 ? kDanger : kTextSec);
+          ImGui::TextColored(momCol, "%+d", mom);
+          // If counter received, show respond buttons
+          if (state == "counter_offer") {
+            ImGui::PushID(nid);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Accept")) RespondToOffer(managerId, nid, "accept_counter", 0, 0);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Reject")) RespondToOffer(managerId, nid, "reject", 0, 0);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Withdraw")) RespondToOffer(managerId, nid, "withdraw", 0, 0);
+            ImGui::PopID();
+          }
+        }
+        delete nr;
+      }
+      ImGui::EndTable();
+    }
+  }
+
+  // ---- Panel: Incoming Bids -----------------------------------------------
+  else if (s_transferPanel == 3) {
+    std::stringstream sq;
+    sq << "SELECT tn.id, p.firstname||' '||p.lastname, t.name,"
+       << " tn.offered_fee, tn.state, tn.days_in_state"
+       << " FROM transfer_negotiations tn"
+       << " JOIN players p ON p.id=tn.player_id"
+       << " JOIN teams t ON t.id=tn.buying_club_id"
+       << " WHERE tn.manager_id=" << managerId
+       << " AND tn.selling_club_id=" << userClubId
+       << " AND tn.is_user_bid=0"
+       << " AND tn.state IN ('initiated','offer_made','negotiating','counter_offer')"
+       << " ORDER BY tn.id DESC;";
+    DatabaseResult *nr = GetDB()->Query(sq.str().c_str());
+    if (ImGui::BeginTable("##incoming", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY |
+                           ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp,
+                           ImVec2(cw, tableH))) {
+      ImGui::TableSetupScrollFreeze(0,1);
+      ImGui::TableSetupColumn("Player",  ImGuiTableColumnFlags_WidthStretch);
+      ImGui::TableSetupColumn("From",    ImGuiTableColumnFlags_WidthStretch);
+      ImGui::TableSetupColumn("Offer",   ImGuiTableColumnFlags_WidthFixed, 80.0f);
+      ImGui::TableSetupColumn("State",   ImGuiTableColumnFlags_WidthFixed, 100.0f);
+      ImGui::TableSetupColumn("Days",    ImGuiTableColumnFlags_WidthFixed, 36.0f);
+      ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, 180.0f);
+      ImGui::TableHeadersRow();
+      if (nr) {
+        for (unsigned int i = 0; i < nr->data.size(); i++) {
+          int nid = atoi(DBCell(nr,i,0).c_str());
+          ImGui::TableNextRow(0, 24.0f);
+          ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted(DBCell(nr,i,1).c_str());
+          ImGui::TableSetColumnIndex(1); ImGui::TextUnformatted(DBCell(nr,i,2).c_str());
+          long long fee = atoll(DBCell(nr,i,3).c_str());
+          ImGui::TableSetColumnIndex(2); ImGui::Text("%s", FmtMoney(fee).c_str());
+          ImGui::TableSetColumnIndex(3); ImGui::TextUnformatted(DBCell(nr,i,4).c_str());
+          ImGui::TableSetColumnIndex(4); ImGui::TextUnformatted(DBCell(nr,i,5).c_str());
+          ImGui::TableSetColumnIndex(5);
+          ImGui::PushID(nid + 20000);
+          if (ImGui::SmallButton("Accept")) {
+            std::stringstream uq; uq << "UPDATE transfer_negotiations SET state='negotiating' WHERE id=" << nid << ";";
+            GetDB()->Query(uq.str().c_str());
+          }
+          ImGui::SameLine();
+          if (ImGui::SmallButton("Reject")) RespondToOffer(managerId, nid, "reject", 0, 0);
+          ImGui::SameLine();
+          if (ImGui::SmallButton("Block")) {
+            // 90-day cooldown for buyer
+            std::stringstream cq;
+            cq << "INSERT INTO negotiation_cooldowns(manager_id,buying_club_id,player_id,cooldown_until,reason)"
+               << " SELECT " << managerId << ",buying_club_id,player_id,"
+               << "date('" << g_CareerHub.currentDate << "','+90 days'),'blocked'"
+               << " FROM transfer_negotiations WHERE id=" << nid << ";";
+            GetDB()->Query(cq.str().c_str());
+            std::stringstream sq2; sq2 << "UPDATE transfer_negotiations SET state='collapsed',collapse_reason='blocked' WHERE id=" << nid << ";";
+            GetDB()->Query(sq2.str().c_str());
+          }
+          ImGui::PopID();
+        }
+        delete nr;
+      }
+      ImGui::EndTable();
+    }
+  }
+
+  // ---- Panel: Squad Management --------------------------------------------
+  else if (s_transferPanel == 4) {
+    ImGui::TextColored(kTextSec, "Proactive market actions for your squad players");
+    ImGui::Spacing();
+    std::stringstream sq;
+    sq << "SELECT p.id, p.firstname||' '||p.lastname, p.role, p.age,"
+       << " p.weekly_wage, p.is_transfer_listed, p.playervalue"
+       << " FROM players p WHERE p.team_id=" << userClubId
+       << " ORDER BY p.base_stat DESC;";
+    DatabaseResult *pr = GetDB()->Query(sq.str().c_str());
+    if (ImGui::BeginTable("##squadmgmt", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY |
+                           ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp,
+                           ImVec2(cw, tableH))) {
+      ImGui::TableSetupScrollFreeze(0,1);
+      ImGui::TableSetupColumn("Name",    ImGuiTableColumnFlags_WidthStretch);
+      ImGui::TableSetupColumn("Pos",     ImGuiTableColumnFlags_WidthFixed, 40.0f);
+      ImGui::TableSetupColumn("Age",     ImGuiTableColumnFlags_WidthFixed, 32.0f);
+      ImGui::TableSetupColumn("Wage",    ImGuiTableColumnFlags_WidthFixed, 70.0f);
+      ImGui::TableSetupColumn("Status",  ImGuiTableColumnFlags_WidthFixed, 80.0f);
+      ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, 230.0f);
+      ImGui::TableHeadersRow();
+      if (pr) {
+        for (unsigned int i = 0; i < pr->data.size(); i++) {
+          int pid     = atoi(DBCell(pr,i,0).c_str());
+          int listed  = atoi(DBCell(pr,i,5).c_str());
+          long long pval = atoll(DBCell(pr,i,6).c_str());
+          ImGui::TableNextRow(0, 24.0f);
+          ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted(DBCell(pr,i,1).c_str());
+          ImGui::TableSetColumnIndex(1); ImGui::TextUnformatted(DBCell(pr,i,2).c_str());
+          ImGui::TableSetColumnIndex(2); ImGui::TextUnformatted(DBCell(pr,i,3).c_str());
+          long long wg = atoll(DBCell(pr,i,4).c_str());
+          ImGui::TableSetColumnIndex(3); ImGui::Text("%s", FmtMoney(wg).c_str());
+          ImGui::TableSetColumnIndex(4);
+          if (listed) ImGui::TextColored(kWarning, "Listed");
+          else        ImGui::TextColored(kSuccess,  "Available");
+          ImGui::TableSetColumnIndex(5);
+          ImGui::PushID(pid + 30000);
+          if (!listed) {
+            if (ImGui::SmallButton("List")) {
+              std::stringstream uq; uq << "UPDATE players SET is_transfer_listed=1 WHERE id=" << pid << ";";
+              GetDB()->Query(uq.str().c_str());
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Untouchable")) {
+              std::stringstream uq;
+              uq << "INSERT OR REPLACE INTO player_market_status(manager_id,player_id,status,set_date)"
+                 << " VALUES(" << managerId << "," << pid << ",'franchise_player','" << g_CareerHub.currentDate << "');";
+              GetDB()->Query(uq.str().c_str());
+            }
+          } else {
+            if (ImGui::SmallButton("Unlist")) {
+              std::stringstream uq; uq << "UPDATE players SET is_transfer_listed=0 WHERE id=" << pid << ";";
+              GetDB()->Query(uq.str().c_str());
+            }
+          }
+          ImGui::SameLine();
+          // Set asking price button (opens an inline text input)
+          static int s_askingPid = 0;
+          static char s_askingBuf[32] = "";
+          if (ImGui::SmallButton("Set Price")) {
+            s_askingPid = pid;
+            snprintf(s_askingBuf, sizeof(s_askingBuf), "%lld", pval);
+          }
+          if (s_askingPid == pid) {
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(80.0f);
+            if (ImGui::InputText("##askprice", s_askingBuf, sizeof(s_askingBuf),
+                                  ImGuiInputTextFlags_EnterReturnsTrue)) {
+              long long askVal = atoll(s_askingBuf);
+              if (askVal > 0) {
+                std::stringstream uq; uq << "UPDATE players SET playervalue=" << askVal << " WHERE id=" << pid << ";";
+                GetDB()->Query(uq.str().c_str());
+                s_askingPid = 0;
+              }
+            }
+          }
+          ImGui::PopID();
+        }
+        delete pr;
+      }
+      ImGui::EndTable();
+    }
+  }
+}
+
 // ---- DrawComingSoonPage -------------------------------------------------
 
 static void DrawComingSoonPage(float w, float h, const char *section) {
@@ -10424,6 +10813,7 @@ static void DrawWorkspace(float contentW, float workH) {
     case PAGE_STAFF_MARKET:  DrawStaffMarketPage(contentW, workH);   break;
     case PAGE_SCOUTING:      DrawScoutingPage(contentW, workH);      break;
     case PAGE_FINANCES:      DrawFinancesPage(contentW, workH);      break;
+    case PAGE_TRANSFERS:    DrawTransfersPage(contentW, workH);     break;
     default:
       DrawComingSoonPage(contentW, workH, kPageNames[g_activePage]);
       break;

@@ -2,6 +2,31 @@
 #include <string>
 #include <map>
 
+// ---- Date helpers -----------------------------------------------------------
+int         DateToJulian(const std::string &d);
+std::string AddDays(const std::string &date, int n);
+bool        InTransferWindow(const std::string &date);
+int         DaysToWindowEnd(const std::string &date);
+
+// ---- Side-effect helpers ----------------------------------------------------
+void InsertTransferNews(int managerId, const std::string &date,
+                         const std::string &headline, const std::string &category,
+                         int playerId, int fromClubId, int toClubId);
+void AddUnhappiness(int managerId, int playerId, const std::string &reason,
+                     int severity, const std::string &date);
+
+// ---- Valuation + scoring ----------------------------------------------------
+long long CalculateContextualValue(int managerId, int playerId, int sellerClubId,
+                                    int buyerClubId, const std::string &currentDate,
+                                    int seasonYear);
+int CalculateAcceptanceScore(int managerId, int playerId, int buyingClubId,
+                              const std::string &promisedRole, int offeredWage,
+                              int seasonYear);
+
+// ---- Utility ----------------------------------------------------------------
+std::string RoleToGroup(const std::string &role);
+
+// ---- Main API ---------------------------------------------------------------
 // Called once at career start (inside GenerateCareerSeason).
 void SeedTransferSystem(int managerId);
 

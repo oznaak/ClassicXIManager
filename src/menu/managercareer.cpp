@@ -7,6 +7,7 @@
 
 #include "base/utils.hpp"
 #include "transfer_engine.hpp"
+#include "user_transfer.hpp"
 #include <boost/bind/bind.hpp>
 #include <sstream>
 #include <cstdlib>
@@ -469,6 +470,84 @@ static void EnsureCareerTables() {
     "created_date TEXT,"
     "resolved   INTEGER DEFAULT 0);"
   ); delete GetDB()->Query("SELECT 1;");
+
+  // Phase 3+4: new columns on existing tables (ALTER TABLE fails silently if column exists)
+  { DatabaseResult *r = GetDB()->Query("ALTER TABLE transfer_negotiations ADD COLUMN is_user_bid INTEGER DEFAULT 0;"); if (r) delete r; }
+  { DatabaseResult *r = GetDB()->Query("ALTER TABLE transfer_negotiations ADD COLUMN user_pending_action TEXT DEFAULT '';"); if (r) delete r; }
+  { DatabaseResult *r = GetDB()->Query("ALTER TABLE transfer_negotiations ADD COLUMN negotiation_momentum INTEGER DEFAULT 0;"); if (r) delete r; }
+  { DatabaseResult *r = GetDB()->Query("ALTER TABLE transfer_negotiations ADD COLUMN seller_patience_days INTEGER DEFAULT 7;"); if (r) delete r; }
+  { DatabaseResult *r = GetDB()->Query("ALTER TABLE transfer_negotiations ADD COLUMN player_patience_days INTEGER DEFAULT 5;"); if (r) delete r; }
+
+  { DatabaseResult *r = GetDB()->Query("ALTER TABLE player_traits ADD COLUMN pref_domestic INTEGER DEFAULT 0;"); if (r) delete r; }
+  { DatabaseResult *r = GetDB()->Query("ALTER TABLE player_traits ADD COLUMN pref_prestige INTEGER DEFAULT 0;"); if (r) delete r; }
+  { DatabaseResult *r = GetDB()->Query("ALTER TABLE player_traits ADD COLUMN pref_wages INTEGER DEFAULT 0;"); if (r) delete r; }
+  { DatabaseResult *r = GetDB()->Query("ALTER TABLE player_traits ADD COLUMN pref_development INTEGER DEFAULT 0;"); if (r) delete r; }
+  { DatabaseResult *r = GetDB()->Query("ALTER TABLE player_traits ADD COLUMN pref_guaranteed_starts INTEGER DEFAULT 0;"); if (r) delete r; }
+  { DatabaseResult *r = GetDB()->Query("ALTER TABLE player_traits ADD COLUMN hates_rival_club_id INTEGER DEFAULT 0;"); if (r) delete r; }
+
+  { DatabaseResult *r = GetDB()->Query("ALTER TABLE club_transfer_identity ADD COLUMN succession_role TEXT DEFAULT '';"); if (r) delete r; }
+  { DatabaseResult *r = GetDB()->Query("ALTER TABLE club_finances ADD COLUMN board_confidence INTEGER DEFAULT 70;"); if (r) delete r; }
+
+  GetDB()->Query(
+    "CREATE TABLE IF NOT EXISTS loan_deals("
+    "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "manager_id             INTEGER NOT NULL,"
+    "loaning_club_id        INTEGER NOT NULL,"
+    "receiving_club_id      INTEGER NOT NULL,"
+    "player_id              INTEGER NOT NULL,"
+    "loan_fee               INTEGER DEFAULT 0,"
+    "wage_split_pct         INTEGER DEFAULT 100,"
+    "recall_clause_after_month INTEGER DEFAULT 0,"
+    "option_to_buy_fee      INTEGER DEFAULT 0,"
+    "option_to_buy_deadline TEXT DEFAULT '',"
+    "buy_back_fee           INTEGER DEFAULT 0,"
+    "buy_back_expiry        TEXT DEFAULT '',"
+    "season_year            INTEGER NOT NULL,"
+    "status                 TEXT DEFAULT 'active',"
+    "created_date           TEXT,"
+    "end_date               TEXT);"
+  ); delete GetDB()->Query("SELECT 1;");
+
+  GetDB()->Query(
+    "CREATE TABLE IF NOT EXISTS player_appearances("
+    "manager_id      INTEGER NOT NULL,"
+    "player_id       INTEGER NOT NULL,"
+    "season_year     INTEGER NOT NULL,"
+    "starts          INTEGER DEFAULT 0,"
+    "sub_appearances INTEGER DEFAULT 0,"
+    "PRIMARY KEY(manager_id, player_id, season_year));"
+  ); delete GetDB()->Query("SELECT 1;");
+
+  GetDB()->Query(
+    "CREATE TABLE IF NOT EXISTS transfer_special_events("
+    "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "manager_id    INTEGER NOT NULL,"
+    "event_type    TEXT NOT NULL,"
+    "player_id     INTEGER NOT NULL,"
+    "club_id       INTEGER NOT NULL,"
+    "trigger_date  TEXT NOT NULL,"
+    "fired         INTEGER DEFAULT 0,"
+    "metadata_json TEXT DEFAULT '{}');"
+  ); delete GetDB()->Query("SELECT 1;");
+
+  GetDB()->Query(
+    "CREATE TABLE IF NOT EXISTS squad_harmony("
+    "manager_id              INTEGER PRIMARY KEY,"
+    "morale                  INTEGER DEFAULT 70,"
+    "dressing_room_stability INTEGER DEFAULT 70,"
+    "last_updated            TEXT);"
+  ); delete GetDB()->Query("SELECT 1;");
+
+  GetDB()->Query(
+    "CREATE TABLE IF NOT EXISTS media_pressure_events("
+    "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "manager_id   INTEGER NOT NULL,"
+    "event_type   TEXT NOT NULL,"
+    "severity     INTEGER DEFAULT 1,"
+    "game_date    TEXT,"
+    "expires_date TEXT,"
+    "fired        INTEGER DEFAULT 0);"
+  ); delete GetDB()->Query("SELECT 1;");
 }
 
 static void DeleteCareerSeason(int managerId) {
@@ -750,6 +829,10 @@ void GenerateCareerSeason(int managerId, int seasonYear) {
 
   // Seed transfer system (player traits, club identity, knowledge, market status)
   SeedTransferSystem(managerId);
+
+  // Seed Phase 3+4 additions
+  SeedPlayerPreferences(managerId);
+  SeedSpecialEvents(managerId, seasonYear, careerDate);
 
   printf("[CAREER] New season generated manager=%d season_year=%d current_date=%s\n",
          managerId, seasonYear, careerDate);
@@ -1579,6 +1662,9 @@ void ManagerMainScreenPage::StartNextSeason() {
 
   // Store achievements for the completed season before deleting its data.
   StoreManagerAchievementForCompletedSeason(managerId);
+
+  // Phase 3+4: fire end-of-season poaching escalation before season data is deleted
+  ProcessPoachingEscalation(managerId, clubId, g_CareerHub.currentDate, currentSeasonYear);
 
   // Generate next season (deletes old fixtures/standings internally).
   GenerateCareerSeason(managerId, nextSeasonYear);
