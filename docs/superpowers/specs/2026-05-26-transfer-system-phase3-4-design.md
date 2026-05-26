@@ -54,17 +54,17 @@ ALTER TABLE player_traits ADD COLUMN pref_guaranteed_starts INTEGER DEFAULT 0; -
 ALTER TABLE player_traits ADD COLUMN hates_rival_club_id INTEGER DEFAULT 0;    -- club_id: -30 on acceptance score if buying club matches
 ```
 
-**Additions to `loan_deals`:**
-```sql
-ALTER TABLE loan_deals ADD COLUMN buy_back_fee INTEGER DEFAULT 0;    -- 0 = no buy-back clause
-ALTER TABLE loan_deals ADD COLUMN buy_back_expiry TEXT DEFAULT '';   -- YYYY-MM-DD, empty = no clause
-```
-
 **Additions to `club_transfer_identity`:**
 ```sql
 ALTER TABLE club_transfer_identity ADD COLUMN succession_role TEXT DEFAULT '';
 -- Set when a key player (base_stat >= 75) is sold from this club. Biases next need evaluation.
 -- Cleared after a suitable replacement is signed (same position group, base_stat >= 65).
+```
+
+**Additions to `club_finances` (existing table from Phase 1+2 seed):**
+```sql
+ALTER TABLE club_finances ADD COLUMN board_confidence INTEGER DEFAULT 70;
+-- 0-100. Drops from failed negotiations and poor results. Board sacks manager below 20.
 ```
 
 ### New Tables
@@ -543,11 +543,10 @@ After user overperformance events, top clubs aggressively target the user's best
 
 ### Trigger Conditions
 
-Any of the following:
-- User's club finished in top 2 of their league
-- User's club qualified for a knockout competition (fixture type = 'ko', user team present)
-- User's best player (`base_stat` highest in squad) gained `international_reputation` increase during the season
-- 3+ wins in a row on the current fixture streak
+Evaluated at season end in `managercareer.cpp` `AdvanceDay()` when `allFixturesComplete = true`. Calls `ProcessPoachingEscalation(managerId, userClubId, currentDate, seasonYear)`. Any of the following:
+- User's club finished in top 2 of their league (check `standings` table: rank 1 or 2)
+- User's club won ≥ 60% of their fixtures in the season (won / played ≥ 0.6)
+- User's best player (`base_stat` highest in squad) has `international_reputation ≥ 4`
 
 ### Escalation Behaviour
 
