@@ -1702,6 +1702,9 @@ void ManagerMainScreenPage::AdvanceDay() {
   // Step 2b: complete any scout reports that are due by the new date.
   ProcessCompletedScouts(managerId, newDate);
 
+  // Step 2c: process any pending transfer deals that resolve by the new date.
+  ProcessDailyTransfers(managerId, clubId, newDate, g_CareerHub.seasonYear);
+
   // Step 3: write the literal new date string into the DB.
   std::stringstream uq;
   uq << "UPDATE managers SET current_date='" << newDate << "' WHERE id=" << managerId << ";";
