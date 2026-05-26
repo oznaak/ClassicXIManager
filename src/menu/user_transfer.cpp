@@ -195,13 +195,18 @@ void SeedSpecialEvents(int managerId, int seasonYear, const std::string &current
 
   // ---- Financial collapse forced sale: high-debt club must sell best player ---
   {
-    DatabaseResult *cr = GetDB()->Query(
+    // Guard: club_finances may not exist yet on very first career seed
+    DatabaseResult *te = GetDB()->Query(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='club_finances';");
+    bool cfExists = (te && te->data.size() > 0);
+    if (te) delete te;
+    DatabaseResult *cr = cfExists ? GetDB()->Query(
       "SELECT cf.club_id, p.id as player_id"
       " FROM club_finances cf"
       " JOIN players p ON p.team_id = cf.club_id"
       " WHERE cf.debt_level > cf.transfer_budget * 2.5"
       " AND p.is_transfer_listed = 0"
-      " ORDER BY p.base_stat DESC LIMIT 1;");
+      " ORDER BY p.base_stat DESC LIMIT 1;") : nullptr;
     if (cr && cr->data.size() > 0) {
       int clubId   = atoi(UTCell(cr,0,0).c_str());
       int playerId = atoi(UTCell(cr,0,1).c_str());
@@ -665,7 +670,7 @@ void TickUserNegotiations(int managerId, int userClubId,
           UTExec(uq.str()); }
         // Add fee to seller income
         { std::stringstream uq;
-          uq << "UPDATE club_finances SET balance=balance+" << n.offFee
+          uq << "UPDATE club_finances SET cash_balance=cash_balance+" << n.offFee
              << " WHERE manager_id=" << managerId << " AND club_id=" << n.seller << ";";
           UTExec(uq.str()); }
 

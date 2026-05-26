@@ -486,7 +486,6 @@ static void EnsureCareerTables() {
   { DatabaseResult *r = GetDB()->Query("ALTER TABLE player_traits ADD COLUMN hates_rival_club_id INTEGER DEFAULT 0;"); if (r) delete r; }
 
   { DatabaseResult *r = GetDB()->Query("ALTER TABLE club_transfer_identity ADD COLUMN succession_role TEXT DEFAULT '';"); if (r) delete r; }
-  { DatabaseResult *r = GetDB()->Query("ALTER TABLE club_finances ADD COLUMN board_confidence INTEGER DEFAULT 70;"); if (r) delete r; }
 
   GetDB()->Query(
     "CREATE TABLE IF NOT EXISTS loan_deals("
