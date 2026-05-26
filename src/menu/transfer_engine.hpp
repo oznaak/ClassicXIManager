@@ -16,12 +16,12 @@ void AddUnhappiness(int managerId, int playerId, const std::string &reason,
                      int severity, const std::string &date);
 
 // ---- Valuation + scoring ----------------------------------------------------
-long long CalculateContextualValue(int managerId, int playerId, int sellerClubId,
-                                    int buyerClubId, const std::string &currentDate,
-                                    int seasonYear);
+long long CalculateContextualValue(int managerId, int playerId, int sellingClubId,
+                                    int buyingClubId, int needScore,
+                                    int deadlinePressure, int agentPressure);
 int CalculateAcceptanceScore(int managerId, int playerId, int buyingClubId,
-                              const std::string &promisedRole, int offeredWage,
-                              int seasonYear);
+                              int sellingClubId, long long offeredWage,
+                              const std::string &promisedRole, int agentPressure);
 
 // ---- Utility ----------------------------------------------------------------
 std::string RoleToGroup(const std::string &role);

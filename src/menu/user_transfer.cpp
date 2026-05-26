@@ -472,7 +472,7 @@ void TickUserNegotiations(int managerId, int userClubId,
 
       // Get contextual value and seller selling_pressure
       long long ctxVal = CalculateContextualValue(managerId, n.player, n.seller, n.buyer,
-                                                    currentDate, seasonYear);
+                                                    50, n.dlPressure, 0);
       int sellingPressure = 20;
       std::string negotiationPersonality = "patient";
       {
@@ -547,7 +547,8 @@ void TickUserNegotiations(int managerId, int userClubId,
       }
 
       int score = CalculateAcceptanceScore(managerId, n.player, n.buyer,
-                                            n.role, (int)wage, seasonYear);
+                                            n.seller, (long long)atoll(n.offWage.c_str()),
+                                            n.role, 0);
 
       // Apply preference profile modifiers
       {
