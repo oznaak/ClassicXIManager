@@ -709,5 +709,176 @@ static int CalculateAcceptanceScore(int managerId, int playerId,
   return std::max(0, std::min(100, (int)score));
 }
 
+static void AttemptInitiateNegotiations(int managerId, int clubId,
+                                         const std::string &currentDate,
+                                         int seasonYear,
+                                         const std::map<std::string,int> &needs,
+                                         int deadlinePressure,
+                                         unsigned int rng) {
+  int aggression=50, irrat=25, agePref=0;
+  int youthFocus=40, domesticBias=40, prestige=40, wageWill=50;
+  int deadlinePanic=30;
+  {
+    std::stringstream q;
+    q << "SELECT aggression,irrationality,age_preference,youth_focus,"
+      << "domestic_bias,prestige_bias,wage_willingness,"
+      << "deadline_panic FROM club_transfer_identity"
+      << " WHERE manager_id=" << managerId << " AND club_id=" << clubId << ";";
+    DatabaseResult *r = GetDB()->Query(q.str());
+    if (r && r->data.size()>0) {
+      aggression   = atoi(TECell(r,0,0).c_str());
+      irrat        = atoi(TECell(r,0,1).c_str());
+      agePref      = atoi(TECell(r,0,2).c_str());
+      youthFocus   = atoi(TECell(r,0,3).c_str());
+      domesticBias = atoi(TECell(r,0,4).c_str());
+      prestige     = atoi(TECell(r,0,5).c_str());
+      wageWill     = atoi(TECell(r,0,6).c_str());
+      deadlinePanic= atoi(TECell(r,0,7).c_str());
+    }
+    delete r;
+  }
+
+  // Squad size check: suppress if over limit
+  int squadSize = 0;
+  { std::stringstream q; q << "SELECT COUNT(*) FROM players WHERE team_id=" << clubId << ";";
+    DatabaseResult *r = GetDB()->Query(q.str());
+    if (r && r->data.size()>0) squadSize = atoi(TECell(r,0,0).c_str()); delete r; }
+  if (squadSize > 32) return;
+
+  // Active negotiations: don't run more than 2 unless very aggressive
+  int activeDeals = 0;
+  { std::stringstream q;
+    q << "SELECT COUNT(*) FROM transfer_negotiations WHERE manager_id=" << managerId
+      << " AND buying_club_id=" << clubId
+      << " AND state NOT IN ('completed','collapsed');";
+    DatabaseResult *r = GetDB()->Query(q.str());
+    if (r && r->data.size()>0) activeDeals = atoi(TECell(r,0,0).c_str()); delete r; }
+  if (activeDeals >= 2 && aggression < 75) return;
+  if (activeDeals >= 3) return;
+
+  // Find position group with highest need
+  std::string bestGroup; int bestNeed = 0;
+  for (auto &kv : needs) { if (kv.second > bestNeed) { bestNeed=kv.second; bestGroup=kv.first; } }
+
+  // Irrationality roll: may override need entirely
+  bool irrational = (int)(rng % 100) < irrat;
+  int effectiveNeed = irrational ? 100 : bestNeed;
+
+  // Deadline panic boost
+  if (deadlinePressure > 80 && deadlinePanic > 50) effectiveNeed += 30;
+
+  if (effectiveNeed < 40) return;
+
+  // Determine target tier based on effectiveNeed
+  int tier = (effectiveNeed > 65) ? 1 : 2;
+  if (deadlinePressure > 80 && bestNeed < 40) tier = 3;
+
+  // Map group back to role list for SQL IN clause
+  static const struct { const char *group; const char *roles; } kGroupRoles[] = {
+    {"GK",    "'GK'"},
+    {"CB",    "'CB'"},
+    {"FB_WB", "'LB','RB','LWB','RWB'"},
+    {"DM",    "'CDM'"},
+    {"CM",    "'CM'"},
+    {"AM_W",  "'CAM','LM','RM','LW','RW'"},
+    {"ST",    "'CF','ST'"},
+    {nullptr, nullptr}
+  };
+  std::string roleIn;
+  for (int i=0; kGroupRoles[i].group; i++) {
+    if (bestGroup == kGroupRoles[i].group) { roleIn = kGroupRoles[i].roles; break; }
+  }
+  if (roleIn.empty()) return;
+
+  // Age preference filter
+  std::string ageClause;
+  if (!irrational) {
+    if (agePref < -20) ageClause = " AND p.age <= 23";
+    else if (agePref > 20) ageClause = " AND p.age >= 27";
+  }
+
+  // Tier quality thresholds
+  float qualMin = (tier == 1) ? 75.0f : (tier == 2) ? 60.0f : 40.0f;
+
+  // Select target from knowledge pool
+  std::stringstream tq;
+  tq << "SELECT p.id, p.base_stat, p.weekly_wage, t.id as cur_club,"
+     << " p.international_reputation"
+     << " FROM players p"
+     << " JOIN teams t ON t.id=p.team_id"
+     << " JOIN club_player_knowledge cpk"
+     << "   ON cpk.player_id=p.id AND cpk.manager_id=" << managerId
+     << "   AND cpk.club_id=" << clubId
+     << " WHERE p.role IN (" << roleIn << ")"
+     << " AND t.id != " << clubId
+     << " AND p.base_stat >= " << qualMin
+     << " AND cpk.knowledge >= 30"
+     << ageClause
+     << " AND NOT EXISTS ("
+     <<   "SELECT 1 FROM negotiation_cooldowns nc"
+     <<   " WHERE nc.manager_id=" << managerId
+     <<   " AND nc.buying_club_id=" << clubId
+     <<   " AND nc.player_id=p.id"
+     <<   " AND nc.cooldown_until >= '" << currentDate << "'"
+     << ")"
+     << " AND NOT EXISTS ("
+     <<   "SELECT 1 FROM transfer_negotiations tn"
+     <<   " WHERE tn.manager_id=" << managerId
+     <<   " AND tn.buying_club_id=" << clubId
+     <<   " AND tn.player_id=p.id"
+     <<   " AND tn.state NOT IN ('completed','collapsed')"
+     << ")"
+     << " ORDER BY cpk.knowledge*p.base_stat DESC LIMIT 20;";
+  DatabaseResult *tr = GetDB()->Query(tq.str());
+  if (!tr || tr->data.size() == 0) { delete tr; return; }
+
+  int pick = (int)(rng % std::min((unsigned int)tr->data.size(), 5u));
+  int targetId    = atoi(TECell(tr, pick, 0).c_str());
+  int sellingClub = atoi(TECell(tr, pick, 3).c_str());
+  long long wage  = atoll(TECell(tr, pick, 2).c_str());
+  delete tr;
+
+  long long ctxVal = CalculateContextualValue(managerId, targetId, sellingClub,
+                                               clubId, effectiveNeed, deadlinePressure, 0);
+  long long offerFee  = (long long)(ctxVal * 0.80f);
+  long long offerWage = (long long)(wage * (1.0f + wageWill / 200.0f));
+
+  int targetEgo = 50;
+  { std::stringstream q; q << "SELECT ego FROM player_traits WHERE manager_id=" << managerId
+      << " AND player_id=" << targetId << ";";
+    DatabaseResult *r = GetDB()->Query(q.str());
+    if (r && r->data.size()>0) targetEgo = atoi(TECell(r,0,0).c_str()); delete r; }
+  std::string promised = "rotation";
+  if (effectiveNeed > 70 || targetEgo > 65) promised = "important";
+  if (targetEgo > 80 || irrational) promised = "star_player";
+
+  std::stringstream iq;
+  iq << "INSERT INTO transfer_negotiations"
+     << "(manager_id,buying_club_id,selling_club_id,player_id,state,"
+     << "offered_fee,offered_wage,promised_role,days_in_state,initiated_date,"
+     << "deadline_pressure,agent_pressure,irrationality_driven,tier)"
+     << " VALUES(" << managerId << "," << clubId << "," << sellingClub << ","
+     << targetId << ",'initiated'," << offerFee << "," << offerWage << ",'"
+     << promised << "',0,'" << currentDate << "',"
+     << deadlinePressure << "," << std::min(targetEgo/2, 40) << ","
+     << (irrational?1:0) << "," << tier << ");";
+  DatabaseResult *ir = GetDB()->Query(iq.str());
+  delete ir;
+
+  std::string pName;
+  { std::stringstream q; q << "SELECT firstname||' '||lastname FROM players WHERE id=" << targetId << ";";
+    DatabaseResult *r = GetDB()->Query(q.str()); if(r&&r->data.size()>0) pName=TECell(r,0,0); delete r; }
+  std::string cName;
+  { std::stringstream q; q << "SELECT name FROM teams WHERE id=" << clubId << ";";
+    DatabaseResult *r = GetDB()->Query(q.str()); if(r&&r->data.size()>0) cName=TECell(r,0,0); delete r; }
+
+  InsertTransferNews(managerId, currentDate,
+    pName + " linked with move to " + cName,
+    "rumour", targetId, sellingClub, clubId);
+
+  printf("[TRANSFER] Initiate: manager=%d buyer=%d seller=%d player=%d tier=%d irrational=%d\n",
+         managerId, clubId, sellingClub, targetId, tier, irrational?1:0);
+}
+
 void ProcessDailyTransfers(int managerId, int userClubId,
                             const std::string &currentDate, int seasonYear) {}
