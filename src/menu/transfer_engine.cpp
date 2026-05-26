@@ -485,5 +485,229 @@ void SeedTransferSystem(int managerId) {
   printf("[TRANSFER] SeedTransferSystem complete: manager=%d\n", managerId);
 }
 
+static long long CalculateContextualValue(int managerId, int playerId,
+                                           int sellingClubId, int buyingClubId,
+                                           int needScore, int deadlinePressure,
+                                           int agentPressure) {
+  long long base = 0;
+  float contractFactor = 1.0f, statusFactor = 1.0f;
+  int intlRep = 1;
+  {
+    std::stringstream q;
+    q << "SELECT p.playervalue, p.contract_expiry, p.international_reputation"
+      << " FROM players p WHERE p.id=" << playerId << ";";
+    DatabaseResult *r = GetDB()->Query(q.str());
+    if (r && r->data.size() > 0) {
+      base       = atoll(TECell(r,0,0).c_str());
+      intlRep    = atoi(TECell(r,0,2).c_str());
+      std::string exp = TECell(r,0,1);
+      if (!exp.empty()) {
+        int yrs = std::max(0, atoi(exp.substr(0,4).c_str()) - 2026);
+        if (yrs >= 3)      contractFactor = 1.3f;
+        else if (yrs <= 1) contractFactor = 0.7f;
+      }
+    }
+    delete r;
+  }
+
+  // market status factor
+  {
+    std::stringstream q;
+    q << "SELECT status FROM player_market_status WHERE manager_id=" << managerId
+      << " AND player_id=" << playerId << ";";
+    DatabaseResult *r = GetDB()->Query(q.str());
+    if (r && r->data.size() > 0) {
+      std::string st = TECell(r,0,0);
+      if (st == "wonderkid")             statusFactor = 1.4f;
+      else if (st == "franchise_player") statusFactor = 1.8f;
+      else if (st == "expiring_soon")    statusFactor = 0.6f;
+    }
+    delete r;
+  }
+
+  // scarcity factor
+  float scarcityFactor = 1.0f;
+  {
+    std::stringstream q;
+    q << "SELECT role FROM players WHERE id=" << playerId << ";";
+    DatabaseResult *r = GetDB()->Query(q.str());
+    std::string grp;
+    if (r && r->data.size()>0) grp = RoleToGroup(TECell(r,0,0));
+    delete r;
+    if (!grp.empty()) {
+      std::stringstream sq;
+      sq << "SELECT scarcity_score FROM market_scarcity WHERE manager_id=" << managerId
+         << " AND position_group='" << grp << "';";
+      DatabaseResult *sr = GetDB()->Query(sq.str());
+      if (sr && sr->data.size()>0) {
+        int sc = atoi(TECell(sr,0,0).c_str());
+        if      (sc > 80) scarcityFactor = 1.5f;
+        else if (sc > 60) scarcityFactor = 1.3f;
+        else if (sc > 30) scarcityFactor = 1.15f;
+      }
+      delete sr;
+    }
+  }
+
+  // selling club selling_pressure
+  float sellerFactor = 1.0f;
+  {
+    std::stringstream q;
+    q << "SELECT selling_pressure FROM club_transfer_identity"
+      << " WHERE manager_id=" << managerId << " AND club_id=" << sellingClubId << ";";
+    DatabaseResult *r = GetDB()->Query(q.str());
+    if (r && r->data.size()>0) {
+      int sp = atoi(TECell(r,0,0).c_str());
+      sellerFactor = 1.0f - (float)sp / 333.0f; // max pressure → 0.7
+      sellerFactor = std::max(0.7f, sellerFactor);
+    }
+    delete r;
+  }
+
+  float buyerUrgency   = 1.0f + (needScore > 70 ? 0.3f : needScore > 50 ? 0.15f : 0.0f);
+  float deadlineFactor = 1.0f + (float)deadlinePressure / 200.0f; // up to 1.5x
+  float hypeFactor     = 1.0f + (float)std::max(0, agentPressure - 30) / 230.0f; // up to 1.3x
+
+  // previous rejected_offer adds 15%
+  float rejFactor = 1.0f;
+  {
+    std::stringstream q;
+    q << "SELECT COUNT(*) FROM club_player_relationship WHERE manager_id=" << managerId
+      << " AND club_id=" << buyingClubId << " AND player_id=" << playerId
+      << " AND relationship_type='rejected_offer';";
+    DatabaseResult *r = GetDB()->Query(q.str());
+    if (r && r->data.size()>0 && atoi(TECell(r,0,0).c_str())>0) rejFactor = 1.15f;
+    delete r;
+  }
+
+  long long val = (long long)(base
+    * contractFactor * scarcityFactor * sellerFactor
+    * buyerUrgency * deadlineFactor * hypeFactor
+    * statusFactor * rejFactor);
+  return std::max(50000LL, val);
+}
+
+static int CalculateAcceptanceScore(int managerId, int playerId,
+                                     int buyingClubId, int sellingClubId,
+                                     long long offeredWage, const std::string &promisedRole,
+                                     int agentPressure) {
+  // Load player traits
+  int ambition=50, loyalty=50, greed=50, ego=50, trophy=50, adapt=50;
+  {
+    std::stringstream q;
+    q << "SELECT ambition,loyalty,greed,ego,trophy_hunger,adaptability"
+      << " FROM player_traits WHERE manager_id=" << managerId
+      << " AND player_id=" << playerId << ";";
+    DatabaseResult *r = GetDB()->Query(q.str());
+    if (r && r->data.size()>0) {
+      ambition = atoi(TECell(r,0,0).c_str());
+      loyalty  = atoi(TECell(r,0,1).c_str());
+      greed    = atoi(TECell(r,0,2).c_str());
+      ego      = atoi(TECell(r,0,3).c_str());
+      trophy   = atoi(TECell(r,0,4).c_str());
+      adapt    = atoi(TECell(r,0,5).c_str());
+    }
+    delete r;
+  }
+
+  long long curWage = 0;
+  int age = 25;
+  {
+    std::stringstream q;
+    q << "SELECT weekly_wage, age FROM players WHERE id=" << playerId << ";";
+    DatabaseResult *r = GetDB()->Query(q.str());
+    if (r && r->data.size()>0) {
+      curWage = atoll(TECell(r,0,0).c_str());
+      age     = atoi(TECell(r,0,1).c_str());
+    }
+    delete r;
+  }
+
+  int buyingPower=50, sellingPower=50;
+  {
+    std::stringstream q;
+    q << "SELECT international_prestige*6+domestic_prestige*4 FROM teams WHERE id=" << buyingClubId << ";";
+    DatabaseResult *r = GetDB()->Query(q.str());
+    if (r && r->data.size()>0) buyingPower = std::min(100, atoi(TECell(r,0,0).c_str()));
+    delete r;
+    q.str("");
+    q << "SELECT international_prestige*6+domestic_prestige*4 FROM teams WHERE id=" << sellingClubId << ";";
+    r = GetDB()->Query(q.str());
+    if (r && r->data.size()>0) sellingPower = std::min(100, atoi(TECell(r,0,0).c_str()));
+    delete r;
+  }
+
+  // wage_fit
+  long long expected = (long long)((float)curWage * (1.0f + greed / 200.0f));
+  float wageFit = expected > 0
+    ? std::min(1.0f, (float)offeredWage / (float)expected) : 0.5f;
+
+  // role_fit
+  float roleFit = 0.5f;
+  if (promisedRole == "star_player") roleFit = ego > 50 ? 1.0f : 0.6f;
+  else if (promisedRole == "important") roleFit = 0.70f;
+  else if (promisedRole == "rotation")  roleFit = ego < 40 ? 0.4f : (ego > 65 ? 0.1f : 0.35f);
+  else if (promisedRole == "prospect")  roleFit = (age < 21 && ambition > 60) ? 0.5f : (ego > 50 ? 0.0f : 0.3f);
+
+  // prestige_fit
+  float prestigeFit = (buyingPower / 100.0f) * (0.5f + trophy / 200.0f);
+
+  // league_fit (simplified)
+  float leagueFit = 0.6f + adapt / 250.0f;
+
+  // playtime_fit
+  std::string role;
+  { std::stringstream q; q << "SELECT role FROM players WHERE id=" << playerId << ";";
+    DatabaseResult *r = GetDB()->Query(q.str());
+    if (r && r->data.size()>0) role = TECell(r,0,0); delete r; }
+  int samePos = 0;
+  if (!role.empty()) {
+    std::stringstream q;
+    q << "SELECT COUNT(*) FROM players WHERE team_id=" << buyingClubId
+      << " AND role='" << TESql(role) << "';";
+    DatabaseResult *r = GetDB()->Query(q.str());
+    if (r && r->data.size()>0) samePos = atoi(TECell(r,0,0).c_str());
+    delete r;
+  }
+  float playtimeFit = std::max(0.0f, 1.0f - samePos * 0.25f);
+
+  // ambition_pull
+  float ambitionPull = (ambition / 100.0f) * std::max(0, buyingPower - sellingPower) / 100.0f;
+
+  // loyalty_drag
+  float loyaltyDrag = loyalty / 100.0f;
+
+  float score = wageFit    * 20.0f
+              + roleFit    * 18.0f
+              + prestigeFit * 18.0f
+              + leagueFit  * 10.0f
+              + playtimeFit * 14.0f
+              + ambitionPull * 10.0f
+              - loyaltyDrag * 10.0f;
+
+  // agent pressure modifier
+  score += (float)(agentPressure - 50) * 0.10f;
+
+  // relationship modifiers
+  {
+    std::stringstream q;
+    q << "SELECT relationship_type FROM club_player_relationship"
+      << " WHERE manager_id=" << managerId << " AND club_id=" << buyingClubId
+      << " AND player_id=" << playerId << ";";
+    DatabaseResult *r = GetDB()->Query(q.str());
+    if (r) {
+      for (unsigned int i=0; i<r->data.size(); i++) {
+        std::string rt = TECell(r,i,0);
+        if (rt == "former_player")   score += 8.0f;
+        if (rt == "rejected_offer")  score -= 10.0f;
+        if (rt == "unhappy_at_club") score += 15.0f;
+      }
+      delete r;
+    }
+  }
+
+  return std::max(0, std::min(100, (int)score));
+}
+
 void ProcessDailyTransfers(int managerId, int userClubId,
                             const std::string &currentDate, int seasonYear) {}
