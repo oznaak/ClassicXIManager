@@ -26,6 +26,34 @@ static std::string SqlEscape(const std::string &in) {
   return out;
 }
 
+static bool TableHasColumn(const std::string &tableName, const std::string &columnName) {
+  std::stringstream q;
+  q << "PRAGMA table_info(" << tableName << ");";
+  DatabaseResult *info = GetDB()->Query(q.str());
+  bool found = false;
+  if (info) {
+    for (unsigned int i = 0; i < info->data.size(); i++) {
+      if (info->data.at(i).size() > 1 && info->data.at(i).at(1) == columnName) {
+        found = true;
+        break;
+      }
+    }
+  }
+  delete info;
+  return found;
+}
+
+static void AddColumnIfMissing(const std::string &tableName,
+                               const std::string &columnName,
+                               const std::string &columnDef) {
+  if (TableHasColumn(tableName, columnName)) return;
+
+  std::stringstream q;
+  q << "ALTER TABLE " << tableName << " ADD COLUMN " << columnDef << ";";
+  DatabaseResult *r = GetDB()->Query(q.str());
+  delete r;
+}
+
 // ---- Inbox helpers ---------------------------------------------------------
 
 
@@ -388,6 +416,16 @@ static void EnsureCareerTables() {
   ); delete GetDB()->Query("SELECT 1;");
 
   GetDB()->Query(
+    "CREATE TABLE IF NOT EXISTS player_save_state("
+    "manager_id INTEGER NOT NULL,"
+    "player_id  INTEGER NOT NULL,"
+    "team_id    INTEGER,"
+    "weekly_wage INTEGER,"
+    "contract_expiry TEXT,"
+    "PRIMARY KEY(manager_id, player_id));"
+  ); delete GetDB()->Query("SELECT 1;");
+
+  GetDB()->Query(
     "CREATE TABLE IF NOT EXISTS club_player_relationship("
     "id INTEGER PRIMARY KEY AUTOINCREMENT,"
     "manager_id INTEGER NOT NULL,"
@@ -435,8 +473,34 @@ static void EnsureCareerTables() {
     "acceptance_score  INTEGER DEFAULT 0,"
     "irrationality_driven INTEGER DEFAULT 0,"
     "tier              INTEGER DEFAULT 2,"
-    "counter_offer_count INTEGER DEFAULT 0);"
+    "counter_offer_count INTEGER DEFAULT 0,"
+    "seller_approved   INTEGER DEFAULT 0);"
   ); delete GetDB()->Query("SELECT 1;");
+  AddColumnIfMissing("transfer_negotiations", "seller_approved",
+                     "seller_approved INTEGER DEFAULT 0");
+
+  // Repair saves from the pre-overlay transfer implementation. Completed
+  // transfers used to mutate players.team_id globally; preserve each save's
+  // final club in player_save_state, then restore the shared base row to the
+  // first recorded seller so new saves start from default-like data again.
+  {
+    DatabaseResult *r = GetDB()->Query(
+      "INSERT OR REPLACE INTO player_save_state(manager_id,player_id,team_id,weekly_wage)"
+      " SELECT manager_id,player_id,buying_club_id,offered_wage"
+      " FROM transfer_negotiations WHERE state='completed';");
+    delete r;
+  }
+  {
+    DatabaseResult *r = GetDB()->Query(
+      "UPDATE players SET team_id=("
+      " SELECT tn.selling_club_id FROM transfer_negotiations tn"
+      " WHERE tn.player_id=players.id AND tn.state='completed'"
+      " ORDER BY tn.id ASC LIMIT 1)"
+      " WHERE EXISTS ("
+      " SELECT 1 FROM transfer_negotiations tn"
+      " WHERE tn.player_id=players.id AND tn.state='completed');");
+    delete r;
+  }
 
   GetDB()->Query(
     "CREATE TABLE IF NOT EXISTS negotiation_cooldowns("
@@ -471,21 +535,34 @@ static void EnsureCareerTables() {
     "resolved   INTEGER DEFAULT 0);"
   ); delete GetDB()->Query("SELECT 1;");
 
-  // Phase 3+4: new columns on existing tables (ALTER TABLE fails silently if column exists)
-  { DatabaseResult *r = GetDB()->Query("ALTER TABLE transfer_negotiations ADD COLUMN is_user_bid INTEGER DEFAULT 0;"); if (r) delete r; }
-  { DatabaseResult *r = GetDB()->Query("ALTER TABLE transfer_negotiations ADD COLUMN user_pending_action TEXT DEFAULT '';"); if (r) delete r; }
-  { DatabaseResult *r = GetDB()->Query("ALTER TABLE transfer_negotiations ADD COLUMN negotiation_momentum INTEGER DEFAULT 0;"); if (r) delete r; }
-  { DatabaseResult *r = GetDB()->Query("ALTER TABLE transfer_negotiations ADD COLUMN seller_patience_days INTEGER DEFAULT 7;"); if (r) delete r; }
-  { DatabaseResult *r = GetDB()->Query("ALTER TABLE transfer_negotiations ADD COLUMN player_patience_days INTEGER DEFAULT 5;"); if (r) delete r; }
+  // Phase 3+4 migrations. Guard every ALTER: duplicate columns are fatal in
+  // the DB wrapper, so migrations must be idempotent for existing saves.
+  AddColumnIfMissing("transfer_negotiations", "is_user_bid",
+                     "is_user_bid INTEGER DEFAULT 0");
+  AddColumnIfMissing("transfer_negotiations", "user_pending_action",
+                     "user_pending_action TEXT DEFAULT ''");
+  AddColumnIfMissing("transfer_negotiations", "negotiation_momentum",
+                     "negotiation_momentum INTEGER DEFAULT 0");
+  AddColumnIfMissing("transfer_negotiations", "seller_patience_days",
+                     "seller_patience_days INTEGER DEFAULT 7");
+  AddColumnIfMissing("transfer_negotiations", "player_patience_days",
+                     "player_patience_days INTEGER DEFAULT 5");
 
-  { DatabaseResult *r = GetDB()->Query("ALTER TABLE player_traits ADD COLUMN pref_domestic INTEGER DEFAULT 0;"); if (r) delete r; }
-  { DatabaseResult *r = GetDB()->Query("ALTER TABLE player_traits ADD COLUMN pref_prestige INTEGER DEFAULT 0;"); if (r) delete r; }
-  { DatabaseResult *r = GetDB()->Query("ALTER TABLE player_traits ADD COLUMN pref_wages INTEGER DEFAULT 0;"); if (r) delete r; }
-  { DatabaseResult *r = GetDB()->Query("ALTER TABLE player_traits ADD COLUMN pref_development INTEGER DEFAULT 0;"); if (r) delete r; }
-  { DatabaseResult *r = GetDB()->Query("ALTER TABLE player_traits ADD COLUMN pref_guaranteed_starts INTEGER DEFAULT 0;"); if (r) delete r; }
-  { DatabaseResult *r = GetDB()->Query("ALTER TABLE player_traits ADD COLUMN hates_rival_club_id INTEGER DEFAULT 0;"); if (r) delete r; }
+  AddColumnIfMissing("player_traits", "pref_domestic",
+                     "pref_domestic INTEGER DEFAULT 0");
+  AddColumnIfMissing("player_traits", "pref_prestige",
+                     "pref_prestige INTEGER DEFAULT 0");
+  AddColumnIfMissing("player_traits", "pref_wages",
+                     "pref_wages INTEGER DEFAULT 0");
+  AddColumnIfMissing("player_traits", "pref_development",
+                     "pref_development INTEGER DEFAULT 0");
+  AddColumnIfMissing("player_traits", "pref_guaranteed_starts",
+                     "pref_guaranteed_starts INTEGER DEFAULT 0");
+  AddColumnIfMissing("player_traits", "hates_rival_club_id",
+                     "hates_rival_club_id INTEGER DEFAULT 0");
 
-  { DatabaseResult *r = GetDB()->Query("ALTER TABLE club_transfer_identity ADD COLUMN succession_role TEXT DEFAULT '';"); if (r) delete r; }
+  AddColumnIfMissing("club_transfer_identity", "succession_role",
+                     "succession_role TEXT DEFAULT ''");
 
   GetDB()->Query(
     "CREATE TABLE IF NOT EXISTS loan_deals("

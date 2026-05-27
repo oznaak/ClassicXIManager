@@ -12,6 +12,15 @@ int         DaysToWindowEnd(const std::string &date);
 void InsertTransferNews(int managerId, const std::string &date,
                          const std::string &headline, const std::string &category,
                          int playerId, int fromClubId, int toClubId);
+void InsertInboxMessage(int managerId, const std::string &subject,
+                        const std::string &body, const std::string &category,
+                        const std::string &date);
+void InsertFinanceTransaction(int managerId, int clubId, const std::string &date,
+                              const std::string &category,
+                              const std::string &description, long long amount);
+void SetPlayerSaveState(int managerId, int playerId, int teamId,
+                        long long weeklyWage, const std::string &contractExpiry = "");
+void RemovePlayerScoutingRecords(int managerId, int playerId);
 void AddUnhappiness(int managerId, int playerId, const std::string &reason,
                      int severity, const std::string &date);
 

@@ -512,8 +512,9 @@ void TickUserNegotiations(int managerId, int userClubId,
       if (feeRatio >= 0.90 || sellingPressure > 60) {
         newState = "player_talks";
         newMomentum += 10;
-        InsertTransferNews(managerId, currentDate,
-          "Talks progressing over transfer bid", "rumour", n.player, n.seller, n.buyer);
+        InsertInboxMessage(managerId, "Talks progressing over bid",
+          "Your bid is under consideration. The selling club is open to discussing terms.",
+          "transfer", currentDate);
       } else if (feeRatio >= 0.60) {
         // Counter-offer — apply personality
         long long counterFee = ctxVal; // ask for full value by default
@@ -533,8 +534,9 @@ void TickUserNegotiations(int managerId, int userClubId,
              << ",counter_offer_count=" << (n.coCount+1)
              << " WHERE id=" << n.id << ";";
         UTExec(clfq.str());
-        InsertTransferNews(managerId, currentDate,
-          "Club responded with counter-offer for player", "rumour", n.player, n.seller, n.buyer);
+        InsertInboxMessage(managerId, "Counter-offer received",
+          "The selling club has responded with a counter-offer. Review it in your Transfers screen.",
+          "transfer", currentDate);
       } else {
         newState = "collapsed";
         collapseReason = "bid_rejected";
@@ -553,7 +555,7 @@ void TickUserNegotiations(int managerId, int userClubId,
 
       int score = CalculateAcceptanceScore(managerId, n.player, n.buyer,
                                             n.seller, (long long)atoll(n.offWage.c_str()),
-                                            n.role, 0);
+                                            n.role, 50);
 
       // Apply preference profile modifiers
       {
@@ -598,24 +600,26 @@ void TickUserNegotiations(int managerId, int userClubId,
       if (n.momentum > 50) score += 10;
       score = std::max(0, std::min(100, score));
 
-      if (score > 65) {
+      printf("[TRANSFER] player_talks score=%d nid=%d coCount=%d\n", score, n.id, n.coCount);
+      if (score > 50) {
         newState = "medical_pending";
         newMomentum += 8;
         { std::stringstream uq;
           uq << "UPDATE transfer_negotiations SET acceptance_score=" << score << " WHERE id=" << n.id << ";";
           UTExec(uq.str()); }
-        InsertTransferNews(managerId, currentDate,
-          "Player agrees personal terms — medical being arranged", "rumour",
-          n.player, n.seller, n.buyer);
-      } else if (score >= 40 && n.coCount < 2) {
+        InsertInboxMessage(managerId, "Player happy to join — medical arranged",
+          "The player has agreed personal terms. A medical is being arranged to complete the deal.",
+          "transfer", currentDate);
+      } else if (score >= 33 && n.coCount < 2) {
         // Player wants improved terms — wait for user to improve via UI
         // Don't collapse yet; increment counter so UI knows to show "improve" prompt
         { std::stringstream uq;
           uq << "UPDATE transfer_negotiations SET acceptance_score=" << score
              << ",counter_offer_count=" << (n.coCount+1) << " WHERE id=" << n.id << ";";
           UTExec(uq.str()); }
-        InsertTransferNews(managerId, currentDate,
-          "Player wants improved personal terms", "rumour", n.player, n.seller, n.buyer);
+        InsertInboxMessage(managerId, "Player requesting improved terms",
+          "The player is not satisfied with the current offer. Consider increasing the wage or improving the promised role.",
+          "transfer", currentDate);
       } else {
         newState = "collapsed";
         collapseReason = "player_rejected";
@@ -627,8 +631,9 @@ void TickUserNegotiations(int managerId, int userClubId,
       if (n.days >= n.sellerPat) {
         newState = "collapsed";
         collapseReason = "seller_withdrew";
-        InsertTransferNews(managerId, currentDate,
-          "Club withdrew from negotiations", "collapsed", n.player, n.seller, n.buyer);
+        InsertInboxMessage(managerId, "Selling club withdrew from negotiations",
+          "The seller has pulled out of talks after your bid did not meet their deadline.",
+          "transfer", currentDate);
       } else {
         // Check fast_closer personality deadline (day 3 = final offer warning)
         std::string personality = "patient";
@@ -638,8 +643,9 @@ void TickUserNegotiations(int managerId, int userClubId,
           if (pr && pr->data.size() > 0) personality = UTCell(pr,0,0);
           if (pr) delete pr; }
         if (personality == "fast_closer" && n.days == 3) {
-          InsertTransferNews(managerId, currentDate,
-            "Club issue final offer deadline", "rumour", n.player, n.seller, n.buyer);
+          InsertInboxMessage(managerId, "Seller issues final offer deadline",
+            "The selling club has set a deadline. Accept or improve the offer soon or talks will collapse.",
+            "transfer", currentDate);
         }
         newMomentum -= 8; // stalling
       }
@@ -651,18 +657,14 @@ void TickUserNegotiations(int managerId, int userClubId,
         newState = "collapsed";
         collapseReason = "medical_failed";
         newMomentum -= 50;
-        InsertTransferNews(managerId, currentDate,
-          "Transfer collapses after player fails medical", "collapsed",
-          n.player, n.seller, n.buyer);
+        InsertInboxMessage(managerId, "Deal collapsed — player failed medical",
+          "The transfer has fallen through after the player did not pass their medical examination.",
+          "transfer", currentDate);
       } else {
         // Complete the deal
         newState = "completed";
-        // Move player to buying club
-        { std::stringstream uq; uq << "UPDATE players SET team_id=" << n.buyer
-            << " WHERE id=" << n.player << ";"; UTExec(uq.str()); }
-        // Update weekly wage
-        { std::stringstream uq; uq << "UPDATE players SET weekly_wage=" << n.offWage
-            << " WHERE id=" << n.player << ";"; UTExec(uq.str()); }
+        SetPlayerSaveState(managerId, n.player, n.buyer, atoll(n.offWage.c_str()));
+        if (n.buyer == userClubId) RemovePlayerScoutingRecords(managerId, n.player);
         // Deduct fee from buyer budget
         { std::stringstream uq;
           uq << "UPDATE club_finances SET transfer_budget=MAX(0,transfer_budget-" << n.offFee << ")"
@@ -674,13 +676,28 @@ void TickUserNegotiations(int managerId, int userClubId,
              << " WHERE manager_id=" << managerId << " AND club_id=" << n.seller << ";";
           UTExec(uq.str()); }
 
-        std::string pname;
+        std::string pname, buyerName, sellerName;
         { std::stringstream pnq; pnq << "SELECT firstname||' '||lastname FROM players WHERE id=" << n.player << ";";
           DatabaseResult *pnr = GetDB()->Query(pnq.str().c_str());
           if (pnr && pnr->data.size() > 0) pname = UTCell(pnr,0,0);
           if (pnr) delete pnr; }
+        { std::stringstream tq; tq << "SELECT name FROM teams WHERE id=" << n.buyer << ";";
+          DatabaseResult *tr = GetDB()->Query(tq.str().c_str());
+          if (tr && tr->data.size() > 0) buyerName = UTCell(tr,0,0);
+          if (tr) delete tr; }
+        { std::stringstream tq; tq << "SELECT name FROM teams WHERE id=" << n.seller << ";";
+          DatabaseResult *tr = GetDB()->Query(tq.str().c_str());
+          if (tr && tr->data.size() > 0) sellerName = UTCell(tr,0,0);
+          if (tr) delete tr; }
+        InsertFinanceTransaction(managerId, n.buyer, currentDate, "transfer",
+          "Transfer fee paid: " + pname + " from " + sellerName, -atoll(n.offFee.c_str()));
+        InsertFinanceTransaction(managerId, n.seller, currentDate, "transfer",
+          "Transfer fee received: " + pname + " to " + buyerName, atoll(n.offFee.c_str()));
         InsertTransferNews(managerId, currentDate,
-          pname + " joins your club", "completed", n.player, n.seller, n.buyer);
+          pname + " joins " + buyerName + " from " + sellerName, "completed", n.player, n.seller, n.buyer);
+        InsertInboxMessage(managerId, pname + " transfer complete",
+          "The deal is done. " + pname + " has joined " + buyerName + ".",
+          "transfer", currentDate);
 
         // If user is buyer, handle squad harmony boost
         if (n.buyer == userClubId) {
@@ -747,8 +764,9 @@ void TickUserNegotiations(int managerId, int userClubId,
               DatabaseResult *cnr = GetDB()->Query(cnq.str().c_str());
               if (cnr && cnr->data.size() > 0) cname = UTCell(cnr,0,0);
               if (cnr) delete cnr; }
-            InsertTransferNews(managerId, currentDate,
-              cname + " enter race for transfer target", "rumour", n.player, n.seller, competitor);
+            InsertInboxMessage(managerId, cname + " enter race for your target",
+              cname + " are showing interest in the same player. You may need to improve your offer if they make a formal bid.",
+              "transfer", currentDate);
           }
         }
         if (hr) delete hr;
@@ -766,6 +784,35 @@ void TickUserNegotiations(int managerId, int userClubId,
     write_state:
     // Clamp momentum
     newMomentum = std::max(-100, std::min(100, newMomentum));
+
+    // Fire inbox for collapse cases not already individually handled
+    if (newState == "collapsed" && n.state != "collapsed") {
+      if (collapseReason == "bid_rejected") {
+        InsertInboxMessage(managerId, "Bid rejected — offer too low",
+          "The selling club rejected your bid as insufficient. Consider raising the offer or moving on.",
+          "transfer", currentDate);
+      } else if (collapseReason == "not_for_sale") {
+        InsertInboxMessage(managerId, "Player not for sale",
+          "The club has no intention of selling this player at this time.",
+          "transfer", currentDate);
+      } else if (collapseReason == "player_walked") {
+        InsertInboxMessage(managerId, "Player ended negotiations",
+          "The player chose not to wait any longer and has walked away from the deal.",
+          "transfer", currentDate);
+      } else if (collapseReason == "player_rejected") {
+        InsertInboxMessage(managerId, "Player rejected your terms",
+          "The player was not satisfied with your wage offer or the promised role.",
+          "transfer", currentDate);
+      } else if (collapseReason == "deal_collapsed") {
+        InsertInboxMessage(managerId, "Transfer deal collapsed",
+          "Negotiations broke down. The deal has fallen apart due to deteriorating momentum.",
+          "transfer", currentDate);
+      } else if (collapseReason == "user_rejected") {
+        InsertInboxMessage(managerId, "You rejected the counter-offer",
+          "You have rejected the selling club's counter-offer. The deal is now off.",
+          "transfer", currentDate);
+      }
+    }
 
     std::stringstream wq;
     wq << "UPDATE transfer_negotiations SET"
@@ -835,9 +882,9 @@ void InitiateUserBid(int managerId, int userClubId, int playerId, int sellingClu
     if (br && br->data.size() > 0) budget = atoll(UTCell(br,0,0).c_str());
     if (br) delete br; }
   if (offeredFee > budget) {
-    // Still allow but fire a warning news item
-    InsertTransferNews(managerId, currentDate, "Transfer bid exceeds available budget",
-                        "warning", playerId, userClubId, sellingClubId);
+    InsertInboxMessage(managerId, "Bid exceeds available budget",
+      "Your transfer offer exceeds the current transfer budget. The bid has been submitted but funds may need to be reviewed.",
+      "transfer", currentDate);
   }
 
   int sellerPat = 7;
@@ -865,8 +912,9 @@ void InitiateUserBid(int managerId, int userClubId, int playerId, int sellingClu
     DatabaseResult *pnr = GetDB()->Query(pnq.str().c_str());
     if (pnr && pnr->data.size() > 0) pname = UTCell(pnr,0,0);
     if (pnr) delete pnr; }
-  InsertTransferNews(managerId, currentDate, "Bid submitted for " + pname,
-                      "rumour", playerId, userClubId, sellingClubId);
+  InsertInboxMessage(managerId, "Bid submitted for " + pname,
+    "Your transfer bid has been sent to the selling club. Check My Bids for updates.",
+    "transfer", currentDate);
 }
 
 // ---- OfferLoan --------------------------------------------------------------
@@ -888,9 +936,12 @@ void OfferLoan(int managerId, int userClubId, int playerId, int receivingClubId,
      << buyBackFee << ",'" << buyBackExpiry << "'," << seasonYear << ",'active','" << currentDate << "');";
   UTExec(iq.str());
 
-  // Move player to receiving club temporarily
-  { std::stringstream uq; uq << "UPDATE players SET team_id=" << receivingClubId
-      << " WHERE id=" << playerId << ";"; UTExec(uq.str()); }
+  long long wage = 0;
+  { std::stringstream wq; wq << "SELECT weekly_wage FROM players WHERE id=" << playerId << ";";
+    DatabaseResult *wr = GetDB()->Query(wq.str().c_str());
+    if (wr && wr->data.size() > 0) wage = atoll(UTCell(wr,0,0).c_str());
+    if (wr) delete wr; }
+  SetPlayerSaveState(managerId, playerId, receivingClubId, wage);
 
   std::string pname;
   { std::stringstream pnq; pnq << "SELECT firstname||' '||lastname FROM players WHERE id=" << playerId << ";";
@@ -1011,8 +1062,15 @@ void ProcessLoanClauses(int managerId, const std::string &currentDate, int seaso
   for (auto &d : deals) {
     // Season end: expire loan
     if (!d.endDate.empty() && currentDate >= d.endDate) {
-      { std::stringstream uq; uq << "UPDATE players SET team_id=" << d.loanClub
-          << " WHERE id=" << d.playerId << ";"; UTExec(uq.str()); }
+      long long wage = 0;
+      { std::stringstream wq; wq << "SELECT COALESCE(pss.weekly_wage,p.weekly_wage)"
+          << " FROM players p LEFT JOIN player_save_state pss"
+          << " ON pss.manager_id=" << managerId << " AND pss.player_id=p.id"
+          << " WHERE p.id=" << d.playerId << ";";
+        DatabaseResult *wr = GetDB()->Query(wq.str().c_str());
+        if (wr && wr->data.size() > 0) wage = atoll(UTCell(wr,0,0).c_str());
+        if (wr) delete wr; }
+      SetPlayerSaveState(managerId, d.playerId, d.loanClub, wage);
       UTExec("UPDATE loan_deals SET status='expired' WHERE id=" + std::to_string(d.id) + ";");
       InsertTransferNews(managerId, currentDate, "Player returned from loan",
                           "completed", d.playerId, d.rcvClub, d.loanClub);
@@ -1029,9 +1087,9 @@ void ProcessLoanClauses(int managerId, const std::string &currentDate, int seaso
           if (vr && vr->data.size() > 0) curVal = atoll(UTCell(vr,0,0).c_str());
           if (vr) delete vr; }
         if (curVal >= (long long)(d.bbFee * 1.5)) {
-          InsertTransferNews(managerId, currentDate,
-            "Buy-back window closing soon — player's value has risen significantly",
-            "warning", d.playerId, d.loanClub, d.rcvClub);
+          InsertInboxMessage(managerId, "Buy-back window closing soon",
+            "A player's buy-back window is expiring and their value has risen significantly. Review your loan deals.",
+            "transfer", currentDate);
         }
       }
     }
@@ -1060,8 +1118,15 @@ void ProcessLoanClauses(int managerId, const std::string &currentDate, int seaso
                             "completed", d.playerId, d.loanClub, d.rcvClub);
       } else {
         // Option expires — return player
-        { std::stringstream uq; uq << "UPDATE players SET team_id=" << d.loanClub
-            << " WHERE id=" << d.playerId << ";"; UTExec(uq.str()); }
+        long long wage = 0;
+        { std::stringstream wq; wq << "SELECT COALESCE(pss.weekly_wage,p.weekly_wage)"
+            << " FROM players p LEFT JOIN player_save_state pss"
+            << " ON pss.manager_id=" << managerId << " AND pss.player_id=p.id"
+            << " WHERE p.id=" << d.playerId << ";";
+          DatabaseResult *wr = GetDB()->Query(wq.str().c_str());
+          if (wr && wr->data.size() > 0) wage = atoll(UTCell(wr,0,0).c_str());
+          if (wr) delete wr; }
+        SetPlayerSaveState(managerId, d.playerId, d.loanClub, wage);
         UTExec("UPDATE loan_deals SET status='expired' WHERE id=" + std::to_string(d.id) + ";");
       }
     }
@@ -1243,8 +1308,9 @@ void EvaluatePromiseFulfillment(int managerId, const std::string &currentDate, i
 
     if (violated) {
       AddUnhappiness(managerId, pid, "promise_broken", 20, currentDate);
-      InsertTransferNews(managerId, currentDate,
-        "Player unhappy with playing time", "warning", pid, 0, 0);
+      InsertInboxMessage(managerId, "Player unhappy with playing time",
+        "A player you promised a starting role to is not getting sufficient game time and is becoming unsettled.",
+        "squad", currentDate);
       // If severity > 80: auto transfer list
       { std::stringstream sq2; sq2 << "SELECT severity FROM player_unhappiness WHERE manager_id=" << managerId
           << " AND player_id=" << pid << " AND reason='promise_broken' AND resolved=0;";
@@ -1314,8 +1380,9 @@ void ProcessMediaPressure(int managerId, const std::string &currentDate) {
       uq << "UPDATE club_finances SET board_confidence=MAX(0,board_confidence-8)"
          << " WHERE manager_id=" << managerId << ";";
       UTExec(uq.str());
-      InsertTransferNews(managerId, currentDate,
-        "Manager under pressure after failed transfer negotiations", "warning", 0, 0, 0);
+      InsertInboxMessage(managerId, "Board concerned over failed negotiations",
+        "The board has noted your recent failed transfer dealings and is growing impatient.",
+        "board", currentDate);
     } else if (e.type == "player_public_push") {
       InsertTransferNews(managerId, currentDate,
         "Player pushing for transfer", "warning", 0, 0, 0);
@@ -1357,8 +1424,9 @@ void ProcessMediaPressure(int managerId, const std::string &currentDate) {
              << " VALUES(" << managerId << ",'board_demands_signing',1,'" << currentDate << "','"
              << AddDays(currentDate, daysLeft) << "');";
           UTExec(iq.str());
-          InsertTransferNews(managerId, currentDate,
-            "Board expects a signing before the window closes", "warning", 0, 0, 0);
+          InsertInboxMessage(managerId, "Board expects a signing",
+            "The board is monitoring the transfer window and expects at least one signing before it closes.",
+            "board", currentDate);
         }
       }
     }
@@ -1460,9 +1528,9 @@ void ProcessPoachingEscalation(int managerId, int userClubId,
       DatabaseResult *pnr = GetDB()->Query(pnq.str().c_str());
       if (pnr && pnr->data.size() > 0) pname = UTCell(pnr,0,0);
       if (pnr) delete pnr; }
-    InsertTransferNews(managerId, currentDate,
-      "Elite clubs showing interest in " + pname + " after impressive season",
-      "rumour", pid, userClubId, 0);
+    InsertInboxMessage(managerId, "Elite clubs circling " + pname,
+      pname + " has attracted serious interest from top clubs after an impressive season. Expect approaches.",
+      "transfer", currentDate);
   }
   delete tr;
 

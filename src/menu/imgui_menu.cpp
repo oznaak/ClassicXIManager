@@ -4,6 +4,8 @@
 
 #include "../main.hpp"
 #include <ctime>
+#include <thread>
+#include <atomic>
 #include "imgui.h"
 #include <SDL2/SDL_image.h>
 #ifdef __APPLE__
@@ -238,6 +240,60 @@ static const int kNationalityCount = 10;
 static const char *kGenders[] = { "Male", "Female" };
 static const int kGenderCount  = 2;
 
+// ---- Career seeding async state -----------------------------------------
+static std::atomic<bool> g_seedingActive{false};
+static std::atomic<bool> g_seedingDone{false};
+static int g_seedingManagerId = 0;
+
+static void DrawSeedingOverlay() {
+  ImGuiIO &io = ImGui::GetIO();
+  ImDrawList *fg = ImGui::GetForegroundDrawList();
+  fg->AddRectFilled(ImVec2(0,0), io.DisplaySize, IM_COL32(8,14,28,240));
+
+  const float kW = 460.0f, kH = 160.0f, kR = 12.0f;
+  ImVec2 c((io.DisplaySize.x - kW)*0.5f, (io.DisplaySize.y - kH)*0.5f);
+  ImVec2 e(c.x + kW, c.y + kH);
+  fg->AddRectFilled(c, e, IM_COL32(18,26,44,245), kR);
+  fg->AddRect(c, e, IM_COL32(80,140,220,180), kR, 0, 1.5f);
+
+  double t = ImGui::GetTime();
+  int dots = 1 + (int)(fmod(t * 1.5, 3.0));
+  std::string title = std::string("Building your career") + std::string(dots, '.');
+
+  static const char *kSteps[] = {
+    "Generating fixtures and standings...",
+    "Seeding player traits and club identities...",
+    "Analysing the transfer market...",
+    "Setting player preferences...",
+    "Finalising season events...",
+  };
+  int stepIdx = (int)(fmod(t * 0.7, 5.0));
+
+  ImFont *fT = g_ManagerFontTitle   ? g_ManagerFontTitle   : io.Fonts->Fonts[0];
+  ImFont *fS = g_ManagerFontRegular ? g_ManagerFontRegular : io.Fonts->Fonts[0];
+
+  ImVec2 tsz = fT->CalcTextSizeA(fT->FontSize, FLT_MAX, 0, title.c_str());
+  fg->AddText(fT, fT->FontSize, ImVec2(c.x+(kW-tsz.x)*0.5f, c.y+30.0f),
+              IM_COL32(237,242,246,255), title.c_str());
+
+  ImVec2 ssz = fS->CalcTextSizeA(fS->FontSize, FLT_MAX, 0, kSteps[stepIdx]);
+  fg->AddText(fS, fS->FontSize, ImVec2(c.x+(kW-ssz.x)*0.5f, c.y+82.0f),
+              IM_COL32(100,130,180,220), kSteps[stepIdx]);
+
+  // Progress bar (indeterminate, bouncing)
+  float barW = kW - 60.0f;
+  float barX = c.x + 30.0f;
+  float barY = c.y + 120.0f;
+  float barH = 6.0f;
+  fg->AddRectFilled(ImVec2(barX, barY), ImVec2(barX+barW, barY+barH),
+                    IM_COL32(30,45,70,255), 3.0f);
+  float pos = (float)fmod(t * 0.6, 1.0);
+  float segW = barW * 0.35f;
+  float segX = barX + pos * (barW - segW);
+  fg->AddRectFilled(ImVec2(segX, barY), ImVec2(segX+segW, barY+barH),
+                    IM_COL32(80,140,220,220), 3.0f);
+}
+
 static void PreCareerStartCareer() {
   int clubId = g_PreCareer.selectedClubId;
   if (clubId == 0) return;
@@ -266,11 +322,15 @@ static void PreCareerStartCareer() {
   time_t now = time(nullptr);
   struct tm *lt = localtime(&now);
   int currentYear = 1900 + lt->tm_year;
-  GenerateCareerSeason(managerId, currentYear);
-  GetMenuTask()->RequestManagerCareerPage(managerId);
 
-  g_PreCareer.Clear();
-  g_PreCareer.screen = PRECAREER_NONE;
+  // Run GenerateCareerSeason in background thread so UI can show loading overlay.
+  g_seedingManagerId = managerId;
+  g_seedingDone.store(false);
+  g_seedingActive.store(true);
+  std::thread([managerId, currentYear]() {
+    GenerateCareerSeason(managerId, currentYear);
+    g_seedingDone.store(true);
+  }).detach();
 }
 
 static void PreCareerLoadManager(int managerId) {
@@ -1756,6 +1816,19 @@ static void DrawSelectClubScreen(float winW, float winH) {
 // =========================================================================
 
 void RenderImGuiPreCareer() {
+  // While seeding runs on background thread, show animated overlay.
+  if (g_seedingActive.load()) {
+    if (g_seedingDone.load()) {
+      g_seedingActive.store(false);
+      g_seedingDone.store(false);
+      GetMenuTask()->RequestManagerCareerPage(g_seedingManagerId);
+      g_PreCareer.Clear();
+      g_PreCareer.screen = PRECAREER_NONE;
+    } else {
+      DrawSeedingOverlay();
+    }
+    return;
+  }
   if (!g_PreCareer.active || g_PreCareer.isTransitioning) return;
 
   ApplyPreCareerTheme();
