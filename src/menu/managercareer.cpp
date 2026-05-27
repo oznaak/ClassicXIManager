@@ -587,6 +587,44 @@ static void EnsureCareerTables() {
     "created_date           TEXT,"
     "end_date               TEXT);"
   ); delete GetDB()->Query("SELECT 1;");
+  AddColumnIfMissing("loan_deals", "initiating_club_id",
+                     "initiating_club_id INTEGER DEFAULT 0");
+  AddColumnIfMissing("loan_deals", "direction",
+                     "direction TEXT DEFAULT ''");
+  AddColumnIfMissing("loan_deals", "monthly_wage_parent_pct",
+                     "monthly_wage_parent_pct INTEGER DEFAULT 0");
+  AddColumnIfMissing("loan_deals", "monthly_wage_receiving_pct",
+                     "monthly_wage_receiving_pct INTEGER DEFAULT 100");
+  AddColumnIfMissing("loan_deals", "playing_time_promise",
+                     "playing_time_promise TEXT DEFAULT 'rotation'");
+  AddColumnIfMissing("loan_deals", "mandatory_buy_fee",
+                     "mandatory_buy_fee INTEGER DEFAULT 0");
+  AddColumnIfMissing("loan_deals", "mandatory_buy_trigger",
+                     "mandatory_buy_trigger TEXT DEFAULT ''");
+  AddColumnIfMissing("loan_deals", "mandatory_buy_appearances",
+                     "mandatory_buy_appearances INTEGER DEFAULT 0");
+  AddColumnIfMissing("loan_deals", "appearances_so_far",
+                     "appearances_so_far INTEGER DEFAULT 0");
+  AddColumnIfMissing("loan_deals", "user_pending_action",
+                     "user_pending_action TEXT DEFAULT ''");
+  AddColumnIfMissing("loan_deals", "collapse_reason",
+                     "collapse_reason TEXT DEFAULT ''");
+  AddColumnIfMissing("loan_deals", "last_drama_date",
+                     "last_drama_date TEXT DEFAULT ''");
+
+  GetDB()->Query(
+    "UPDATE loan_deals SET initiating_club_id=loaning_club_id"
+    " WHERE initiating_club_id=0 OR initiating_club_id IS NULL;"
+  ); delete GetDB()->Query("SELECT 1;");
+  GetDB()->Query(
+    "UPDATE loan_deals SET direction='loan_out'"
+    " WHERE direction='' OR direction IS NULL;"
+  ); delete GetDB()->Query("SELECT 1;");
+  GetDB()->Query(
+    "UPDATE loan_deals SET monthly_wage_receiving_pct=wage_split_pct,"
+    " monthly_wage_parent_pct=MAX(0,100-wage_split_pct)"
+    " WHERE monthly_wage_receiving_pct=100 AND monthly_wage_parent_pct=0;"
+  ); delete GetDB()->Query("SELECT 1;");
 
   GetDB()->Query(
     "CREATE TABLE IF NOT EXISTS player_appearances("
@@ -1584,6 +1622,7 @@ static void SimulateNonUserFixturesForDate(int managerId, int clubId, int season
     SimulateFixtureScore(managerId, fid, seasonYear, hTeam, aTeam,
                          &homeGoals, &awayGoals, &statsJson);
     CompleteScheduledFixture(managerId, fid, homeGoals, awayGoals, statsJson);
+    TrackPlayerAppearances(managerId, fid, seasonYear);
     simCount++;
   }
   delete r;

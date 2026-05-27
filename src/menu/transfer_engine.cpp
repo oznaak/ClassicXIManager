@@ -1830,8 +1830,12 @@ void ProcessDailyTransfers(int managerId, int userClubId,
   // Media pressure resolution and trigger checks
   ProcessMediaPressure(managerId, currentDate);
 
+  // AI/user loan market and loan-offer state machine
+  ProcessAILoanDecision(managerId, userClubId, currentDate, seasonYear);
+
   // Loan clause daily checks (recall, buy-back warnings, option deadlines)
   ProcessLoanClauses(managerId, currentDate, seasonYear);
+  EvaluatePromiseFulfillment(managerId, currentDate, seasonYear);
 
   if (!inWindow) return;
 
