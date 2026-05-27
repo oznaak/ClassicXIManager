@@ -44,7 +44,7 @@ void ProcessDailyTransfers(int managerId, int userClubId,
                             const std::string &currentDate, int seasonYear);
 
 // Called on the 1st of each month (inside ProcessDailyTransfers).
-void ProcessContractRenewals(int managerId, const std::string &currentDate);
+void ProcessContractRenewals(int managerId, int userClubId, const std::string &currentDate);
 
 // Called after every completed or collapsed deal.
 void TriggerTransferCascade(int managerId, int playerTeamId,
