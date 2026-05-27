@@ -441,6 +441,7 @@ static void EnsureCareerTables() {
     "player_id  INTEGER NOT NULL,"
     "status     TEXT NOT NULL,"
     "set_date   TEXT,"
+    "asking_price INTEGER DEFAULT 0,"
     "PRIMARY KEY(manager_id, player_id));"
   ); delete GetDB()->Query("SELECT 1;");
 
@@ -547,6 +548,9 @@ static void EnsureCareerTables() {
                      "seller_patience_days INTEGER DEFAULT 7");
   AddColumnIfMissing("transfer_negotiations", "player_patience_days",
                      "player_patience_days INTEGER DEFAULT 5");
+
+  AddColumnIfMissing("player_market_status", "asking_price",
+                     "asking_price INTEGER DEFAULT 0");
 
   AddColumnIfMissing("player_traits", "pref_domestic",
                      "pref_domestic INTEGER DEFAULT 0");

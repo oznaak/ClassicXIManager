@@ -29,6 +29,16 @@ static int UTRandInt(unsigned int seed, int lo, int hi) {
   return lo + (int)(seed % (unsigned int)(hi - lo + 1));
 }
 
+static int GetManagedClubId(int managerId) {
+  std::stringstream q;
+  q << "SELECT club_id FROM managers WHERE id=" << managerId << " LIMIT 1;";
+  DatabaseResult *r = GetDB()->Query(q.str().c_str());
+  int clubId = 0;
+  if (r && r->data.size() > 0) clubId = atoi(UTCell(r,0,0).c_str());
+  if (r) delete r;
+  return clubId;
+}
+
 // League-id → home nationality mapping for pref_domestic evaluation.
 static std::string LeagueNationality(int leagueId) {
   switch (leagueId) {
@@ -162,6 +172,8 @@ void SeedSpecialEvents(int managerId, int seasonYear, const std::string &current
   { std::stringstream q; q << "DELETE FROM transfer_special_events WHERE manager_id=" << managerId << ";";
     UTExec(q.str()); }
 
+  int userClubId = GetManagedClubId(managerId);
+
   int month = currentDate.size() >= 7 ? atoi(currentDate.substr(5,2).c_str()) : 7;
   // Summer window trigger dates: July 20-28
   std::string summerBase = std::to_string(seasonYear) + "-07-";
@@ -174,8 +186,11 @@ void SeedSpecialEvents(int managerId, int seasonYear, const std::string &current
       " WHERE p.international_reputation >= 4"
       " AND t.international_prestige <= 6"
       " ORDER BY p.international_reputation DESC, p.base_stat DESC LIMIT 5;");
-    DatabaseResult *br = GetDB()->Query(
-      "SELECT id FROM teams WHERE international_prestige >= 8 LIMIT 3;");
+    std::stringstream bq;
+    bq << "SELECT id FROM teams WHERE international_prestige >= 8";
+    if (userClubId > 0) bq << " AND id != " << userClubId;
+    bq << " LIMIT 3;";
+    DatabaseResult *br = GetDB()->Query(bq.str().c_str());
     if (pr && pr->data.size() > 0 && br && br->data.size() > 0) {
       int playerId = atoi(UTCell(pr,0,0).c_str());
       int buyerId  = atoi(UTCell(br,0,0).c_str());
@@ -200,13 +215,21 @@ void SeedSpecialEvents(int managerId, int seasonYear, const std::string &current
       "SELECT name FROM sqlite_master WHERE type='table' AND name='club_finances';");
     bool cfExists = (te && te->data.size() > 0);
     if (te) delete te;
-    DatabaseResult *cr = cfExists ? GetDB()->Query(
-      "SELECT cf.club_id, p.id as player_id"
-      " FROM club_finances cf"
-      " JOIN players p ON p.team_id = cf.club_id"
-      " WHERE cf.debt_level > cf.transfer_budget * 2.5"
-      " AND p.is_transfer_listed = 0"
-      " ORDER BY p.base_stat DESC LIMIT 1;") : nullptr;
+    DatabaseResult *cr = nullptr;
+    if (cfExists) {
+      std::stringstream cq;
+      cq << "SELECT cf.club_id, p.id as player_id"
+         << " FROM club_finances cf"
+         << " JOIN players p ON p.team_id = cf.club_id"
+         << " LEFT JOIN player_market_status pms"
+         << "   ON pms.manager_id=" << managerId
+         << "  AND pms.player_id=p.id"
+         << " WHERE cf.debt_level > cf.transfer_budget * 2.5"
+         << " AND COALESCE(pms.status,'normal') != 'transfer_listed'";
+      if (userClubId > 0) cq << " AND cf.club_id != " << userClubId;
+      cq << " ORDER BY p.base_stat DESC LIMIT 1;";
+      cr = GetDB()->Query(cq.str().c_str());
+    }
     if (cr && cr->data.size() > 0) {
       int clubId   = atoi(UTCell(cr,0,0).c_str());
       int playerId = atoi(UTCell(cr,0,1).c_str());
@@ -247,7 +270,8 @@ void SeedSpecialEvents(int managerId, int seasonYear, const std::string &current
 
 // ---- ProcessSpecialEvents ---------------------------------------------------
 
-void ProcessSpecialEvents(int managerId, const std::string &currentDate, int seasonYear) {
+void ProcessSpecialEvents(int managerId, int userClubId,
+                          const std::string &currentDate, int seasonYear) {
   std::stringstream sq;
   sq << "SELECT id, event_type, player_id, club_id"
      << " FROM transfer_special_events"
@@ -286,6 +310,7 @@ void ProcessSpecialEvents(int managerId, const std::string &currentDate, int sea
         if (pr) delete pr;
       }
       if (sellerClubId == 0 || ev.clubId == sellerClubId) { goto mark_fired; }
+      if (ev.clubId == userClubId) { goto mark_fired; }
 
       // Inject forced negotiation with extreme values
       {
@@ -323,6 +348,7 @@ void ProcessSpecialEvents(int managerId, const std::string &currentDate, int sea
       }
 
     } else if (ev.type == "collapse_sale") {
+      if (ev.clubId == userClubId) { goto mark_fired; }
       // Force-list the player at 70% value
       {
         std::stringstream pq;
@@ -333,8 +359,9 @@ void ProcessSpecialEvents(int managerId, const std::string &currentDate, int sea
         if (pr) delete pr;
         long long saleVal = (long long)(pval * 0.70);
         std::stringstream uq;
-        uq << "UPDATE players SET is_transfer_listed=1, playervalue=" << saleVal
-           << " WHERE id=" << ev.playerId << ";";
+        uq << "INSERT OR REPLACE INTO player_market_status(manager_id,player_id,status,set_date,asking_price)"
+           << " VALUES(" << managerId << "," << ev.playerId << ",'transfer_listed','"
+           << currentDate << "'," << saleVal << ");";
         UTExec(uq.str());
         // Bump seller's selling_pressure
         std::stringstream usq;
@@ -357,13 +384,28 @@ void ProcessSpecialEvents(int managerId, const std::string &currentDate, int sea
       }
 
     } else if (ev.type == "wonderkid_explosion") {
-      // Raise rep and value
+      // Raise rep globally, but keep this save's valuation hype in the
+      // manager-scoped market table so separate careers do not inherit it.
       {
+        long long newValue = 0;
+        {
+          std::stringstream vq;
+          vq << "SELECT CAST(playervalue * 1.4 AS INTEGER) FROM players WHERE id=" << ev.playerId << ";";
+          DatabaseResult *vr = GetDB()->Query(vq.str().c_str());
+          if (vr && vr->data.size() > 0) newValue = atoll(UTCell(vr,0,0).c_str());
+          if (vr) delete vr;
+        }
         std::stringstream uq;
         uq << "UPDATE players SET"
-           << " international_reputation = MIN(5, international_reputation+1),"
-           << " playervalue = CAST(playervalue * 1.4 AS INTEGER)"
+           << " international_reputation = MIN(5, international_reputation+1)"
            << " WHERE id=" << ev.playerId << ";";
+        UTExec(uq.str());
+        uq.str("");
+        uq << "INSERT INTO player_market_status(manager_id,player_id,status,set_date,asking_price)"
+           << " VALUES(" << managerId << "," << ev.playerId << ",'wonderkid','"
+           << currentDate << "'," << newValue << ")"
+           << " ON CONFLICT(manager_id,player_id) DO UPDATE SET"
+           << " status='wonderkid',set_date=excluded.set_date,asking_price=excluded.asking_price;";
         UTExec(uq.str());
         // Bump knowledge for all clubs that know this player
         std::stringstream kq;
@@ -833,13 +875,63 @@ void TickUserNegotiations(int managerId, int userClubId,
 
 void RespondToOffer(int managerId, int negotiationId, const std::string &action,
                      int counterFee, int counterWage) {
+  int isUserBid = 1;
+  int buyerId = 0;
+  int sellerId = 0;
+  int playerId = 0;
+  std::string currentDate;
+  {
+    std::stringstream q;
+    q << "SELECT is_user_bid,buying_club_id,selling_club_id,player_id"
+      << " FROM transfer_negotiations"
+      << " WHERE id=" << negotiationId << " AND manager_id=" << managerId << " LIMIT 1;";
+    DatabaseResult *r = GetDB()->Query(q.str().c_str());
+    if (r && r->data.size() > 0) {
+      isUserBid = atoi(UTCell(r,0,0).c_str());
+      buyerId   = atoi(UTCell(r,0,1).c_str());
+      sellerId  = atoi(UTCell(r,0,2).c_str());
+      playerId  = atoi(UTCell(r,0,3).c_str());
+    }
+    if (r) delete r;
+  }
+  {
+    std::stringstream dq;
+    dq << "SELECT current_date FROM managers WHERE id=" << managerId << " LIMIT 1;";
+    DatabaseResult *dr = GetDB()->Query(dq.str().c_str());
+    if (dr && dr->data.size() > 0) currentDate = UTCell(dr,0,0);
+    if (dr) delete dr;
+  }
+
+  if (!isUserBid) {
+    if (action == "reject") {
+      std::stringstream uq;
+      uq << "UPDATE transfer_negotiations SET state='collapsed',"
+         << "collapse_reason='user_rejected',days_in_state=0"
+         << " WHERE id=" << negotiationId << " AND manager_id=" << managerId << ";";
+      UTExec(uq.str());
+      InsertTransferNews(managerId, currentDate, "Incoming transfer offer rejected",
+                         "incoming_rejected", playerId, sellerId, buyerId);
+      return;
+    }
+
+    if (action == "counter" && counterFee > 0) {
+      std::stringstream uq;
+      uq << "UPDATE transfer_negotiations SET offered_fee=" << counterFee
+         << ",state='negotiating',seller_approved=1,days_in_state=0,"
+         << "counter_offer_count=counter_offer_count+1"
+         << " WHERE id=" << negotiationId << " AND manager_id=" << managerId << ";";
+      UTExec(uq.str());
+      return;
+    }
+  }
+
   if (action == "counter" && counterFee > 0) {
     // User sends a counter: update the offered_fee and clear counter state back to negotiating
     std::stringstream uq;
     uq << "UPDATE transfer_negotiations SET"
-       << " offered_fee=" << counterFee
-       << ",offered_wage=" << counterWage
-       << ",state='negotiating'"
+       << " offered_fee=" << counterFee;
+    if (counterWage > 0) uq << ",offered_wage=" << counterWage;
+    uq << ",state='negotiating'"
        << ",user_pending_action=''"
        << ",days_in_state=0"
        << " WHERE id=" << negotiationId << " AND manager_id=" << managerId << ";";
@@ -1316,7 +1408,10 @@ void EvaluatePromiseFulfillment(int managerId, const std::string &currentDate, i
           << " AND player_id=" << pid << " AND reason='promise_broken' AND resolved=0;";
         DatabaseResult *sr = GetDB()->Query(sq2.str().c_str());
         if (sr && sr->data.size() > 0 && atoi(UTCell(sr,0,0).c_str()) > 80) {
-          std::stringstream tq; tq << "UPDATE players SET is_transfer_listed=1 WHERE id=" << pid << ";";
+          std::stringstream tq;
+          tq << "INSERT OR REPLACE INTO player_market_status(manager_id,player_id,status,set_date,asking_price)"
+             << " VALUES(" << managerId << "," << pid << ",'transfer_listed','"
+             << currentDate << "',0);";
           UTExec(tq.str());
         }
         if (sr) delete sr; }

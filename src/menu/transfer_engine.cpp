@@ -63,8 +63,11 @@ std::string AddDays(const std::string &date, int n) {
 bool InTransferWindow(const std::string &date) {
   if (date.size() < 10) return false;
   int m  = atoi(date.substr(5,2).c_str());
-  // Summer: Jul 1 – Aug 31
+  int dy = atoi(date.substr(8,2).c_str());
+  // Summer: Jul 1 through Sep 1 deadline day
   if (m == 7 || m == 8) return true;
+  // Deadline day spillover: Sep 1
+  if (m == 9 && dy == 1) return true;
   // Winter: Jan 1 – Jan 31
   if (m == 1) return true;
   return false;
@@ -77,6 +80,7 @@ int DaysToWindowEnd(const std::string &date) {
   int dy = atoi(date.substr(8,2).c_str());
   if (m == 7) { return (31 - dy) + 31; } // days left in Jul + all Aug
   if (m == 8) { return 31 - dy; }
+  if (m == 9 && dy == 1) { return 0; }
   if (m == 1) { return 31 - dy; }
   return 0;
 }
@@ -360,7 +364,9 @@ void ProcessContractRenewals(int managerId, const std::string &currentDate) {
 
     if (resale > 60 && within6Mo) {
       std::stringstream lq;
-      lq << "UPDATE players SET is_transfer_listed=1 WHERE id=" << pid << ";";
+      lq << "INSERT OR REPLACE INTO player_market_status(manager_id,player_id,status,set_date,asking_price)"
+         << " VALUES(" << managerId << "," << pid << ",'transfer_listed','"
+         << currentDate << "',0);";
       DatabaseResult *lr = GetDB()->Query(lq.str()); delete lr;
       InsertTransferNews(managerId, currentDate, "Player made available for transfer",
                          "player_listed", pid, clubId, 0);
@@ -561,7 +567,7 @@ static void SeedPlayerMarketStatus(int managerId, unsigned int careerSeed,
                                     const std::string &currentDate) {
   DatabaseResult *pr = GetDB()->Query(
     "SELECT p.id, p.age, p.sofifaPotential, p.international_reputation,"
-    " p.contract_expiry, p.is_transfer_listed, p.base_stat,"
+    " p.contract_expiry, p.base_stat,"
     " t.international_prestige, t.domestic_prestige"
     " FROM players p JOIN teams t ON t.id = p.team_id;");
   if (!pr) return;
@@ -572,17 +578,14 @@ static void SeedPlayerMarketStatus(int managerId, unsigned int careerSeed,
     int   pot      = atoi(TECell(pr, i, 2).c_str());
     int   intlRep  = atoi(TECell(pr, i, 3).c_str());
     std::string expiry = TECell(pr, i, 4);
-    int   listed   = atoi(TECell(pr, i, 5).c_str());
-    float bstat    = atof(TECell(pr, i, 6).c_str());
+    float bstat    = atof(TECell(pr, i, 5).c_str());
 
     std::string status = "normal";
 
-    // transfer_listed
-    if (listed) { status = "transfer_listed"; }
     // wonderkid: age <= 21, potential >= 85, rep >= 3
-    else if (age <= 21 && pot >= 85 && intlRep >= 3) { status = "wonderkid"; }
+    if (age <= 21 && pot >= 85 && intlRep >= 3) { status = "wonderkid"; }
     // franchise_player: team's identity marker (high prestige + high stat + old enough)
-    else if (intlRep >= 4 && bstat >= 80.0f && age >= 24) { status = "franchise_player"; }
+    else if (intlRep >= 4 && bstat >= 0.80f && age >= 24) { status = "franchise_player"; }
     // expiring_soon: contract within 6 months
     else if (!expiry.empty() && expiry <= AddDays(currentDate, 180)) {
       status = "expiring_soon";
@@ -591,8 +594,8 @@ static void SeedPlayerMarketStatus(int managerId, unsigned int careerSeed,
     if (status == "normal") continue; // don't store boring rows
 
     std::stringstream iq;
-    iq << "INSERT OR REPLACE INTO player_market_status(manager_id,player_id,status,set_date)"
-       << " VALUES(" << managerId << "," << pid << ",'" << status << "','" << currentDate << "');";
+    iq << "INSERT OR REPLACE INTO player_market_status(manager_id,player_id,status,set_date,asking_price)"
+       << " VALUES(" << managerId << "," << pid << ",'" << status << "','" << currentDate << "',0);";
     DatabaseResult *ir = GetDB()->Query(iq.str());
     delete ir;
   }
@@ -638,8 +641,12 @@ long long CalculateContextualValue(int managerId, int playerId,
   int intlRep = 1;
   {
     std::stringstream q;
-    q << "SELECT p.playervalue, p.contract_expiry, p.international_reputation"
-      << " FROM players p WHERE p.id=" << playerId << ";";
+    q << "SELECT COALESCE(NULLIF(pms.asking_price,0), p.playervalue),"
+      << " p.contract_expiry, p.international_reputation"
+      << " FROM players p"
+      << " LEFT JOIN player_market_status pms"
+      << "   ON pms.manager_id=" << managerId << " AND pms.player_id=p.id"
+      << " WHERE p.id=" << playerId << ";";
     DatabaseResult *r = GetDB()->Query(q.str());
     if (r && r->data.size() > 0) {
       base       = atoll(TECell(r,0,0).c_str());
@@ -662,9 +669,11 @@ long long CalculateContextualValue(int managerId, int playerId,
     DatabaseResult *r = GetDB()->Query(q.str());
     if (r && r->data.size() > 0) {
       std::string st = TECell(r,0,0);
-      if (st == "wonderkid")             statusFactor = 1.4f;
-      else if (st == "franchise_player") statusFactor = 1.8f;
-      else if (st == "expiring_soon")    statusFactor = 0.6f;
+      if (st == "wonderkid")                  statusFactor = 1.4f;
+      else if (st == "franchise_player")      statusFactor = 1.8f;
+      else if (st == "transfer_listed")       statusFactor = 0.95f;
+      else if (st == "surplus_to_requirements") statusFactor = 0.75f;
+      else if (st == "expiring_soon")         statusFactor = 0.6f;
     }
     delete r;
   }
@@ -705,6 +714,14 @@ long long CalculateContextualValue(int managerId, int playerId,
       sellerFactor = 1.0f - (float)sp / 333.0f; // max pressure → 0.7
       sellerFactor = std::max(0.7f, sellerFactor);
     }
+    delete r;
+  }
+  {
+    std::stringstream q;
+    q << "SELECT club_id FROM managers WHERE id=" << managerId << " LIMIT 1;";
+    DatabaseResult *r = GetDB()->Query(q.str());
+    if (r && r->data.size() > 0 && atoi(TECell(r,0,0).c_str()) == sellingClubId)
+      sellerFactor = std::max(0.90f, sellerFactor);
     delete r;
   }
 
@@ -880,6 +897,8 @@ static void AttemptInitiateNegotiations(int managerId, int clubId,
                                          const std::map<std::string,int> &needs,
                                          int deadlinePressure,
                                          unsigned int rng) {
+  if (clubId == userClubId) return;
+
   int aggression=50, irrat=25, agePref=0;
   int youthFocus=40, domesticBias=40, prestige=40, wageWill=50;
   int deadlinePanic=30;
@@ -927,10 +946,14 @@ static void AttemptInitiateNegotiations(int managerId, int clubId,
 
   // Irrationality roll: may override need entirely
   bool irrational = (int)(rng % 100) < irrat;
+  int daysLeft = DaysToWindowEnd(currentDate);
+  int marketChance = 15 + (daysLeft <= 21 ? 10 : 0) + (daysLeft <= 14 ? 10 : 0);
+  bool opportunisticMarket = !irrational && ((int)((rng >> 16) % 100) < marketChance);
   int effectiveNeed = irrational ? 100 : bestNeed;
 
   // Deadline panic boost
   if (deadlinePressure > 80 && deadlinePanic > 50) effectiveNeed += 30;
+  if (opportunisticMarket && effectiveNeed < 65) effectiveNeed = 45;
 
   if (effectiveNeed < 40) return;
 
@@ -950,8 +973,12 @@ static void AttemptInitiateNegotiations(int managerId, int clubId,
     {nullptr, nullptr}
   };
   std::string roleIn;
-  for (int i=0; kGroupRoles[i].group; i++) {
-    if (bestGroup == kGroupRoles[i].group) { roleIn = kGroupRoles[i].roles; break; }
+  if (opportunisticMarket && bestNeed < 65) {
+    roleIn = "'GK','CB','LB','RB','LWB','RWB','CDM','CM','CAM','LM','RM','LW','RW','CF','ST'";
+  } else {
+    for (int i=0; kGroupRoles[i].group; i++) {
+      if (bestGroup == kGroupRoles[i].group) { roleIn = kGroupRoles[i].roles; break; }
+    }
   }
   if (roleIn.empty()) return;
 
@@ -962,24 +989,32 @@ static void AttemptInitiateNegotiations(int managerId, int clubId,
     else if (agePref > 20) ageClause = " AND p.age >= 27";
   }
 
-  // Tier quality thresholds
-  float qualMin = (tier == 1) ? 75.0f : (tier == 2) ? 60.0f : 40.0f;
+  // base_stat is stored as 0.0-1.0 in the current database.
+  float qualMin = (tier == 1) ? 0.75f : (tier == 2) ? 0.60f : 0.40f;
 
-  // Select target from knowledge pool
+  // Select target from knowledge pool. Transfer-listed and expiring players are
+  // public market targets, so they do not require pre-existing scout knowledge.
   std::stringstream tq;
   tq << "SELECT p.id, p.base_stat, COALESCE(pss.weekly_wage,p.weekly_wage), t.id as cur_club,"
-     << " p.international_reputation"
+     << " p.international_reputation, COALESCE(cpk.knowledge,0),"
+     << " COALESCE(pms.status,'normal')"
      << " FROM players p"
      << " LEFT JOIN player_save_state pss"
      << "   ON pss.manager_id=" << managerId << " AND pss.player_id=p.id"
      << " JOIN teams t ON t.id=COALESCE(pss.team_id,p.team_id)"
-     << " JOIN club_player_knowledge cpk"
+     << " LEFT JOIN club_player_knowledge cpk"
      << "   ON cpk.player_id=p.id AND cpk.manager_id=" << managerId
      << "   AND cpk.club_id=" << clubId
+     << " LEFT JOIN player_market_status pms"
+     << "   ON pms.player_id=p.id AND pms.manager_id=" << managerId
      << " WHERE p.role IN (" << roleIn << ")"
      << " AND t.id != " << clubId
      << " AND p.base_stat >= " << qualMin
-     << " AND cpk.knowledge >= 30"
+     << " AND (COALESCE(cpk.knowledge,0) >= 25"
+     << "      OR pms.status IN ('transfer_listed','surplus_to_requirements','expiring_soon'))"
+     << (opportunisticMarket && bestNeed < 65
+          ? " AND pms.status IN ('transfer_listed','surplus_to_requirements','expiring_soon')"
+          : "")
      << ageClause
      << " AND NOT EXISTS ("
      <<   "SELECT 1 FROM negotiation_cooldowns nc"
@@ -995,7 +1030,13 @@ static void AttemptInitiateNegotiations(int managerId, int clubId,
      <<   " AND tn.player_id=p.id"
      <<   " AND tn.state NOT IN ('completed','collapsed')"
      << ")"
-     << " ORDER BY cpk.knowledge*p.base_stat DESC LIMIT 20;";
+     << " ORDER BY"
+     << " (CASE WHEN pms.status='transfer_listed' THEN 80"
+     << "         WHEN pms.status='surplus_to_requirements' THEN 65"
+     << "         WHEN pms.status='expiring_soon' THEN 45"
+     << "         ELSE 0 END)"
+     << " + COALESCE(cpk.knowledge,0) DESC,"
+     << " p.base_stat DESC LIMIT 25;";
   DatabaseResult *tr = GetDB()->Query(tq.str());
   if (!tr || tr->data.size() == 0) { delete tr; return; }
 
@@ -1007,7 +1048,12 @@ static void AttemptInitiateNegotiations(int managerId, int clubId,
 
   long long ctxVal = CalculateContextualValue(managerId, targetId, sellingClub,
                                                clubId, effectiveNeed, deadlinePressure, 0);
-  long long offerFee  = (long long)(ctxVal * 0.80f);
+  float openingPct = 0.82f;
+  if (sellingClub == userClubId) openingPct = 0.92f;
+  if (opportunisticMarket) openingPct += 0.04f;
+  if (irrational || deadlinePressure > 80) openingPct += 0.06f;
+  openingPct = std::min(1.10f, openingPct);
+  long long offerFee  = (long long)(ctxVal * openingPct);
   long long offerWage = (long long)(wage * (1.0f + wageWill / 200.0f));
 
   int targetEgo = 50;
@@ -1054,6 +1100,10 @@ static void AttemptInitiateNegotiations(int managerId, int clubId,
       cName + " have submitted a bid of " + feeStr + " for " + pName
       + ". Review the offer in Transfers → Incoming Bids.",
       "transfer", currentDate);
+    // If the career currently loaded belongs to this manager, reload inbox immediately
+    if (g_CareerHub.managerId == managerId) {
+      g_CareerHub.LoadFromDB(managerId, g_CareerHub.clubId);
+    }
   } else {
     InsertTransferNews(managerId, currentDate,
       pName + " linked with move to " + cName,
@@ -1074,6 +1124,7 @@ static void AdvanceNegotiations(int managerId, int userClubId,
      << " FROM transfer_negotiations"
      << " WHERE manager_id=" << managerId
      << " AND is_user_bid=0"
+     << " AND buying_club_id!=" << userClubId
      << " AND NOT (selling_club_id=" << userClubId << " AND seller_approved=0)"
      << " AND state NOT IN ('completed','collapsed');";
   DatabaseResult *nr = GetDB()->Query(nq.str());
@@ -1170,6 +1221,7 @@ static void AdvanceNegotiations(int managerId, int userClubId,
            << " WHERE manager_id=" << managerId << " AND player_id=" << n.player
            << " AND knowledge >= 60 AND club_id != " << n.buyer
            << " AND club_id != " << n.seller
+           << " AND club_id != " << userClubId
            << " ORDER BY RANDOM() LIMIT 1;";
         DatabaseResult *cr = GetDB()->Query(cq.str());
         if (cr && cr->data.size()>0) {
@@ -1388,7 +1440,7 @@ static void CalculateMarketScarcity(int managerId, const std::string &currentDat
       << " LEFT JOIN player_market_status pms ON pms.player_id=p.id AND pms.manager_id=" << managerId
       << " WHERE p.role IN (" << kGroupRoles[gi].roles << ")"
       << " AND p.base_stat >= " << avg
-      << " AND (p.is_transfer_listed=1 OR pms.status IN ('expiring_soon','surplus_to_requirements','transfer_listed'));";
+      << " AND pms.status IN ('expiring_soon','surplus_to_requirements','transfer_listed');";
     DatabaseResult *r = GetDB()->Query(q.str());
     int supply = 0;
     if (r && r->data.size()>0) supply = atoi(TECell(r,0,0).c_str());
@@ -1399,6 +1451,71 @@ static void CalculateMarketScarcity(int managerId, const std::string &currentDat
        << " VALUES(" << managerId << ",'" << grp << "'," << scarcity << ",'" << currentDate << "');";
     DatabaseResult *ur = GetDB()->Query(uq.str()); delete ur;
   }
+}
+
+static void BlockUnauthorizedUserClubBuyers(int managerId, int userClubId) {
+  if (userClubId <= 0) return;
+
+  std::stringstream rq;
+  rq << "SELECT id,player_id,selling_club_id,offered_fee"
+     << " FROM transfer_negotiations"
+     << " WHERE manager_id=" << managerId
+     << " AND buying_club_id=" << userClubId
+     << " AND is_user_bid=0"
+     << " AND state='completed';";
+  DatabaseResult *rr = GetDB()->Query(rq.str());
+  if (rr) {
+    for (unsigned int i = 0; i < rr->data.size(); i++) {
+      int nid = atoi(TECell(rr,i,0).c_str());
+      int playerId = atoi(TECell(rr,i,1).c_str());
+      int sellerId = atoi(TECell(rr,i,2).c_str());
+      long long fee = atoll(TECell(rr,i,3).c_str());
+
+      long long originalWage = 0;
+      std::string originalExpiry;
+      if (playerId > 0) {
+        std::stringstream wq;
+        wq << "SELECT weekly_wage, contract_expiry FROM players WHERE id=" << playerId << ";";
+        DatabaseResult *wr = GetDB()->Query(wq.str());
+        if (wr && wr->data.size() > 0) {
+          originalWage = atoll(TECell(wr,0,0).c_str());
+          originalExpiry = TECell(wr,0,1);
+        }
+        delete wr;
+      }
+
+      if (playerId > 0 && sellerId > 0) {
+        SetPlayerSaveState(managerId, playerId, sellerId, originalWage, originalExpiry);
+      }
+      if (fee > 0) {
+        std::stringstream fq;
+        fq << "UPDATE club_finances SET transfer_budget=transfer_budget+" << fee
+           << " WHERE manager_id=" << managerId << " AND club_id=" << userClubId << ";";
+        DatabaseResult *fr = GetDB()->Query(fq.str()); delete fr;
+
+        std::stringstream sq;
+        sq << "UPDATE club_finances SET cash_balance=MAX(0,cash_balance-" << fee << ")"
+           << " WHERE manager_id=" << managerId << " AND club_id=" << sellerId << ";";
+        DatabaseResult *sr = GetDB()->Query(sq.str()); delete sr;
+      }
+
+      std::stringstream uq;
+      uq << "UPDATE transfer_negotiations SET state='collapsed',"
+         << "collapse_reason='user_club_auto_buyer_blocked'"
+         << " WHERE id=" << nid << ";";
+      DatabaseResult *ur = GetDB()->Query(uq.str()); delete ur;
+    }
+    delete rr;
+  }
+
+  std::stringstream bq;
+  bq << "UPDATE transfer_negotiations SET state='collapsed',"
+     << "collapse_reason='user_club_auto_buyer_blocked'"
+     << " WHERE manager_id=" << managerId
+     << " AND buying_club_id=" << userClubId
+     << " AND is_user_bid=0"
+     << " AND state NOT IN ('completed','collapsed');";
+  DatabaseResult *br = GetDB()->Query(bq.str()); delete br;
 }
 
 void ProcessDailyTransfers(int managerId, int userClubId,
@@ -1422,6 +1539,10 @@ void ProcessDailyTransfers(int managerId, int userClubId,
   // Contract renewals (monthly)
   ProcessContractRenewals(managerId, currentDate);
 
+  // The managed club must never act as an AI buyer. This also repairs saves
+  // where older transfer logic already created or completed such a deal.
+  BlockUnauthorizedUserClubBuyers(managerId, userClubId);
+
   // Deadline day chaos scaling (final 48h of window)
   if (inWindow && daysLeft <= 2) {
     // Boost deadline_panic for all clubs by 40 (capped at 100)
@@ -1432,7 +1553,8 @@ void ProcessDailyTransfers(int managerId, int userClubId,
     // Revive stalled negotiations: 70% chance to re-enter negotiating
     std::stringstream revq;
     revq << "SELECT id FROM transfer_negotiations WHERE manager_id=" << managerId
-         << " AND state='stalled' AND is_user_bid=0;";
+         << " AND state='stalled' AND is_user_bid=0"
+         << " AND buying_club_id!=" << userClubId << ";";
     DatabaseResult *revr = GetDB()->Query(revq.str());
     if (revr) {
       unsigned int dseed = (unsigned int)DateToJulian(currentDate);
@@ -1454,7 +1576,7 @@ void ProcessDailyTransfers(int managerId, int userClubId,
   TickUserNegotiations(managerId, userClubId, currentDate, seasonYear);
 
   // Special events (galactico, collapse sale, wonderkid explosion)
-  ProcessSpecialEvents(managerId, currentDate, seasonYear);
+  ProcessSpecialEvents(managerId, userClubId, currentDate, seasonYear);
 
   // Media pressure resolution and trigger checks
   ProcessMediaPressure(managerId, currentDate);
@@ -1473,6 +1595,9 @@ void ProcessDailyTransfers(int managerId, int userClubId,
 
   for (unsigned int i=0; i < cr->data.size(); i++) {
     int clubId = atoi(TECell(cr,i,0).c_str());
+
+    // Skip user's managed club — no automatic transfers for the player
+    if (clubId == userClubId) continue;
 
     // Financial guard: skip if in debt panic
     bool debtPanic = false;
@@ -1496,7 +1621,10 @@ void ProcessDailyTransfers(int managerId, int userClubId,
       if (r && r->data.size()>0) agg = atoi(TECell(r,0,0).c_str()); delete r; }
 
     unsigned int rng = (unsigned int)(managerId*7919u ^ clubId*31337u ^ dateSeed);
-    int actChance = 10 + agg/4 + (deadline > 80 ? 20 : 0);
+    int actChance = 10 + agg/4;
+    if (daysLeft <= 21) actChance += 8;
+    if (daysLeft <= 14) actChance += 8;
+    if (deadline > 80) actChance += 20;
     if ((int)(rng % 100) >= actChance) continue;
 
     auto needs = EvaluateSquadNeeds(managerId, clubId, seasonYear);

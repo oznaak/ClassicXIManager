@@ -6,7 +6,7 @@ void SeedPlayerPreferences(int managerId);
 void SeedSpecialEvents(int managerId, int seasonYear, const std::string &currentDate);
 
 // ---- Daily processing (called from ProcessDailyTransfers) -------------------
-void ProcessSpecialEvents(int managerId, const std::string &currentDate, int seasonYear);
+void ProcessSpecialEvents(int managerId, int userClubId, const std::string &currentDate, int seasonYear);
 void TickUserNegotiations(int managerId, int userClubId, const std::string &currentDate, int seasonYear);
 void ProcessAILoanDecision(int managerId, const std::string &currentDate);
 void ProcessLoanClauses(int managerId, const std::string &currentDate, int seasonYear);
