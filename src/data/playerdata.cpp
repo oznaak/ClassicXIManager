@@ -15,7 +15,7 @@ PlayerData::PlayerData(int playerDatabaseID) : databaseID(playerDatabaseID) {
   //std::string test = "select * from players where id = " + int_to_str(databaseID) + " limit 1";
   //printf("test: %s\n", test.c_str());
 
-  DatabaseResult *result = GetDB()->Query("select firstname, lastname, role, base_stat, profile_xml, age, skincolor, hairstyle, haircolor, height, jersey_number from players where id = " + int_to_str(databaseID) + " limit 1");
+  DatabaseResult *result = GetDB()->Query("select firstname, lastname, COALESCE(nickname, '') as nickname, role, base_stat, profile_xml, age, skincolor, hairstyle, haircolor, height, jersey_number from players where id = " + int_to_str(databaseID) + " limit 1");
 
   std::string roleString;
   std::string profileString;
@@ -30,6 +30,7 @@ PlayerData::PlayerData(int playerDatabaseID) : databaseID(playerDatabaseID) {
   for (unsigned int c = 0; c < result->data.at(0).size(); c++) {
     if (result->header.at(c).compare("firstname") == 0) firstName = result->data.at(0).at(c);
     if (result->header.at(c).compare("lastname") == 0) lastName = result->data.at(0).at(c);
+    if (result->header.at(c).compare("nickname") == 0) nickname = result->data.at(0).at(c);
     if (result->header.at(c).compare("role") == 0) { roleString = result->data.at(0).at(c); roleRaw = result->data.at(0).at(c); }
     if (result->header.at(c).compare("base_stat") == 0) baseStat = atof(result->data.at(0).at(c).c_str());
     if (result->header.at(c).compare("profile_xml") == 0) profileString = result->data.at(0).at(c);
@@ -106,6 +107,12 @@ PlayerData::~PlayerData() {
 
 const std::vector<e_PlayerRole> &PlayerData::GetRoles() const {
   return roles;
+}
+
+std::string PlayerData::GetDisplayName() const {
+  if (!nickname.empty()) return nickname;
+  if (!lastName.empty()) return lastName;
+  return firstName;
 }
 
 float PlayerData::GetStat(const char *name) {

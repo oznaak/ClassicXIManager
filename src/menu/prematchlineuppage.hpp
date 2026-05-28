@@ -25,5 +25,5 @@ class PreMatchLineupPage : public Gui2Page {
     bool BuildPresentation();
 
     static std::vector<PreMatchLineupPlayer>
-      LoadXI(int teamId, int limit, int offset);
+      LoadXI(int managerId, int teamId, int limit, int offset);
 };

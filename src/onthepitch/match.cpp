@@ -1007,7 +1007,7 @@ void Match::Process() {
         if (!ownGoal) {
           lastGoalScorer = teams[GetLastGoalTeamID()]->GetLastTouchPlayer();
           if (lastGoalScorer) {
-            SpamMessage("GOAL for " + matchData->GetTeamData(GetLastGoalTeamID())->GetName() + "! " + lastGoalScorer->GetPlayerData()->GetLastName() + " scores!", 4000);
+            SpamMessage("GOAL for " + matchData->GetTeamData(GetLastGoalTeamID())->GetName() + "! " + lastGoalScorer->GetPlayerData()->GetDisplayName() + " scores!", 4000);
           } else {
             SpamMessage("GOAL!!!", 4000);
           }
@@ -1016,7 +1016,7 @@ void Match::Process() {
         else { // own goal
           lastGoalScorer = teams[abs(GetLastGoalTeamID() - 1)]->GetLastTouchPlayer();
           if (lastGoalScorer) {
-            SpamMessage("OWN GOAL! " + lastGoalScorer->GetPlayerData()->GetLastName() + " is so unlucky!", 4000);
+            SpamMessage("OWN GOAL! " + lastGoalScorer->GetPlayerData()->GetDisplayName() + " is so unlucky!", 4000);
           } else {
             SpamMessage("It's an OWN GOAL! oh noes!", 4000);
           }

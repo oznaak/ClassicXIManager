@@ -96,7 +96,7 @@ void Player::Activate(boost::intrusive_ptr<Node> humanoidSourceNode, boost::intr
   if (GetDebugMode() != e_DebugMode_Off) buf_nameCaptionShowCondition = true;
   if (GetDebugMode() != e_DebugMode_Off) buf_debugCaptionShowCondition = true;
 
-  nameCaption = new Gui2Caption(GetMenuTask()->GetWindowManager(), "game_player_name_" + int_to_str(id), 0, 0, 1, 2.0, playerData->GetLastName());
+  nameCaption = new Gui2Caption(GetMenuTask()->GetWindowManager(), "game_player_name_" + int_to_str(id), 0, 0, 1, 2.0, playerData->GetDisplayName());
   nameCaption->SetTransparency(0.3f);
   GetMenuTask()->GetWindowManager()->GetRoot()->AddView(nameCaption);
   debugCaption = new Gui2Caption(GetMenuTask()->GetWindowManager(), "game_player_debug_" + int_to_str(id), 0, 0, 1, 1.6, "debug");
@@ -140,7 +140,7 @@ void Player::SetActive() {
   if (GetDebugMode() != e_DebugMode_Off) buf_debugCaptionShowCondition = true;
 
   // Create captions — Put2D/Hide2D assert these exist for all active players.
-  nameCaption = new Gui2Caption(GetMenuTask()->GetWindowManager(), "game_player_name_" + int_to_str(id), 0, 0, 1, 2.0, playerData->GetLastName());
+  nameCaption = new Gui2Caption(GetMenuTask()->GetWindowManager(), "game_player_name_" + int_to_str(id), 0, 0, 1, 2.0, playerData->GetDisplayName());
   nameCaption->SetTransparency(0.3f);
   GetMenuTask()->GetWindowManager()->GetRoot()->AddView(nameCaption);
   debugCaption = new Gui2Caption(GetMenuTask()->GetWindowManager(), "game_player_debug_" + int_to_str(id), 0, 0, 1, 1.6, "debug");
@@ -429,7 +429,7 @@ void Player::PreparePutBuffers(unsigned long snapshotTime_ms) {
       break;
   };
 
-  std::string name = playerData->GetLastName();
+  std::string name = playerData->GetDisplayName();
   if (buf_debugCaptionShowCondition) {
     //name.append(" " + GetRoleName(GetDynamicFormationEntry().role));
     buf_debugCaption = GetRoleName(GetDynamicFormationEntry().role);
@@ -538,11 +538,11 @@ void Player::SendOff() {
   float x = random(0, 3);
   std::string message;
   if (x < 1.0) {
-    message = "an early shower for " + playerData->GetLastName() + "!";
+    message = "an early shower for " + playerData->GetDisplayName() + "!";
   } else if (x < 2.0) {
-    message = playerData->GetLastName() + " is sent off!";
+    message = playerData->GetDisplayName() + " is sent off!";
   } else {
-    message = "it's all over for " + playerData->GetLastName() + "!";
+    message = "it's all over for " + playerData->GetDisplayName() + "!";
   }
   match->SpamMessage(message);
 

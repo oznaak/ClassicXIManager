@@ -26,7 +26,7 @@ namespace blunted {
       if (teamData->GetFormationEntry(i).role != e_PlayerRole_GK) { pos.coords[0] *= 0.8f; pos.coords[0] += 0.1f; } // compress field players' depth
       float ex = (pos.coords[0] *  0.44 + 0.5) * width_percent - 1.5;
       float ey = (pos.coords[1] * -0.44 + 0.5) * height_percent - 1.5;
-      std::string playerName = teamData->GetPlayerData(i)->GetLastName();
+      std::string playerName = teamData->GetPlayerData(i)->GetDisplayName();
       Gui2PlanMapEntry *entry = new Gui2PlanMapEntry(windowManager, "planmap_player1_entry" + int_to_str(i), ex, ey, 3, 3, GetRoleName(teamData->GetFormationEntry(i).role), playerName);
       this->AddView(entry);
       entry->Show();

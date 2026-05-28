@@ -55,7 +55,7 @@ static std::map<int, std::string> ParseFormationRoles(const std::string &xml) {
 // ---------------------------------------------------------------------------
 
 std::vector<PreMatchLineupPlayer>
-PreMatchLineupPage::LoadXI(int teamId, int limit, int offset) {
+PreMatchLineupPage::LoadXI(int managerId, int teamId, int limit, int offset) {
   std::vector<PreMatchLineupPlayer> out;
 
   // Load formation roles from the team's formation XML
@@ -70,19 +70,24 @@ PreMatchLineupPage::LoadXI(int teamId, int limit, int offset) {
   }
 
   std::stringstream q;
-  q << "SELECT firstname, lastname, role, formationorder, COALESCE(nickname,'') as nickname"
-    << " FROM players WHERE team_id = " << teamId
+  q << "SELECT p.firstname, p.lastname, p.role, p.formationorder, COALESCE(p.nickname,'') as nickname"
+    << " FROM players p"
+    << " LEFT JOIN player_save_state pss"
+    << " ON pss.manager_id = " << managerId
+    << " AND pss.player_id = p.id"
+    << " WHERE COALESCE(pss.team_id, p.team_id) = " << teamId
     << " ORDER BY"
-    << "  CASE WHEN formationorder IS NULL OR formationorder < 0 THEN 999"
-    << "       ELSE formationorder END ASC,"
-    << "  CASE WHEN role LIKE '%GK%' THEN 1"
-    << "       WHEN role LIKE '%DM%' THEN 3"
-    << "       WHEN role LIKE '%D%'  THEN 2"
-    << "       WHEN role LIKE '%AM%' THEN 5"
-    << "       WHEN role LIKE '%M%'  THEN 4"
-    << "       WHEN role LIKE '%ST%' OR role LIKE '%F%' THEN 6"
+    << "  CASE WHEN p.formationorder IS NULL OR p.formationorder < 0 THEN 999"
+    << "       ELSE p.formationorder END ASC,"
+    << "  CASE WHEN p.role LIKE '%GK%' THEN 1"
+    << "       WHEN p.role LIKE '%DM%' THEN 3"
+    << "       WHEN p.role LIKE '%D%'  THEN 2"
+    << "       WHEN p.role LIKE '%AM%' THEN 5"
+    << "       WHEN p.role LIKE '%M%'  THEN 4"
+    << "       WHEN p.role LIKE '%ST%' OR p.role LIKE '%F%' THEN 6"
     << "       ELSE 7 END ASC,"
-    << "  firstname ASC, lastname ASC"
+    << "  p.base_stat DESC,"
+    << "  p.firstname ASC, p.lastname ASC"
     << " LIMIT " << limit << " OFFSET " << offset << ";";
   DatabaseResult *r = GetDB()->Query(q.str());
   if (!r) return out;
@@ -176,10 +181,10 @@ bool PreMatchLineupPage::BuildPresentation() {
          g_PreMatchLineup.awayTeamId, g_PreMatchLineup.awayTeamName.c_str(),
          g_PreMatchLineup.competitionName.c_str());
 
-  g_PreMatchLineup.homeStartingXI = LoadXI(g_PreMatchLineup.homeTeamId, 11, 0);
-  g_PreMatchLineup.awayStartingXI = LoadXI(g_PreMatchLineup.awayTeamId, 11, 0);
-  g_PreMatchLineup.homeBench      = LoadXI(g_PreMatchLineup.homeTeamId, 9, 11);
-  g_PreMatchLineup.awayBench      = LoadXI(g_PreMatchLineup.awayTeamId, 9, 11);
+  g_PreMatchLineup.homeStartingXI = LoadXI(ctx.managerId, g_PreMatchLineup.homeTeamId, 11, 0);
+  g_PreMatchLineup.awayStartingXI = LoadXI(ctx.managerId, g_PreMatchLineup.awayTeamId, 11, 0);
+  g_PreMatchLineup.homeBench      = LoadXI(ctx.managerId, g_PreMatchLineup.homeTeamId, 9, 11);
+  g_PreMatchLineup.awayBench      = LoadXI(ctx.managerId, g_PreMatchLineup.awayTeamId, 9, 11);
   g_PreMatchLineup.hasBench       = (!g_PreMatchLineup.homeBench.empty() ||
                                      !g_PreMatchLineup.awayBench.empty());
 

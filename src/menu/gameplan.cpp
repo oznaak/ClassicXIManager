@@ -103,7 +103,7 @@ void GamePlanPage::GoLineupMenu() {
   const std::vector<PlayerData*> &playerData = teamData->GetPlayerData();
   for (unsigned int i = 0; i < playerData.size(); i++) {
     Vector3 color = GetButtonColor(i);
-    Gui2Button *button = lineupMenu->AddButton("playerbutton_id" + int_to_str(playerData.at(i)->GetDatabaseID()), playerData.at(i)->GetLastName(), i, 0, color);
+    Gui2Button *button = lineupMenu->AddButton("playerbutton_id" + int_to_str(playerData.at(i)->GetDatabaseID()), playerData.at(i)->GetDisplayName(), i, 0, color);
     button->sig_OnClick.connect(boost::bind(&GamePlanPage::LineupMenuOnClick, this, _1));
     button->SetToggleable(true);
     if (i == 0) button->SetFocus();

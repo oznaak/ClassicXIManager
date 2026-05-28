@@ -9,8 +9,11 @@
 #include "base/utils.hpp"
 
 #include "../main.hpp"
+#include "../menu/careermatchcontext.hpp"
 
 #include <boost/algorithm/string.hpp>
+
+#include <sstream>
 
 Vector3 GetDefaultRolePosition(e_PlayerRole role) {
   switch (role) {
@@ -54,6 +57,30 @@ Vector3 GetDefaultRolePosition(e_PlayerRole role) {
       break;
 
   }
+}
+
+static void AppendLineupOrder(std::stringstream &query,
+                              const std::string &prefix,
+                              const std::string &formationOrderColumn) {
+  std::string col = prefix.empty() ? formationOrderColumn
+                                   : prefix + "." + formationOrderColumn;
+  std::string role = prefix.empty() ? "role" : prefix + ".role";
+  std::string baseStat = prefix.empty() ? "base_stat" : prefix + ".base_stat";
+  std::string firstName = prefix.empty() ? "firstname" : prefix + ".firstname";
+  std::string lastName = prefix.empty() ? "lastname" : prefix + ".lastname";
+
+  query << " ORDER BY"
+        << " CASE WHEN " << col << " IS NULL OR " << col << " < 0 THEN 999 ELSE " << col << " END ASC,"
+        << " CASE WHEN " << role << " LIKE '%GK%' THEN 1"
+        << "      WHEN " << role << " LIKE '%DM%' THEN 3"
+        << "      WHEN " << role << " LIKE '%D%' THEN 2"
+        << "      WHEN " << role << " LIKE '%AM%' THEN 5"
+        << "      WHEN " << role << " LIKE '%M%' THEN 4"
+        << "      WHEN " << role << " LIKE '%ST%' OR " << role << " LIKE '%F%' THEN 6"
+        << "      ELSE 7 END ASC,"
+        << " " << baseStat << " DESC,"
+        << " " << firstName << " ASC,"
+        << " " << lastName << " ASC";
 }
 
 TeamData::TeamData(int teamDatabaseID) : databaseID(teamDatabaseID) {
@@ -245,10 +272,27 @@ TeamData::TeamData(int teamDatabaseID) : databaseID(teamDatabaseID) {
 
   // load players
 
-  std::string order = "formationorder";
-  if (national) order = "nationalformationorder";
+  std::string order = national ? "nationalteamformationorder" : "formationorder";
+  std::stringstream playerQuery;
 
-  result = GetDB()->Query("select id from players where team_id = " + int_to_str(teamDatabaseID) + " or nationalteam_id = " + int_to_str(teamDatabaseID) + " order by " + order);
+  if (g_CareerMatchContext.active && g_CareerMatchContext.managerId > 0 && !national) {
+    playerQuery << "SELECT p.id"
+                << " FROM players p"
+                << " LEFT JOIN player_save_state pss"
+                << " ON pss.manager_id = " << g_CareerMatchContext.managerId
+                << " AND pss.player_id = p.id"
+                << " WHERE COALESCE(pss.team_id, p.team_id) = " << teamDatabaseID;
+    AppendLineupOrder(playerQuery, "p", order);
+  } else {
+    playerQuery << "SELECT id"
+                << " FROM players"
+                << " WHERE team_id = " << teamDatabaseID
+                << " OR nationalteam_id = " << teamDatabaseID;
+    AppendLineupOrder(playerQuery, "", order);
+  }
+  playerQuery << ";";
+
+  result = GetDB()->Query(playerQuery.str());
   for (unsigned int r = 0; r < result->data.size(); r++) {
     //int playerDatabaseID = atoi(playerQuery.result[r * playerQuery.columns + c]);
     int playerDatabaseID = atoi(result->data.at(r).at(0).c_str());

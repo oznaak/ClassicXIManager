@@ -1,0 +1,20 @@
+Transfers/Loans:
+- Arsenal FC making loan bids with role "squad_player" to FC Porto player Andre Alexandre Mendes Miranda - Weird? Big clubs like Arsenal dont need to loan young still in development players.
+- Hide bid button after bidding until colpase.
+
+Main/Inbox:
+- Too much transfer messages
+
+Player Details:
+- Add compare player feature
+
+Engine/Ingame:
+- Users club badge bugged showing a square instead.
+
+I think we need to make some adjusts to the engine/simulation. Heres why.
+
+For this scenario im picking FC Porto (a top of the table club, with 10* domestic prestige and 6 international and one of the most valuable squads in the Portugal Primeira Liga.
+Reminder: the game was originally a player vs player football game like fifa/eafc. I removed users controlling the players and made it AI vs AI using the already created AI because in gameplay football you (user) could play vs AI or vs other user (same screen multi player). But the idea is to now use as football manager only, user controls team by tactics, not by actual moving with the players like eafc.
+
+I played vs Estrela da Amadora one of the weakest clubs in liga portugal and the score was 0-0 with barely shots on target. I then played moreirense fc and same thing, 0-0, 2 shots, all from FCPorto, moreirense didnt make a shot. I feel like most of games are all 0-0. Now i played Santa Clara. Now, 1-0 fc porto won, 9 shtos total, 5 fcp 4 santa clara, 3 games in and FC Porto (top tier club in Portugal) has 2 draws 1 win and only 1 goal scored against mid to bottom teams. Now i played Rio Ave FC, Another 1-0 win for FC Porto. But moreirense made 3 shots and FCPorto only 1. This seems very odd. I played 1 more vs Casa Pia, 0-0. I think the outcomes arent being really realistic. Lets investigate this without making any changes. Just analyze, see if its normal behavior or if it needs tuning and report to me.
+

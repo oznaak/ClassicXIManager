@@ -669,7 +669,7 @@ void RenderImGuiMatchOverlay() {
       std::string scorerName;
       if (match->GetLastGoalTeamID() == ti) {
         Player *sc = match->GetLastGoalScorer();
-        if (sc && sc->GetPlayerData()) scorerName = sc->GetPlayerData()->GetLastName();
+        if (sc && sc->GetPlayerData()) scorerName = sc->GetPlayerData()->GetDisplayName();
       }
       // Map raw team index to user/opp for consistent display
       GoalEntry ge;
@@ -1407,7 +1407,7 @@ static float Clamp01(float v) { return v < 0.f ? 0.f : (v > 1.f ? 1.f : v); }
 static PausePlayer MakePausePlayer(TeamData *td, int i) {
   PausePlayer pp;
   PlayerData *pd = td->GetPlayerData(i);
-  pp.lastName    = pd->GetLastName();
+  pp.lastName    = pd->GetDisplayName();
   pp.jerseyNumber = pd->GetJerseyNumber();
   FormationEntry fe = td->GetFormationEntry(i);
   pp.role = GetRoleName(fe.role);
@@ -1821,7 +1821,7 @@ static void InitHUDDataIfNeeded(Match *match) {
     for (int i = 11; i < total; i++) {
       BenchPlayer bp;
       PlayerData *pd = td->GetPlayerData(i);
-      bp.lastName    = pd->GetLastName();
+      bp.lastName    = pd->GetDisplayName();
       const std::string &raw = pd->GetRoleRaw();
       bp.role        = raw.empty() ? "SUB" : raw;
       bp.playersIdx  = i;
@@ -1848,7 +1848,7 @@ static void InitHUDDataIfNeeded(Match *match) {
     for (int i = 11; i < totalOpp; i++) {
       BenchPlayer bp;
       PlayerData *pd = tdOpp->GetPlayerData(i);
-      bp.lastName    = pd->GetLastName();
+      bp.lastName    = pd->GetDisplayName();
       const std::string &raw = pd->GetRoleRaw();
       bp.role        = raw.empty() ? "SUB" : raw;
       bp.playersIdx  = i;
