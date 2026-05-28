@@ -2496,6 +2496,8 @@ static char s_loanReviewPlayerName_g[128] = "";
 static char s_loanReviewClubName_g[128] = "";
 static int  s_loanReviewMandatoryModeIdx_g = 0;
 static bool s_openLoanReviewPopup_g = false;
+static std::map<int, bool> s_incomingOfferGroupOpen_g;
+static std::map<int, bool> s_incomingLoanGroupOpen_g;
 
 // ---- Live player search --------------------------------------------------
 struct SearchPlayerResult {
@@ -5305,6 +5307,20 @@ static void DrawStatSection(const char *title, ImU32 titleColor,
   ImGui::Dummy(ImVec2(0, 14.0f));
 }
 
+static bool IsPlayerLoanedOutFromUserClub(int playerId) {
+  std::stringstream q;
+  q << "SELECT 1 FROM loan_deals"
+    << " WHERE manager_id=" << g_CareerHub.managerId
+    << " AND player_id=" << playerId
+    << " AND loaning_club_id=" << g_CareerHub.clubId
+    << " AND status='active'"
+    << " LIMIT 1;";
+  DatabaseResult *r = GetDB()->Query(q.str().c_str());
+  bool loanedOut = r && !r->data.empty();
+  if (r) delete r;
+  return loanedOut;
+}
+
 // Forward declarations for scouting helpers (defined later in this file)
 static void StartScouting(int managerId, int playerId,
                           const std::string &fn, const std::string &ln,
@@ -5605,7 +5621,9 @@ static void DrawPlayerDetailPage(float w, float h) {
     return;
   }
   const auto &pl      = *pPlayer;
-  const bool ownPlayer = !s_detailOverrideActive; // false = scouting fog applies
+  const bool ownPlayer = !s_detailOverrideActive;
+  const bool loanedOutOwnedPlayer = !ownPlayer && IsPlayerLoanedOutFromUserClub(pl.id);
+  const bool fullAttributeAccess = ownPlayer || loanedOutOwnedPlayer;
 
   if (s_playerDetailLastId != s_playerDetailId) {
     s_plTab              = 0;
@@ -5824,7 +5842,7 @@ static void DrawPlayerDetailPage(float w, float h) {
   // ===========================================================
   // Action row (for opposition players only)
   // ===========================================================
-  if (!ownPlayer) {
+  if (!ownPlayer && !loanedOutOwnedPlayer) {
     // Check if player has a scout report or is transfer-listed
     bool hasScouted = false;
     bool isListed   = false;
@@ -5909,6 +5927,14 @@ static void DrawPlayerDetailPage(float w, float h) {
       }
     }
     ImGui::SetCursorPos(ImVec2(kPad, ImGui::GetCursorPos().y));
+    ImGui::Dummy(ImVec2(0, kGap));
+  } else if (loanedOutOwnedPlayer) {
+    ImGui::SetCursorPos(ImVec2(kPad, ImGui::GetCursorPos().y));
+    PushMgrFont(g_ManagerFontSmall);
+    ImGui::PushStyleColor(ImGuiCol_Text, kTextSec);
+    ImGui::TextUnformatted("On loan from your club");
+    ImGui::PopStyleColor();
+    PopMgrFont(g_ManagerFontSmall);
     ImGui::Dummy(ImVec2(0, kGap));
   } else {
     bool listed = false;
@@ -6033,7 +6059,7 @@ static void DrawPlayerDetailPage(float w, float h) {
     }
   }
   // Scout button — right side of tab row, non-squad players only
-  if (!ownPlayer) {
+  if (!ownPlayer && !loanedOutOwnedPlayer) {
     const CareerHubState::StaffMember *scout = nullptr;
     for (const auto &sm : g_CareerHub.staff)
       if (sm.role == "Scout") { scout = &sm; break; }
@@ -6178,9 +6204,9 @@ static void DrawPlayerDetailPage(float w, float h) {
   ImGui::BeginChild("##pdc0", ImVec2(c0W, colH), false,
                     ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
   DrawStatSection("Attacking", IM_COL32(220,100,100,230),
-                  kAttackStats, 8, pl.id, ownPlayer);
+                  kAttackStats, 8, pl.id, fullAttributeAccess);
   DrawStatSection("Technical", IM_COL32(130,185,130,230),
-                  kTechStats,  6, pl.id, ownPlayer);
+                  kTechStats,  6, pl.id, fullAttributeAccess);
   ImGui::EndChild();
   ImGui::SameLine(0, 2.0f);
 
@@ -6188,9 +6214,9 @@ static void DrawPlayerDetailPage(float w, float h) {
   ImGui::BeginChild("##pdc1", ImVec2(c1W, colH), false,
                     ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
   DrawStatSection("Defending", IM_COL32(80,140,220,230),
-                  kDefStats, 4, pl.id, ownPlayer);
+                  kDefStats, 4, pl.id, fullAttributeAccess);
   DrawStatSection("Mental", IM_COL32(130,150,220,230),
-                  kMentStats, 3, pl.id, ownPlayer);
+                  kMentStats, 3, pl.id, fullAttributeAccess);
   ImGui::EndChild();
   ImGui::SameLine(0, 2.0f);
 
@@ -6198,10 +6224,10 @@ static void DrawPlayerDetailPage(float w, float h) {
   ImGui::BeginChild("##pdc2", ImVec2(c2W, colH), false,
                     ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
   DrawStatSection("Physical", IM_COL32(220,140,100,230),
-                  kPhysStats, 8, pl.id, ownPlayer);
+                  kPhysStats, 8, pl.id, fullAttributeAccess);
   if (isGK)
     DrawStatSection("Goalkeeping", IM_COL32(60, 220, 200, 255),
-                    kGKStats, 5, pl.id, ownPlayer);
+                    kGKStats, 5, pl.id, fullAttributeAccess);
   ImGui::EndChild();
   ImGui::SameLine(0, 2.0f);
 
@@ -10822,8 +10848,9 @@ static void DrawLoanTransfersPanel(int panel, float cw, float tableH,
        << " ORDER BY p.base_stat DESC LIMIT 80;";
     DatabaseResult *r = GetDB()->Query(sq.str().c_str());
     BeginModernCard("##loan_market", ImVec2(cw, tableH));
+    float cardW = ImGui::GetContentRegionAvail().x;
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0,0,0,0));
-    ImGui::BeginChild("##loan_market_scroll", ImVec2(cw - 8.0f, tableH - 18.0f), false);
+    ImGui::BeginChild("##loan_market_scroll", ImVec2(cardW, tableH - 18.0f), false);
     ImGui::PopStyleColor();
     PushMgrFont(g_ManagerFontSmall);
     if (!r || r->data.empty()) {
@@ -10835,7 +10862,7 @@ static void DrawLoanTransfersPanel(int panel, float cw, float tableH,
         int parent = atoi(DBCell(r,i,4).c_str());
         long long wg = atoll(DBCell(r,i,9).c_str());
         ImVec2 rp = ImGui::GetCursorScreenPos();
-        float rowW = ImGui::GetContentRegionAvail().x - 8.0f;
+        float rowW = ImGui::GetContentRegionAvail().x;
         ImDrawList *dl = ImGui::GetWindowDrawList();
         bool hovered = ImGui::IsMouseHoveringRect(rp, ImVec2(rp.x + rowW, rp.y + rowH));
         dl->AddRectFilled(rp, ImVec2(rp.x + rowW, rp.y + rowH),
@@ -10899,8 +10926,9 @@ static void DrawLoanTransfersPanel(int panel, float cw, float tableH,
        << " ORDER BY ld.id DESC LIMIT 80;";
     DatabaseResult *r = GetDB()->Query(sq.str().c_str());
     BeginModernCard("##my_loan_offers", ImVec2(cw, tableH));
+    float cardW = ImGui::GetContentRegionAvail().x;
     if (ImGui::BeginTable("##my_loan_table", 8, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY,
-                          ImVec2(cw - 8.0f, tableH - 18.0f))) {
+                          ImVec2(cardW, tableH - 18.0f))) {
       ImGui::TableSetupColumn("Player"); ImGui::TableSetupColumn("Parent"); ImGui::TableSetupColumn("Loan club");
       ImGui::TableSetupColumn("Loan fee"); ImGui::TableSetupColumn("Borrower wage %"); ImGui::TableSetupColumn("End");
       ImGui::TableSetupColumn("Clauses"); ImGui::TableSetupColumn("Status"); ImGui::TableHeadersRow();
@@ -10939,7 +10967,8 @@ static void DrawLoanTransfersPanel(int panel, float cw, float tableH,
        << " ORDER BY p.lastname ASC, ld.loan_fee DESC;";
     DatabaseResult *r = GetDB()->Query(sq.str().c_str());
     BeginModernCard("##incoming_loan_offers", ImVec2(cw, tableH));
-    ImGui::BeginChild("##incoming_loan_scroll", ImVec2(cw - 8.0f, tableH - 18.0f), false);
+    float cardW = ImGui::GetContentRegionAvail().x;
+    ImGui::BeginChild("##incoming_loan_scroll", ImVec2(cardW, tableH - 18.0f), false);
     PushMgrFont(g_ManagerFontSmall);
     if (!r || r->data.empty()) {
       ImGui::TextColored(kTextDim, "No incoming loan offers.");
@@ -10985,14 +11014,22 @@ static void DrawLoanTransfersPanel(int panel, float cw, float tableH,
         std::vector<LoanIncomingRow> &offers = grouped[playerOrder[gi]];
         if (offers.empty()) continue;
         const LoanIncomingRow &head = offers[0];
-        float groupH = 54.0f + (float)offers.size() * 42.0f;
+        if (s_incomingLoanGroupOpen_g.find(head.pid) == s_incomingLoanGroupOpen_g.end())
+          s_incomingLoanGroupOpen_g[head.pid] = true;
+        bool groupOpen = s_incomingLoanGroupOpen_g[head.pid];
+        float groupH = 54.0f + (groupOpen ? (float)offers.size() * 42.0f : 0.0f);
         ImVec2 rp = ImGui::GetCursorScreenPos();
-        float rowW = ImGui::GetContentRegionAvail().x - 8.0f;
+        float rowW = ImGui::GetContentRegionAvail().x;
         ImDrawList *dl = ImGui::GetWindowDrawList();
         dl->AddRectFilled(rp, ImVec2(rp.x + rowW, rp.y + groupH), IM_COL32(16,24,46,220), 7.0f);
         dl->AddRect(rp, ImVec2(rp.x + rowW, rp.y + groupH), IM_COL32(255,255,255,18), 7.0f);
 
         ImGui::SetCursorScreenPos(ImVec2(rp.x + 12.0f, rp.y + 12.0f));
+        ImGui::PushID(head.pid + 84000);
+        if (ImGui::SmallButton(groupOpen ? "v" : ">"))
+          s_incomingLoanGroupOpen_g[head.pid] = !groupOpen;
+        ImGui::PopID();
+        ImGui::SetCursorScreenPos(ImVec2(rp.x + 40.0f, rp.y + 12.0f));
         ImGui::PushID(head.pid + 83000);
         if (ImGui::SmallButton(head.player.c_str()))
           OpenPlayerDetailFromTransfer(head.pid, userClubId, g_CareerHub.club.name,
@@ -11015,7 +11052,7 @@ static void DrawLoanTransfersPanel(int panel, float cw, float tableH,
                     C32(kTextSec), countText.c_str());
 
         float y = rp.y + 54.0f;
-        for (unsigned int oi = 0; oi < offers.size(); oi++) {
+        if (groupOpen) for (unsigned int oi = 0; oi < offers.size(); oi++) {
           LoanIncomingRow &offer = offers[oi];
           ImU32 lineBg = (oi % 2 == 0) ? IM_COL32(22,31,56,170) : IM_COL32(18,27,50,130);
           dl->AddRectFilled(ImVec2(rp.x + 8.0f, y - 4.0f),
@@ -11099,8 +11136,9 @@ static void DrawLoanTransfersPanel(int panel, float cw, float tableH,
        << " ORDER BY ld.end_date ASC;";
     DatabaseResult *r = GetDB()->Query(sq.str().c_str());
     BeginModernCard("##active_loans", ImVec2(cw, tableH));
+    float cardW = ImGui::GetContentRegionAvail().x;
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0,0,0,0));
-    ImGui::BeginChild("##active_loan_scroll", ImVec2(cw - 8.0f, tableH - 18.0f), false);
+    ImGui::BeginChild("##active_loan_scroll", ImVec2(cardW, tableH - 18.0f), false);
     ImGui::PopStyleColor();
     PushMgrFont(g_ManagerFontSmall);
     if (!r || r->data.empty()) {
@@ -11115,7 +11153,7 @@ static void DrawLoanTransfersPanel(int panel, float cw, float tableH,
         long long mandatoryFee = atoll(DBCell(r,i,17).c_str());
         int pid = atoi(DBCell(r,i,18).c_str());
         ImVec2 rp = ImGui::GetCursorScreenPos();
-        float rowW = ImGui::GetContentRegionAvail().x - 8.0f;
+        float rowW = ImGui::GetContentRegionAvail().x;
         ImDrawList *dl = ImGui::GetWindowDrawList();
         dl->AddRectFilled(rp, ImVec2(rp.x + rowW, rp.y + rowH), IM_COL32(16,24,46,220), 7.0f);
         dl->AddRect(rp, ImVec2(rp.x + rowW, rp.y + rowH), IM_COL32(255,255,255,18), 7.0f);
@@ -11186,11 +11224,13 @@ static void DrawTransfersPage(float w, float h) {
   ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.1f, 0.15f, 0.25f, 1.0f));
   ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.15f, 0.22f, 0.35f, 1.0f));
   ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.8f));
+  const float tabGap = 4.0f;
+  const float tabW = (cw - tabGap * 6.0f) / 7.0f;
   for (int i = 0; i < 7; i++) {
-    if (i > 0) ImGui::SameLine(0.0f, 4.0f);
+    if (i > 0) ImGui::SameLine(0.0f, tabGap);
     bool sel = (s_transferPanel == i);
     if (sel) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(kAccent.x*0.8f, kAccent.y*0.8f, kAccent.z*0.8f, 1.0f));
-    if (ImGui::Button(kPanels[i], ImVec2(cw/7.0f - 4.0f, 28.0f))) s_transferPanel = i;
+    if (ImGui::Button(kPanels[i], ImVec2(tabW, 28.0f))) s_transferPanel = i;
     if (sel) ImGui::PopStyleColor();
   }
   ImGui::PopStyleColor(3);
@@ -11297,8 +11337,9 @@ static void DrawTransfersPage(float w, float h) {
     DatabaseResult *pr = GetDB()->Query(sq.str().c_str());
 
     BeginModernCard("##market_list", ImVec2(cw, tableH));
+    float cardW = ImGui::GetContentRegionAvail().x;
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0,0,0,0));
-    ImGui::BeginChild("##market_scroll", ImVec2(cw - 8.0f, tableH - 18.0f), false);
+    ImGui::BeginChild("##market_scroll", ImVec2(cardW, tableH - 18.0f), false);
     ImGui::PopStyleColor();
     PushMgrFont(g_ManagerFontSmall);
     if (!pr || pr->data.empty()) {
@@ -11314,7 +11355,7 @@ static void DrawTransfersPage(float w, float h) {
         long long wg  = atoll(DBCell(pr,i,6).c_str());
         std::string role = DBCell(pr,i,2);
         ImVec2 rp = ImGui::GetCursorScreenPos();
-        float rowW = ImGui::GetContentRegionAvail().x - 8.0f;
+        float rowW = ImGui::GetContentRegionAvail().x;
         ImDrawList *dl = ImGui::GetWindowDrawList();
         bool hovered = ImGui::IsMouseHoveringRect(rp, ImVec2(rp.x + rowW, rp.y + rowH));
         dl->AddRectFilled(rp, ImVec2(rp.x + rowW, rp.y + rowH),
@@ -11399,7 +11440,8 @@ static void DrawTransfersPage(float w, float h) {
     PopMgrFont(g_ManagerFontSmall);
 
     BeginModernCard("##mybids_active_cards", ImVec2(cw, activeH));
-    ImGui::BeginChild("##mybids_active_scroll", ImVec2(cw - 8.0f, activeH - 18.0f), false);
+    float activeCardW = ImGui::GetContentRegionAvail().x;
+    ImGui::BeginChild("##mybids_active_scroll", ImVec2(activeCardW, activeH - 18.0f), false);
     PushMgrFont(g_ManagerFontSmall);
     if (!nr || nr->data.empty()) {
       ImGui::TextColored(kTextDim, "No active bids.");
@@ -11413,7 +11455,7 @@ static void DrawTransfersPage(float w, float h) {
         long long fee = atoll(DBCell(nr,i,3).c_str());
         int mom = atoi(DBCell(nr,i,6).c_str());
         ImVec2 rp = ImGui::GetCursorScreenPos();
-        float rowW = ImGui::GetContentRegionAvail().x - 8.0f;
+        float rowW = ImGui::GetContentRegionAvail().x;
         ImDrawList *dl = ImGui::GetWindowDrawList();
         dl->AddRectFilled(rp, ImVec2(rp.x + rowW, rp.y + rowH), IM_COL32(16,24,46,220), 7.0f);
         dl->AddRect(rp, ImVec2(rp.x + rowW, rp.y + rowH), IM_COL32(255,255,255,18), 7.0f);
@@ -11545,7 +11587,8 @@ static void DrawTransfersPage(float w, float h) {
        << " ORDER BY p.lastname ASC, p.firstname ASC, tn.offered_fee DESC, tn.id DESC;";
     DatabaseResult *nr = GetDB()->Query(sq.str().c_str());
     BeginModernCard("##incoming_active_cards", ImVec2(cw, activeH));
-    ImGui::BeginChild("##incoming_active_scroll", ImVec2(cw - 8.0f, activeH - 18.0f), false);
+    float activeCardW = ImGui::GetContentRegionAvail().x;
+    ImGui::BeginChild("##incoming_active_scroll", ImVec2(activeCardW, activeH - 18.0f), false);
     PushMgrFont(g_ManagerFontSmall);
     if (!nr || nr->data.empty()) {
       ImGui::TextColored(kTextDim, "No incoming bids.");
@@ -11581,14 +11624,22 @@ static void DrawTransfersPage(float w, float h) {
         std::vector<IncomingOfferRow> &offers = grouped[playerOrder[gi]];
         if (offers.empty()) continue;
         const IncomingOfferRow &head = offers[0];
-        float groupH = 54.0f + (float)offers.size() * 38.0f;
+        if (s_incomingOfferGroupOpen_g.find(head.pid) == s_incomingOfferGroupOpen_g.end())
+          s_incomingOfferGroupOpen_g[head.pid] = true;
+        bool groupOpen = s_incomingOfferGroupOpen_g[head.pid];
+        float groupH = 54.0f + (groupOpen ? (float)offers.size() * 38.0f : 0.0f);
         ImVec2 rp = ImGui::GetCursorScreenPos();
-        float rowW = ImGui::GetContentRegionAvail().x - 8.0f;
+        float rowW = ImGui::GetContentRegionAvail().x;
         ImDrawList *dl = ImGui::GetWindowDrawList();
         dl->AddRectFilled(rp, ImVec2(rp.x + rowW, rp.y + groupH), IM_COL32(16,24,46,220), 7.0f);
         dl->AddRect(rp, ImVec2(rp.x + rowW, rp.y + groupH), IM_COL32(255,255,255,18), 7.0f);
 
         ImGui::SetCursorScreenPos(ImVec2(rp.x + 12.0f, rp.y + 12.0f));
+        ImGui::PushID(head.pid + 61000);
+        if (ImGui::SmallButton(groupOpen ? "v" : ">"))
+          s_incomingOfferGroupOpen_g[head.pid] = !groupOpen;
+        ImGui::PopID();
+        ImGui::SetCursorScreenPos(ImVec2(rp.x + 40.0f, rp.y + 12.0f));
         ImGui::PushID(head.pid + 60000);
         if (ImGui::SmallButton(head.player.c_str()))
           OpenPlayerDetailFromTransfer(head.pid, userClubId, g_CareerHub.club.name,
@@ -11604,7 +11655,7 @@ static void DrawTransfersPage(float w, float h) {
                     C32(kTextSec), countText.c_str());
 
         float y = rp.y + 54.0f;
-        for (unsigned int oi = 0; oi < offers.size(); oi++) {
+        if (groupOpen) for (unsigned int oi = 0; oi < offers.size(); oi++) {
           IncomingOfferRow &offer = offers[oi];
           ImU32 lineBg = (oi % 2 == 0) ? IM_COL32(22,31,56,170) : IM_COL32(18,27,50,130);
           dl->AddRectFilled(ImVec2(rp.x + 8.0f, y - 4.0f),
