@@ -27,6 +27,17 @@ static std::string TESql(const std::string &in) {
   return out;
 }
 
+static long long GetClubTransferBudgetTE(int managerId, int clubId) {
+  std::stringstream q;
+  q << "SELECT transfer_budget FROM club_finances"
+    << " WHERE manager_id=" << managerId << " AND club_id=" << clubId << " LIMIT 1;";
+  DatabaseResult *r = GetDB()->Query(q.str());
+  long long budget = 0;
+  if (r && r->data.size() > 0) budget = atoll(TECell(r,0,0).c_str());
+  delete r;
+  return budget;
+}
+
 // Seeded pseudo-random float 0.0–1.0. index offsets within same seed.
 static float TERand(unsigned int seed, int index) {
   unsigned int s = seed ^ (unsigned int)(index * 2654435761u);
@@ -1287,6 +1298,15 @@ static void AttemptInitiateNegotiations(int managerId, int clubId,
   openingPct = std::min(1.18f, openingPct);
   long long offerFee  = (long long)(ctxVal * openingPct);
   long long offerWage = (long long)(wage * (1.0f + wageWill / 200.0f));
+  long long buyerBudget = GetClubTransferBudgetTE(managerId, clubId);
+  if (buyerBudget <= 0) return;
+  long long maxAffordable = (long long)((double)buyerBudget * (irrational ? 1.05 : 0.92));
+  if (offerFee > maxAffordable) {
+    // Do not let low-budget clubs create fantasy bids they cannot fund.
+    if (sellingClub == userClubId) return;
+    if (maxAffordable < (long long)((double)ctxVal * 0.72)) return;
+    offerFee = maxAffordable;
+  }
 
   int targetEgo = 50;
   { std::stringstream q; q << "SELECT ego FROM player_traits WHERE manager_id=" << managerId
@@ -1324,9 +1344,6 @@ static void AttemptInitiateNegotiations(int managerId, int clubId,
       if (f >= 1000000) snprintf(buf, sizeof(buf), "£%.1fM", f/1000000.0);
       else snprintf(buf, sizeof(buf), "£%.0fK", f/1000.0);
       feeStr = buf; }
-    InsertTransferNews(managerId, currentDate,
-      cName + " submit bid for " + pName,
-      "incoming_bid", targetId, sellingClub, clubId);
     InsertInboxMessage(managerId,
       "Incoming bid: " + cName + " want " + pName,
       cName + " have submitted a bid of " + feeStr + " for " + pName
@@ -1467,8 +1484,10 @@ static void AdvanceNegotiations(int managerId, int userClubId,
             DatabaseResult *r = GetDB()->Query(q.str()); if(r&&r->data.size()>0) pName=TECell(r,0,0); delete r; }
           { std::stringstream q; q << "SELECT name FROM teams WHERE id=" << cBid << ";";
             DatabaseResult *r = GetDB()->Query(q.str()); if(r&&r->data.size()>0) cName=TECell(r,0,0); delete r; }
-          InsertTransferNews(managerId, currentDate, cName + " show interest in " + pName,
-                             "rumour", n.player, n.seller, cBid);
+          if (n.seller != userClubId && n.buyer != userClubId) {
+            InsertTransferNews(managerId, currentDate, cName + " show interest in " + pName,
+                               "rumour", n.player, n.seller, cBid);
+          }
           newAgentP = std::min(100, newAgentP + 20);
         }
         delete cr;
@@ -1581,9 +1600,11 @@ static void AdvanceNegotiations(int managerId, int userClubId,
           DatabaseResult *r = GetDB()->Query(q.str()); if(r&&r->data.size()>0) bName=TECell(r,0,0); delete r; }
         { std::stringstream q; q << "SELECT name FROM teams WHERE id=" << n.seller << ";";
           DatabaseResult *r = GetDB()->Query(q.str()); if(r&&r->data.size()>0) sName=TECell(r,0,0); delete r; }
-        InsertTransferNews(managerId, currentDate,
-          pName + " joins " + bName + " from " + sName,
-          "completed", n.player, n.seller, n.buyer);
+        if (n.buyer != userClubId && n.seller != userClubId) {
+          InsertTransferNews(managerId, currentDate,
+            pName + " joins " + bName + " from " + sName,
+            "completed", n.player, n.seller, n.buyer);
+        }
         InsertFinanceTransaction(managerId, n.buyer, currentDate, "transfer",
           "Transfer fee paid: " + pName + " from " + sName, -fee);
         InsertFinanceTransaction(managerId, n.seller, currentDate, "transfer",
@@ -1607,14 +1628,6 @@ static void AdvanceNegotiations(int managerId, int userClubId,
     }
 
     if (newState == "collapsed") {
-      std::string pName, cName;
-      { std::stringstream q; q << "SELECT firstname||' '||lastname FROM players WHERE id=" << n.player << ";";
-        DatabaseResult *r = GetDB()->Query(q.str()); if(r&&r->data.size()>0) pName=TECell(r,0,0); delete r; }
-      { std::stringstream q; q << "SELECT name FROM teams WHERE id=" << n.buyer << ";";
-        DatabaseResult *r = GetDB()->Query(q.str()); if(r&&r->data.size()>0) cName=TECell(r,0,0); delete r; }
-      InsertTransferNews(managerId, currentDate,
-        "Deal collapses — " + pName + " stays at current club",
-        "collapsed", n.player, n.seller, n.buyer);
       unsigned int cd = 7 + (rng % 8);
       std::stringstream cdq;
       cdq << "INSERT INTO negotiation_cooldowns(manager_id,buying_club_id,player_id,cooldown_until,reason)"
@@ -1762,6 +1775,23 @@ static void BlockUnauthorizedUserClubBuyers(int managerId, int userClubId) {
   DatabaseResult *br = GetDB()->Query(bq.str()); delete br;
 }
 
+static void CollapseUnaffordableAITransferOffers(int managerId) {
+  std::stringstream q;
+  q << "UPDATE transfer_negotiations SET"
+    << " state='collapsed',collapse_reason='buyer_budget_failed',days_in_state=0"
+    << " WHERE manager_id=" << managerId
+    << " AND is_user_bid=0"
+    << " AND state NOT IN ('completed','collapsed')"
+    << " AND offered_fee > ("
+    << "   SELECT CAST(cf.transfer_budget * 1.10 AS INTEGER)"
+    << "   FROM club_finances cf"
+    << "   WHERE cf.manager_id=transfer_negotiations.manager_id"
+    << "   AND cf.club_id=transfer_negotiations.buying_club_id"
+    << " );";
+  DatabaseResult *r = GetDB()->Query(q.str());
+  delete r;
+}
+
 void ProcessDailyTransfers(int managerId, int userClubId,
                             const std::string &currentDate, int seasonYear) {
   bool inWindow = InTransferWindow(currentDate);
@@ -1791,6 +1821,7 @@ void ProcessDailyTransfers(int managerId, int userClubId,
   // The managed club must never act as an AI buyer. This also repairs saves
   // where older transfer logic already created or completed such a deal.
   BlockUnauthorizedUserClubBuyers(managerId, userClubId);
+  CollapseUnaffordableAITransferOffers(managerId);
 
   // Deadline day chaos scaling (final 48h of window)
   if (inWindow && daysLeft <= 2) {

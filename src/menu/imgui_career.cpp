@@ -425,6 +425,38 @@ static void InitAllClubFinances(int managerId);
 static void ProcessWeeklyAllClubs(int managerId, const std::string &currentDate,
                                   int clubId, const LeagueFP *playerLfp,
                                   long long playerWageBill);
+static long long ApplyLoanWageSplitsToClub(int managerId, int clubId,
+                                           long long baseWageBill) {
+  std::stringstream lq;
+  lq << "SELECT ld.loaning_club_id,ld.receiving_club_id,"
+     << " COALESCE(pss.weekly_wage,p.weekly_wage),"
+     << " ld.monthly_wage_parent_pct,ld.monthly_wage_receiving_pct,"
+     << " COALESCE(pss.team_id,p.team_id)"
+     << " FROM loan_deals ld JOIN players p ON p.id=ld.player_id"
+     << " LEFT JOIN player_save_state pss"
+     << " ON pss.manager_id=ld.manager_id AND pss.player_id=p.id"
+     << " WHERE ld.manager_id=" << managerId
+     << " AND ld.status='active'"
+     << " AND (ld.loaning_club_id=" << clubId
+     << " OR ld.receiving_club_id=" << clubId << ");";
+  DatabaseResult *lr = GetDB()->Query(lq.str());
+  long long adjusted = baseWageBill;
+  if (lr) {
+    for (unsigned int i = 0; i < lr->data.size(); i++) {
+      int parent = atoi(DBCell(lr,i,0).c_str());
+      int receiving = atoi(DBCell(lr,i,1).c_str());
+      long long wage = atoll(DBCell(lr,i,2).c_str());
+      int parentPct = atoi(DBCell(lr,i,3).c_str());
+      int receivingPct = atoi(DBCell(lr,i,4).c_str());
+      int currentClub = atoi(DBCell(lr,i,5).c_str());
+      if (currentClub == clubId) adjusted -= wage;
+      if (parent == clubId) adjusted += (wage * parentPct) / 100;
+      if (receiving == clubId) adjusted += (wage * receivingPct) / 100;
+    }
+    delete lr;
+  }
+  return std::max(0LL, adjusted);
+}
 static void TriggerDebtCrisis(int managerId, int clubId, ClubFinances &cf,
                                const LeagueFP *lfp);
 static bool TryFireShock(int managerId, int clubId, ClubFinances &cf,
@@ -930,6 +962,7 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
   long long wageBill = 0;
   for (const auto &p : players) wageBill += p.weeklywage;
   for (const auto &sm : staff)  wageBill += sm.weeklywage;
+  long long adjustedWageBill = ApplyLoanWageSplitsToClub(mgrId, cId, wageBill);
 
   // Process weekly finances if at least 7 game-days have passed
   if (!currentDate.empty()) {
@@ -954,8 +987,8 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
       float qual     = CalcClubQualityFactor(players);
       long long tv   = (long long)(lfp->weeklyTV * (0.85f + qual * 0.30f));
       InsertTx(currentDate, "tv_rights", "Weekly TV rights distribution", tv);
-      if (wageBill > 0)
-        InsertTx(currentDate, "wages",    "Weekly player & staff wages",   -wageBill);
+      if (adjustedWageBill > 0)
+        InsertTx(currentDate, "wages",    "Weekly player & staff wages",   -adjustedWageBill);
       InsertTx(currentDate, "operating", "Weekly club operating costs",    -lfp->weeklyOperating);
 
       // Sponsor income: sum all active sponsorships for this week
@@ -979,14 +1012,14 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
       DatabaseResult *ur = GetDB()->Query(upd.str());
       delete ur;
       printf("[FINANCE] Weekly player_club=%d date=%s wages=-%lld TV=+%lld op=-%lld\n",
-             cId, currentDate.c_str(), wageBill, tv, lfp->weeklyOperating);
+             cId, currentDate.c_str(), adjustedWageBill, tv, lfp->weeklyOperating);
 
       // Check for new sponsor offers (player's club only)
       if (seasonYear > 0)
         CheckSponsorOffers(mgrId, cId, currentDate, seasonYear);
 
       // All other clubs: balance-only tick
-      ProcessWeeklyAllClubs(mgrId, currentDate, cId, lfp, wageBill);
+      ProcessWeeklyAllClubs(mgrId, currentDate, cId, lfp, adjustedWageBill);
     }
 
     // Matchday income: scan all played fixtures involving this club (home or away).
@@ -1251,7 +1284,7 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
 
     float qualityForDisplay  = CalcClubQualityFactor(players);
     finances.weeklyTV        = (long long)(lfp->weeklyTV * (0.85f + qualityForDisplay * 0.30f));
-    finances.weeklyWages     = wageBill;
+    finances.weeklyWages     = adjustedWageBill;
     finances.weeklyOperating = lfp->weeklyOperating;
     finances.matchdayMin     = (long long)(lfp->matchdayHome * 0.25f);
     finances.matchdayMax     = (long long)(lfp->matchdayHome * (0.80f + qualityForDisplay * 1.20f));
@@ -5923,18 +5956,6 @@ static void DrawPlayerDetailPage(float w, float h) {
          << " VALUES(" << g_CareerHub.managerId << "," << pl.id << ",'loan_listed','"
          << g_CareerHub.currentDate << "',0);";
       delete GetDB()->Query(iq.str().c_str());
-    }
-    ImGui::SameLine(0.0f, 8.0f);
-    if (ImGui::Button("Offer Loan", ImVec2(104.0f, 28.0f))) {
-      s_loanPlayerId_g = pl.id;
-      s_loanParentClubId_g = g_CareerHub.clubId;
-      s_loanReceivingClubId_g = 0;
-      s_loanIsLoanIn_g = false;
-      snprintf(s_loanPlayerName_g, sizeof(s_loanPlayerName_g), "%s %s", pl.firstName.c_str(), pl.lastName.c_str());
-      snprintf(s_loanFeeStr_g, sizeof(s_loanFeeStr_g), "%d", 0);
-      snprintf(s_loanWagePctStr_g, sizeof(s_loanWagePctStr_g), "%d", 70);
-      snprintf(s_loanEndDateStr_g, sizeof(s_loanEndDateStr_g), "%s", AddDays(g_CareerHub.currentDate, 180).c_str());
-      s_openLoanPopup_g = true;
     }
     ImGui::SetCursorPos(ImVec2(kPad, ImGui::GetCursorPos().y));
     ImGui::Dummy(ImVec2(0, kGap));
@@ -10823,7 +10844,7 @@ static void DrawLoanTransfersPanel(int panel, float cw, float tableH,
     if (ImGui::BeginTable("##my_loan_table", 8, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY,
                           ImVec2(cw - 8.0f, tableH - 18.0f))) {
       ImGui::TableSetupColumn("Player"); ImGui::TableSetupColumn("Parent"); ImGui::TableSetupColumn("Loan club");
-      ImGui::TableSetupColumn("Fee"); ImGui::TableSetupColumn("Wage %"); ImGui::TableSetupColumn("End");
+      ImGui::TableSetupColumn("Loan fee"); ImGui::TableSetupColumn("Borrower wage %"); ImGui::TableSetupColumn("End");
       ImGui::TableSetupColumn("Clauses"); ImGui::TableSetupColumn("Status"); ImGui::TableHeadersRow();
       if (r) for (unsigned int i = 0; i < r->data.size(); i++) {
         ImGui::TableNextRow();
@@ -10847,7 +10868,8 @@ static void DrawLoanTransfersPanel(int panel, float cw, float tableH,
   if (panel == 5) {
     std::stringstream sq;
     sq << "SELECT ld.id,p.firstname||' '||p.lastname,rp.name,ld.loan_fee,"
-       << "ld.monthly_wage_receiving_pct,ld.playing_time_promise,ld.end_date"
+       << "ld.monthly_wage_receiving_pct,ld.playing_time_promise,ld.end_date,"
+       << "ld.player_id,COALESCE(rp.logo_url,''),COALESCE(rp.shortname,''),p.role,p.age,COALESCE(p.alternative_pos,'')"
        << " FROM loan_deals ld JOIN players p ON p.id=ld.player_id"
        << " JOIN teams rp ON rp.id=ld.receiving_club_id"
        << " WHERE ld.manager_id=" << managerId
@@ -10857,46 +10879,104 @@ static void DrawLoanTransfersPanel(int panel, float cw, float tableH,
        << " ORDER BY p.lastname ASC, ld.loan_fee DESC;";
     DatabaseResult *r = GetDB()->Query(sq.str().c_str());
     BeginModernCard("##incoming_loan_offers", ImVec2(cw, tableH));
-    if (ImGui::BeginTable("##incoming_loan_table", 7, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY,
-                          ImVec2(cw - 8.0f, tableH - 18.0f))) {
-      ImGui::TableSetupColumn("Player"); ImGui::TableSetupColumn("From"); ImGui::TableSetupColumn("Fee");
-      ImGui::TableSetupColumn("Wage %"); ImGui::TableSetupColumn("Promise"); ImGui::TableSetupColumn("End");
-      ImGui::TableSetupColumn(""); ImGui::TableHeadersRow();
-      std::string lastPlayer;
-      if (r) for (unsigned int i = 0; i < r->data.size(); i++) {
-        int id = atoi(DBCell(r,i,0).c_str());
-        std::string playerName = DBCell(r,i,1);
-        ImGui::TableNextRow();
-        ImGui::TableSetColumnIndex(0);
-        if (playerName != lastPlayer) {
-          ImGui::TextUnformatted(playerName.c_str());
-          lastPlayer = playerName;
-        } else {
-          ImGui::TextColored(kTextDim, "same player");
-        }
-        ImGui::TableSetColumnIndex(1); ImGui::TextUnformatted(DBCell(r,i,2).c_str());
-        ImGui::TableSetColumnIndex(2); ImGui::Text("%s", FmtMoney(atoll(DBCell(r,i,3).c_str())).c_str());
-        ImGui::TableSetColumnIndex(3); ImGui::Text("%s%%", DBCell(r,i,4).c_str());
-        ImGui::TableSetColumnIndex(4); ImGui::TextUnformatted(DBCell(r,i,5).c_str());
-        ImGui::TableSetColumnIndex(5); ImGui::TextUnformatted(DBCell(r,i,6).c_str());
-        ImGui::TableSetColumnIndex(6);
-        ImGui::PushID(id + 81000);
-        if (ImGui::SmallButton("Accept")) RespondToLoanOffer(managerId, id, "accept", 0, 0);
-        ImGui::SameLine(0.0f, 5.0f);
-        if (ImGui::SmallButton("Review")) {
-          s_loanReviewDealId_g = id;
-          snprintf(s_loanReviewFeeStr_g, sizeof(s_loanReviewFeeStr_g), "%s", DBCell(r,i,3).c_str());
-          snprintf(s_loanReviewWagePctStr_g, sizeof(s_loanReviewWagePctStr_g), "%s", DBCell(r,i,4).c_str());
-          snprintf(s_loanReviewPlayerName_g, sizeof(s_loanReviewPlayerName_g), "%s", DBCell(r,i,1).c_str());
-          snprintf(s_loanReviewClubName_g, sizeof(s_loanReviewClubName_g), "%s", DBCell(r,i,2).c_str());
-          s_openLoanReviewPopup_g = true;
-        }
-        ImGui::SameLine(0.0f, 5.0f);
-        if (ImGui::SmallButton("Reject")) RespondToLoanOffer(managerId, id, "reject", 0, 0);
-        ImGui::PopID();
+    ImGui::BeginChild("##incoming_loan_scroll", ImVec2(cw - 8.0f, tableH - 18.0f), false);
+    PushMgrFont(g_ManagerFontSmall);
+    if (!r || r->data.empty()) {
+      ImGui::TextColored(kTextDim, "No incoming loan offers.");
+    } else {
+      struct LoanIncomingRow {
+        int id = 0, pid = 0;
+        long long fee = 0;
+        int wagePct = 0;
+        std::string player, club, promise, endDate, logo, shortName, role, age, alt;
+      };
+      std::vector<int> playerOrder;
+      std::map<int, std::vector<LoanIncomingRow> > grouped;
+      for (unsigned int i = 0; i < r->data.size(); i++) {
+        LoanIncomingRow row;
+        row.id = atoi(DBCell(r,i,0).c_str());
+        row.player = DBCell(r,i,1);
+        row.club = DBCell(r,i,2);
+        row.fee = atoll(DBCell(r,i,3).c_str());
+        row.wagePct = atoi(DBCell(r,i,4).c_str());
+        row.promise = DBCell(r,i,5);
+        row.endDate = DBCell(r,i,6);
+        row.pid = atoi(DBCell(r,i,7).c_str());
+        row.logo = DBCell(r,i,8);
+        row.shortName = DBCell(r,i,9);
+        row.role = DBCell(r,i,10);
+        row.age = DBCell(r,i,11);
+        row.alt = DBCell(r,i,12);
+        if (grouped.find(row.pid) == grouped.end()) playerOrder.push_back(row.pid);
+        grouped[row.pid].push_back(row);
       }
-      ImGui::EndTable();
+
+      for (unsigned int gi = 0; gi < playerOrder.size(); gi++) {
+        std::vector<LoanIncomingRow> &offers = grouped[playerOrder[gi]];
+        if (offers.empty()) continue;
+        const LoanIncomingRow &head = offers[0];
+        float groupH = 54.0f + (float)offers.size() * 42.0f;
+        ImVec2 rp = ImGui::GetCursorScreenPos();
+        float rowW = ImGui::GetContentRegionAvail().x - 8.0f;
+        ImDrawList *dl = ImGui::GetWindowDrawList();
+        dl->AddRectFilled(rp, ImVec2(rp.x + rowW, rp.y + groupH), IM_COL32(16,24,46,220), 7.0f);
+        dl->AddRect(rp, ImVec2(rp.x + rowW, rp.y + groupH), IM_COL32(255,255,255,18), 7.0f);
+
+        ImGui::SetCursorScreenPos(ImVec2(rp.x + 12.0f, rp.y + 12.0f));
+        ImGui::PushID(head.pid + 83000);
+        if (ImGui::SmallButton(head.player.c_str()))
+          OpenPlayerDetailFromTransfer(head.pid, userClubId, g_CareerHub.club.name,
+                                       g_CareerHub.club.logoPath, g_CareerHub.club.shortName);
+        ImGui::PopID();
+        dl->AddText(g_ManagerFontSmall, 13.0f, ImVec2(rp.x + 14.0f, rp.y + 34.0f),
+                    C32(kTextPri), ("Age " + head.age).c_str());
+        DrawTransferPosChips(dl, rp.x + rowW * 0.34f, rp.y + 17.0f, head.role, head.alt);
+        std::string countText = std::to_string((int)offers.size()) + " active loan offer";
+        if (offers.size() != 1) countText += "s";
+        dl->AddText(g_ManagerFontSmall, 13.0f, ImVec2(rp.x + rowW - 170.0f, rp.y + 18.0f),
+                    C32(kTextSec), countText.c_str());
+
+        float y = rp.y + 54.0f;
+        for (unsigned int oi = 0; oi < offers.size(); oi++) {
+          LoanIncomingRow &offer = offers[oi];
+          ImU32 lineBg = (oi % 2 == 0) ? IM_COL32(22,31,56,170) : IM_COL32(18,27,50,130);
+          dl->AddRectFilled(ImVec2(rp.x + 8.0f, y - 4.0f),
+                            ImVec2(rp.x + rowW - 8.0f, y + 34.0f), lineBg, 5.0f);
+          ImGui::SetCursorScreenPos(ImVec2(rp.x + 16.0f, y + 3.0f));
+          DrawTeamBadge(offer.logo, offer.shortName, 24.0f);
+          ImGui::SetCursorScreenPos(ImVec2(rp.x + 44.0f, y + 3.0f));
+          ImGui::TextUnformatted(offer.club.c_str());
+          dl->AddText(g_ManagerFontSmall, 13.0f, ImVec2(rp.x + rowW * 0.34f, y + 6.0f),
+                      C32(kTextPri), ("Loan fee " + FmtMoney(offer.fee)).c_str());
+          char wageBuf[64];
+          snprintf(wageBuf, sizeof(wageBuf), "They pay %d%% wage", offer.wagePct);
+          dl->AddText(g_ManagerFontSmall, 12.0f, ImVec2(rp.x + rowW * 0.50f, y + 7.0f),
+                      C32(kTextSec), wageBuf);
+          dl->AddText(g_ManagerFontSmall, 12.0f, ImVec2(rp.x + rowW * 0.64f, y + 7.0f),
+                      C32(kTextSec), offer.promise.c_str());
+
+          ImGui::PushID(offer.id + 81000);
+          ImGui::SetCursorScreenPos(ImVec2(rp.x + rowW - 190.0f, y + 1.0f));
+          if (ImGui::SmallButton("Accept")) RespondToLoanOffer(managerId, offer.id, "accept", 0, 0);
+          ImGui::SameLine(0.0f, 5.0f);
+          if (ImGui::SmallButton("Review")) {
+            s_loanReviewDealId_g = offer.id;
+            snprintf(s_loanReviewFeeStr_g, sizeof(s_loanReviewFeeStr_g), "%lld", offer.fee);
+            snprintf(s_loanReviewWagePctStr_g, sizeof(s_loanReviewWagePctStr_g), "%d", offer.wagePct);
+            snprintf(s_loanReviewPlayerName_g, sizeof(s_loanReviewPlayerName_g), "%s", offer.player.c_str());
+            snprintf(s_loanReviewClubName_g, sizeof(s_loanReviewClubName_g), "%s", offer.club.c_str());
+            s_openLoanReviewPopup_g = true;
+          }
+          ImGui::SameLine(0.0f, 5.0f);
+          if (ImGui::SmallButton("Reject")) RespondToLoanOffer(managerId, offer.id, "reject", 0, 0);
+          ImGui::PopID();
+          y += 42.0f;
+        }
+        ImGui::Dummy(ImVec2(rowW, groupH + 8.0f));
+      }
     }
+    PopMgrFont(g_ManagerFontSmall);
+    ImGui::EndChild();
     EndModernCard();
     if (r) delete r;
     return;
@@ -10919,7 +10999,7 @@ static void DrawLoanTransfersPanel(int panel, float cw, float tableH,
     if (ImGui::BeginTable("##active_loan_table", 8, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY,
                           ImVec2(cw - 8.0f, tableH - 18.0f))) {
       ImGui::TableSetupColumn("Player"); ImGui::TableSetupColumn("Parent"); ImGui::TableSetupColumn("Loan club");
-      ImGui::TableSetupColumn("End"); ImGui::TableSetupColumn("Wage %"); ImGui::TableSetupColumn("Promise");
+      ImGui::TableSetupColumn("End"); ImGui::TableSetupColumn("Borrower wage %"); ImGui::TableSetupColumn("Promise");
       ImGui::TableSetupColumn("Apps"); ImGui::TableSetupColumn(""); ImGui::TableHeadersRow();
       if (r) for (unsigned int i = 0; i < r->data.size(); i++) {
         int id = atoi(DBCell(r,i,0).c_str());
@@ -11419,9 +11499,9 @@ static void DrawTransfersPage(float w, float h) {
                  << " AND seller_approved=0"
                  << " AND state NOT IN ('completed','collapsed');";
               delete GetDB()->Query(oq.str().c_str());
-              InsertTransferNews(managerId, g_CareerHub.currentDate,
-                                 offer.buyer + " offer accepted for " + offer.player,
-                                 "incoming_accepted", offer.pid, userClubId, offer.buyerId);
+              InsertInboxMessage(managerId, "Transfer offer accepted: " + offer.player,
+                                 "You accepted " + offer.buyer + "'s offer. The deal is now moving to player talks.",
+                                 "transfer", g_CareerHub.currentDate);
             }
             ImGui::SameLine(0.0f, 5.0f);
             if (ImGui::SmallButton("Review")) {
@@ -11797,16 +11877,16 @@ static void DrawWorkspace(float contentW, float workH) {
       }
     }
     ImGui::SetNextItemWidth(150.0f);
-    ImGui::InputText("Loan fee", s_loanFeeStr_g, sizeof(s_loanFeeStr_g));
+    ImGui::InputText("Loan fee paid to parent", s_loanFeeStr_g, sizeof(s_loanFeeStr_g));
     ImGui::SameLine(0.0f, 12.0f);
     ImGui::SetNextItemWidth(130.0f);
-    ImGui::InputText("Wage % paid by borrower", s_loanWagePctStr_g, sizeof(s_loanWagePctStr_g));
+    ImGui::InputText("Borrower wage %", s_loanWagePctStr_g, sizeof(s_loanWagePctStr_g));
     ImGui::SetNextItemWidth(160.0f);
     ImGui::InputText("End date", s_loanEndDateStr_g, sizeof(s_loanEndDateStr_g));
     ImGui::SetNextItemWidth(190.0f);
     ImGui::Combo("Playing time", &s_loanPlayingTimeIdx_g, kLoanTime, 4);
     ImGui::SetNextItemWidth(150.0f);
-    ImGui::InputText("Optional fee", s_loanOptionFeeStr_g, sizeof(s_loanOptionFeeStr_g));
+    ImGui::InputText("Option to buy fee", s_loanOptionFeeStr_g, sizeof(s_loanOptionFeeStr_g));
     ImGui::SameLine(0.0f, 12.0f);
     ImGui::SetNextItemWidth(150.0f);
     ImGui::InputText("Mandatory fee", s_loanMandatoryFeeStr_g, sizeof(s_loanMandatoryFeeStr_g));
@@ -11881,7 +11961,7 @@ static void DrawWorkspace(float contentW, float workH) {
     ImGui::InputText("Loan fee", s_loanReviewFeeStr_g, sizeof(s_loanReviewFeeStr_g));
     ImGui::SameLine(0.0f, 12.0f);
     ImGui::SetNextItemWidth(120.0f);
-    ImGui::InputText("Wage %", s_loanReviewWagePctStr_g, sizeof(s_loanReviewWagePctStr_g));
+    ImGui::InputText("Borrower wage %", s_loanReviewWagePctStr_g, sizeof(s_loanReviewWagePctStr_g));
     PopMgrFont(g_ManagerFontSmall);
     EndModernCard();
     ImGui::SetCursorScreenPos(ImVec2(p0.x + innerW - 294.0f, p0.y + 178.0f));

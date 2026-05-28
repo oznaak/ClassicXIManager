@@ -92,6 +92,17 @@ static std::string GetTeamNameUT(int clubId) {
   return name;
 }
 
+static long long GetClubTransferBudgetUT(int managerId, int clubId) {
+  std::stringstream q;
+  q << "SELECT transfer_budget FROM club_finances"
+    << " WHERE manager_id=" << managerId << " AND club_id=" << clubId << " LIMIT 1;";
+  DatabaseResult *r = GetDB()->Query(q.str().c_str());
+  long long budget = 0;
+  if (r && r->data.size() > 0) budget = atoll(UTCell(r,0,0).c_str());
+  if (r) delete r;
+  return budget;
+}
+
 static std::string UTAddDaysSigned(const std::string &date, int days) {
   std::stringstream q;
   q << "SELECT date('" << UTSql(date) << "', '"
@@ -406,9 +417,15 @@ void ProcessSpecialEvents(int managerId, int userClubId,
           DatabaseResult *cnr = GetDB()->Query(cnq.str().c_str());
           if (cnr && cnr->data.size() > 0) cname = UTCell(cnr,0,0);
           if (cnr) delete cnr; }
-        InsertTransferNews(managerId, currentDate,
-          cname + " make shock move for " + pname,
-          "rumour", ev.playerId, sellerClubId, ev.clubId);
+        if (sellerClubId == userClubId) {
+          InsertInboxMessage(managerId, "Incoming bid expected: " + pname,
+            cname + " are preparing a major offer for " + pname + ". Review it in Transfers.",
+            "transfer", currentDate);
+        } else {
+          InsertTransferNews(managerId, currentDate,
+            cname + " make shock move for " + pname,
+            "rumour", ev.playerId, sellerClubId, ev.clubId);
+        }
       }
 
     } else if (ev.type == "collapse_sale") {
@@ -481,9 +498,15 @@ void ProcessSpecialEvents(int managerId, int userClubId,
           DatabaseResult *pnr = GetDB()->Query(pnq.str().c_str());
           if (pnr && pnr->data.size() > 0) pname = UTCell(pnr,0,0);
           if (pnr) delete pnr; }
-        InsertTransferNews(managerId, currentDate,
-          pname + " named in national squad — clubs circle the young star",
-          "rumour", ev.playerId, ev.clubId, 0);
+        if (ev.clubId == userClubId) {
+          InsertInboxMessage(managerId, "Clubs circling " + pname,
+            pname + " has attracted attention after a rise in reputation.",
+            "transfer", currentDate);
+        } else {
+          InsertTransferNews(managerId, currentDate,
+            pname + " named in national squad - clubs circle the young star",
+            "rumour", ev.playerId, ev.clubId, 0);
+        }
       }
     }
 
@@ -799,8 +822,10 @@ void TickUserNegotiations(int managerId, int userClubId,
           "Transfer fee paid: " + pname + " from " + sellerName, -atoll(n.offFee.c_str()));
         InsertFinanceTransaction(managerId, n.seller, currentDate, "transfer",
           "Transfer fee received: " + pname + " to " + buyerName, atoll(n.offFee.c_str()));
-        InsertTransferNews(managerId, currentDate,
-          pname + " joins " + buyerName + " from " + sellerName, "completed", n.player, n.seller, n.buyer);
+        if (n.buyer != userClubId && n.seller != userClubId) {
+          InsertTransferNews(managerId, currentDate,
+            pname + " joins " + buyerName + " from " + sellerName, "completed", n.player, n.seller, n.buyer);
+        }
         InsertInboxMessage(managerId, pname + " transfer complete",
           "The deal is done. " + pname + " has joined " + buyerName + ".",
           "transfer", currentDate);
@@ -973,8 +998,9 @@ void RespondToOffer(int managerId, int negotiationId, const std::string &action,
          << "collapse_reason='user_rejected',days_in_state=0"
          << " WHERE id=" << negotiationId << " AND manager_id=" << managerId << ";";
       UTExec(uq.str());
-      InsertTransferNews(managerId, currentDate, "Incoming transfer offer rejected",
-                         "incoming_rejected", playerId, sellerId, buyerId);
+      InsertInboxMessage(managerId, "Incoming transfer offer rejected",
+        "You rejected the transfer offer for " + GetPlayerNameUT(playerId) + ".",
+        "transfer", currentDate);
       return;
     }
 
@@ -1136,13 +1162,18 @@ static void ActivateLoanDeal(int managerId, int loanDealId,
   UTExec(oq.str());
 
   std::string pname = GetPlayerNameUT(playerId);
-  InsertTransferNews(managerId, currentDate,
-    pname + " joins " + GetTeamNameUT(receivingClub) + " on loan",
-    "completed", playerId, loaningClub, receivingClub);
-  InsertInboxMessage(managerId, "Loan confirmed: " + pname,
-    pname + " has joined " + GetTeamNameUT(receivingClub) + " on loan"
-    + (endDate.empty() ? "." : " until " + endDate + "."),
-    "transfer", currentDate);
+  int userClubId = GetManagedClubId(managerId);
+  if (loaningClub != userClubId && receivingClub != userClubId) {
+    InsertTransferNews(managerId, currentDate,
+      pname + " joins " + GetTeamNameUT(receivingClub) + " on loan",
+      "completed", playerId, loaningClub, receivingClub);
+  }
+  if (loaningClub == userClubId || receivingClub == userClubId) {
+    InsertInboxMessage(managerId, "Loan confirmed: " + pname,
+      pname + " has joined " + GetTeamNameUT(receivingClub) + " on loan"
+      + (endDate.empty() ? "." : " until " + endDate + "."),
+      "transfer", currentDate);
+  }
 }
 
 void InitiateLoanOffer(int managerId, int userClubId, int playerId,
@@ -1199,8 +1230,20 @@ void InitiateLoanOffer(int managerId, int userClubId, int playerId,
   UTExec(iq.str());
 
   std::string pname = GetPlayerNameUT(playerId);
-  InsertInboxMessage(managerId, "Loan offer submitted: " + pname,
-    "The loan proposal is now being reviewed.", "transfer", currentDate);
+  bool userInitiated = (initiatingClub == userClubId);
+  bool userInvolved = (loaningClubId == userClubId || receivingClubId == userClubId);
+  if (userInitiated) {
+    InsertInboxMessage(managerId, "Loan offer submitted: " + pname,
+      "The loan proposal is now being reviewed.", "transfer", currentDate);
+  } else if (userInvolved && loaningClubId == userClubId) {
+    InsertInboxMessage(managerId, "Incoming loan offer: " + pname,
+      GetTeamNameUT(receivingClubId) + " want to take " + pname + " on loan. Review it in Transfers.",
+      "transfer", currentDate);
+  } else if (!userInvolved) {
+    InsertTransferNews(managerId, currentDate,
+      GetTeamNameUT(receivingClubId) + " make loan approach for " + pname,
+      "rumour", playerId, loaningClubId, receivingClubId);
+  }
 }
 
 void OfferLoan(int managerId, int userClubId, int playerId, int receivingClubId,
@@ -1265,6 +1308,7 @@ static void GenerateAILoanActivity(int managerId, int userClubId,
                                    int seasonYear) {
   if (!InTransferWindow(currentDate)) return;
   unsigned int dateSeed = (unsigned int)DateToJulian(currentDate);
+  std::string recentTransferCutoff = UTAddDaysSigned(currentDate, -45);
 
   // AI clubs mark realistic loan candidates as available.
   DatabaseResult *clubs = GetDB()->Query("SELECT id FROM teams WHERE transfer_budget > 0;");
@@ -1272,7 +1316,7 @@ static void GenerateAILoanActivity(int managerId, int userClubId,
   for (unsigned int ci = 0; ci < clubs->data.size(); ci++) {
     int clubId = atoi(UTCell(clubs,ci,0).c_str());
     if (clubId == userClubId) continue;
-    if (((dateSeed ^ (unsigned int)(clubId * 31)) % 100) > 18) continue;
+    if (((dateSeed ^ (unsigned int)(clubId * 31)) % 100) > 36) continue;
 
     std::stringstream pq;
     pq << "SELECT p.id, p.age, p.sofifaPotential, p.base_stat"
@@ -1286,11 +1330,17 @@ static void GenerateAILoanActivity(int managerId, int userClubId,
        << "   WHERE ld.manager_id=" << managerId
        << "   AND ld.player_id=p.id"
        << "   AND ld.status IN ('accepted_pending_player','active'))"
-       << " AND (p.age<=23 OR p.base_stat<0.62)"
-       << " ORDER BY (p.sofifaPotential-p.base_stat*100) DESC, p.age ASC LIMIT 1;";
+       << " AND NOT EXISTS (SELECT 1 FROM transfer_negotiations tn"
+       << "   WHERE tn.manager_id=" << managerId
+       << "   AND tn.player_id=p.id"
+       << "   AND tn.buying_club_id=" << clubId
+       << "   AND tn.state='completed'"
+       << "   AND tn.initiated_date>='" << UTSql(recentTransferCutoff) << "')"
+       << " AND (p.age<=24 OR p.base_stat<0.68)"
+       << " ORDER BY (p.sofifaPotential-p.base_stat*100) DESC, p.age ASC LIMIT 2;";
     DatabaseResult *pr = GetDB()->Query(pq.str().c_str());
-    if (pr && pr->data.size() > 0) {
-      int pid = atoi(UTCell(pr,0,0).c_str());
+    if (pr && pr->data.size() > 0) for (unsigned int pi = 0; pi < pr->data.size(); pi++) {
+      int pid = atoi(UTCell(pr,pi,0).c_str());
       std::stringstream iq;
       iq << "INSERT OR REPLACE INTO player_market_status"
          << "(manager_id,player_id,status,set_date,asking_price)"
@@ -1302,13 +1352,65 @@ static void GenerateAILoanActivity(int managerId, int userClubId,
   }
   delete clubs;
 
+  int listedCount = 0;
+  {
+    std::stringstream cq;
+    cq << "SELECT COUNT(*) FROM player_market_status pms"
+       << " JOIN players p ON p.id=pms.player_id"
+       << " LEFT JOIN player_save_state pss"
+       << " ON pss.manager_id=" << managerId << " AND pss.player_id=p.id"
+       << " WHERE pms.manager_id=" << managerId
+       << " AND pms.status='loan_listed'"
+       << " AND COALESCE(pss.team_id,p.team_id)!=" << userClubId << ";";
+    DatabaseResult *cr = GetDB()->Query(cq.str().c_str());
+    if (cr && cr->data.size() > 0) listedCount = atoi(UTCell(cr,0,0).c_str());
+    if (cr) delete cr;
+  }
+  if (listedCount < 18) {
+    std::stringstream bq;
+    bq << "SELECT p.id"
+       << " FROM players p"
+       << " LEFT JOIN player_save_state pss"
+       << " ON pss.manager_id=" << managerId << " AND pss.player_id=p.id"
+       << " LEFT JOIN player_market_status pms"
+       << " ON pms.manager_id=" << managerId << " AND pms.player_id=p.id"
+       << " WHERE COALESCE(pss.team_id,p.team_id)!=" << userClubId
+       << " AND COALESCE(pms.status,'')=''"
+       << " AND (p.age<=23 OR (p.age<=25 AND p.base_stat<0.70))"
+       << " AND NOT EXISTS (SELECT 1 FROM loan_deals ld"
+       << "   WHERE ld.manager_id=" << managerId
+       << "   AND ld.player_id=p.id"
+       << "   AND ld.status IN ('offered','negotiating','accepted_pending_player','active'))"
+       << " AND NOT EXISTS (SELECT 1 FROM transfer_negotiations tn"
+       << "   WHERE tn.manager_id=" << managerId
+       << "   AND tn.player_id=p.id"
+       << "   AND tn.buying_club_id=COALESCE(pss.team_id,p.team_id)"
+       << "   AND tn.state='completed'"
+       << "   AND tn.initiated_date>='" << UTSql(recentTransferCutoff) << "')"
+       << " ORDER BY p.sofifaPotential DESC, p.age ASC, p.base_stat ASC"
+       << " LIMIT " << (18 - listedCount) << ";";
+    DatabaseResult *br = GetDB()->Query(bq.str().c_str());
+    if (br) {
+      for (unsigned int i = 0; i < br->data.size(); i++) {
+        int pid = atoi(UTCell(br,i,0).c_str());
+        std::stringstream iq;
+        iq << "INSERT OR REPLACE INTO player_market_status"
+           << "(manager_id,player_id,status,set_date,asking_price)"
+           << " VALUES(" << managerId << "," << pid << ",'loan_listed','"
+           << currentDate << "',0);";
+        UTExec(iq.str());
+      }
+      delete br;
+    }
+  }
+
   // AI clubs seek listed players, and occasionally sensible unlisted user prospects.
   DatabaseResult *buyers = GetDB()->Query("SELECT id FROM teams WHERE transfer_budget > 0;");
   if (!buyers) return;
   for (unsigned int bi = 0; bi < buyers->data.size(); bi++) {
     int buyerId = atoi(UTCell(buyers,bi,0).c_str());
     if (buyerId == userClubId) continue;
-    if (((dateSeed ^ (unsigned int)(buyerId * 911)) % 100) > 22) continue;
+    if (((dateSeed ^ (unsigned int)(buyerId * 911)) % 100) > 38) continue;
 
     std::stringstream tq;
     tq << "SELECT p.id, COALESCE(pss.team_id,p.team_id), p.weekly_wage"
@@ -1327,7 +1429,15 @@ static void GenerateAILoanActivity(int managerId, int userClubId,
        << "   AND (ld.status IN ('accepted_pending_player','active')"
        << "   OR (ld.receiving_club_id=" << buyerId
        << "   AND ld.status IN ('offered','negotiating'))))"
-       << " ORDER BY p.base_stat DESC LIMIT 8;";
+       << " AND NOT EXISTS (SELECT 1 FROM transfer_negotiations tn"
+       << "   WHERE tn.manager_id=" << managerId
+       << "   AND tn.player_id=p.id"
+       << "   AND tn.buying_club_id=COALESCE(pss.team_id,p.team_id)"
+       << "   AND tn.state='completed'"
+       << "   AND tn.initiated_date>='" << UTSql(recentTransferCutoff) << "')"
+       << " ORDER BY (CASE WHEN COALESCE(pss.team_id,p.team_id)=" << userClubId
+       << " THEN 20 ELSE 0 END) + (CASE WHEN pms.status='loan_listed' THEN 10 ELSE 0 END) DESC,"
+       << " p.base_stat DESC LIMIT 12;";
     DatabaseResult *tr = GetDB()->Query(tq.str().c_str());
     if (!tr || tr->data.empty()) { if (tr) delete tr; continue; }
     int pick = (int)((dateSeed ^ (unsigned int)buyerId) % tr->data.size());
@@ -1339,7 +1449,9 @@ static void GenerateAILoanActivity(int managerId, int userClubId,
 
     int wagePct = 50 + (int)((dateSeed + buyerId + playerId) % 6) * 10;
     wagePct = std::min(100, wagePct);
+    long long buyerBudget = GetClubTransferBudgetUT(managerId, buyerId);
     int loanFee = (int)std::max(0LL, wage * (long long)(wagePct / 10));
+    if (buyerBudget > 0) loanFee = (int)std::min<long long>(loanFee, buyerBudget / 20);
     std::string direction = parentId == userClubId ? "incoming_loan_out" : "ai_loan";
     InitiateLoanOffer(managerId, userClubId, playerId, parentId, buyerId,
       loanFee, wagePct, "squad_player", 1, 0, "", 0, "", 0,
@@ -1467,9 +1579,9 @@ void RespondToLoanOffer(int managerId, int loanDealId,
        << " AND id!=" << loanDealId
        << " AND status IN ('offered','negotiating','accepted_pending_player');";
     UTExec(oq.str());
-    InsertTransferNews(managerId, currentDate,
-      GetTeamNameUT(rcvClub) + " loan offer accepted for " + GetPlayerNameUT(playerId),
-      "incoming_accepted", playerId, loanClub, rcvClub);
+    InsertInboxMessage(managerId, "Loan offer accepted: " + GetPlayerNameUT(playerId),
+      "You accepted " + GetTeamNameUT(rcvClub) + "'s loan offer. The loan is pending final checks.",
+      "transfer", currentDate);
     return;
   }
 
@@ -1504,9 +1616,9 @@ void RespondToLoanOffer(int managerId, int loanDealId,
     uq << "UPDATE loan_deals SET status='recalled',collapse_reason='parent_recall'"
        << " WHERE manager_id=" << managerId << " AND id=" << loanDealId << ";";
     UTExec(uq.str());
-    InsertTransferNews(managerId, currentDate,
-      GetPlayerNameUT(playerId) + " recalled from loan",
-      "completed", playerId, rcvClub, loanClub);
+    InsertInboxMessage(managerId, "Player recalled from loan",
+      GetPlayerNameUT(playerId) + " has returned to your squad.",
+      "transfer", currentDate);
     return;
   }
 
@@ -1531,9 +1643,9 @@ void RespondToLoanOffer(int managerId, int loanDealId,
         "Loan option fee paid: " + GetPlayerNameUT(playerId), -fee);
       InsertFinanceTransaction(managerId, loanClub, currentDate, "transfer",
         "Loan option fee received: " + GetPlayerNameUT(playerId), fee);
-      InsertTransferNews(managerId, currentDate,
-        "Option to buy exercised for " + GetPlayerNameUT(playerId),
-        "completed", playerId, loanClub, rcvClub);
+      InsertInboxMessage(managerId, "Loan option exercised",
+        "You exercised the option to buy for " + GetPlayerNameUT(playerId) + ".",
+        "transfer", currentDate);
     }
   }
 }
@@ -1581,6 +1693,7 @@ void ProcessLoanClauses(int managerId, const std::string &currentDate, int seaso
   }
   delete lr;
 
+  int userClub = GetManagedClubId(managerId);
   for (auto &d : deals) {
     int starts = 0, subs = 0;
     {
@@ -1627,8 +1740,14 @@ void ProcessLoanClauses(int managerId, const std::string &currentDate, int seaso
         "Mandatory loan buy fee paid: " + GetPlayerNameUT(d.playerId), -d.mandatoryFee);
       InsertFinanceTransaction(managerId, d.loanClub, currentDate, "transfer",
         "Mandatory loan buy fee received: " + GetPlayerNameUT(d.playerId), d.mandatoryFee);
-      InsertTransferNews(managerId, currentDate, "Mandatory buy clause triggered for " + GetPlayerNameUT(d.playerId),
-                          "completed", d.playerId, d.loanClub, d.rcvClub);
+      if (d.loanClub == userClub || d.rcvClub == userClub) {
+        InsertInboxMessage(managerId, "Mandatory loan buy triggered",
+          "The mandatory buy clause for " + GetPlayerNameUT(d.playerId) + " has been triggered.",
+          "transfer", currentDate);
+      } else {
+        InsertTransferNews(managerId, currentDate, "Mandatory buy clause triggered for " + GetPlayerNameUT(d.playerId),
+                            "completed", d.playerId, d.loanClub, d.rcvClub);
+      }
       continue;
     }
 
@@ -1645,12 +1764,13 @@ void ProcessLoanClauses(int managerId, const std::string &currentDate, int seaso
         du << "UPDATE loan_deals SET last_drama_date='" << currentDate
            << "' WHERE id=" << d.id << ";";
         UTExec(du.str());
-        if (d.recallMonth > 0 && curMonth >= d.recallMonth && d.loanClub == GetManagedClubId(managerId)) {
+        if (d.recallMonth > 0 && curMonth >= d.recallMonth && d.loanClub == userClub) {
           long long wage = GetPlayerCurrentWage(managerId, d.playerId);
           SetPlayerSaveState(managerId, d.playerId, d.loanClub, wage);
           UTExec("UPDATE loan_deals SET status='recalled',collapse_reason='missed_playing_time' WHERE id=" + std::to_string(d.id) + ";");
-          InsertTransferNews(managerId, currentDate, GetPlayerNameUT(d.playerId) + " recalled after loan concerns",
-                              "completed", d.playerId, d.rcvClub, d.loanClub);
+          InsertInboxMessage(managerId, "Player recalled from loan",
+            GetPlayerNameUT(d.playerId) + " was recalled after playing-time concerns.",
+            "transfer", currentDate);
           continue;
         }
       }
@@ -1668,8 +1788,14 @@ void ProcessLoanClauses(int managerId, const std::string &currentDate, int seaso
         if (wr) delete wr; }
       SetPlayerSaveState(managerId, d.playerId, d.loanClub, wage);
       UTExec("UPDATE loan_deals SET status='expired' WHERE id=" + std::to_string(d.id) + ";");
-      InsertTransferNews(managerId, currentDate, "Player returned from loan",
-                          "completed", d.playerId, d.rcvClub, d.loanClub);
+      if (d.loanClub == userClub || d.rcvClub == userClub) {
+        InsertInboxMessage(managerId, "Loan expired",
+          GetPlayerNameUT(d.playerId) + " has returned to " + GetTeamNameUT(d.loanClub) + ".",
+          "transfer", currentDate);
+      } else {
+        InsertTransferNews(managerId, currentDate, "Player returned from loan",
+                            "completed", d.playerId, d.rcvClub, d.loanClub);
+      }
       continue;
     }
 
@@ -1692,7 +1818,6 @@ void ProcessLoanClauses(int managerId, const std::string &currentDate, int seaso
 
     // Option to buy: AI automatically exercises if squad needs it and budget allows
     if (d.optFee > 0 && !d.optDeadline.empty() && currentDate >= d.optDeadline) {
-      int userClub = GetManagedClubId(managerId);
       if (d.loanClub == userClub || d.rcvClub == userClub) {
         if (currentDate == d.optDeadline) {
           InsertInboxMessage(managerId, "Loan option deadline",
