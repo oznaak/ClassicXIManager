@@ -5,12 +5,12 @@
 #include "menutask.hpp"
 #include "pagefactory.hpp"
 #include "main.hpp"
+#include "data/teamdata.hpp"
 #include "utils/database.hpp"
 #include "base/utils.hpp"
 
 #include <sstream>
 #include <cstdio>
-#include <map>
 
 using namespace blunted;
 
@@ -27,98 +27,29 @@ static std::string MapCompetitionName(const std::string &raw) {
   return raw;
 }
 
-// ---------------------------------------------------------------------------
-// Parse formation_xml from the teams table and return a map of
-// formationorder (1-11) → role string ("GK", "LB", "CM", ...).
-static std::map<int, std::string> ParseFormationRoles(const std::string &xml) {
-  std::map<int, std::string> roles;
-  for (int i = 1; i <= 11; i++) {
-    std::string open  = "<p" + std::to_string(i) + ">";
-    std::string close = "</p" + std::to_string(i) + ">";
-    size_t s = xml.find(open);
-    if (s == std::string::npos) continue;
-    s += open.size();
-    size_t e = xml.find(close, s);
-    if (e == std::string::npos) continue;
-    std::string block = xml.substr(s, e - s);
-
-    size_t rs = block.find("<role>");
-    if (rs == std::string::npos) continue;
-    rs += 6; // strlen("<role>")
-    size_t re = block.find("</role>", rs);
-    if (re == std::string::npos) continue;
-    roles[i - 1] = block.substr(rs, re - rs); // fo is 0-10; XML uses <p1>-<p11>
-  }
-  return roles;
-}
-
-// ---------------------------------------------------------------------------
-
 std::vector<PreMatchLineupPlayer>
 PreMatchLineupPage::LoadXI(int managerId, int teamId, int limit, int offset) {
   std::vector<PreMatchLineupPlayer> out;
+  (void)managerId;
 
-  // Load formation roles from the team's formation XML
-  std::map<int, std::string> formationRoles;
-  {
-    std::stringstream fq;
-    fq << "SELECT formation_xml FROM teams WHERE id = " << teamId << " LIMIT 1;";
-    DatabaseResult *fr = GetDB()->Query(fq.str());
-    if (fr && !fr->data.empty() && !fr->data[0].empty())
-      formationRoles = ParseFormationRoles(fr->data[0][0]);
-    delete fr;
-  }
-
-  std::stringstream q;
-  q << "SELECT p.firstname, p.lastname, p.role, p.formationorder, COALESCE(p.nickname,'') as nickname"
-    << " FROM players p"
-    << " LEFT JOIN player_save_state pss"
-    << " ON pss.manager_id = " << managerId
-    << " AND pss.player_id = p.id"
-    << " WHERE COALESCE(pss.team_id, p.team_id) = " << teamId
-    << " ORDER BY"
-    << "  CASE WHEN p.formationorder IS NULL OR p.formationorder < 0 THEN 999"
-    << "       ELSE p.formationorder END ASC,"
-    << "  CASE WHEN p.role LIKE '%GK%' THEN 1"
-    << "       WHEN p.role LIKE '%DM%' THEN 3"
-    << "       WHEN p.role LIKE '%D%'  THEN 2"
-    << "       WHEN p.role LIKE '%AM%' THEN 5"
-    << "       WHEN p.role LIKE '%M%'  THEN 4"
-    << "       WHEN p.role LIKE '%ST%' OR p.role LIKE '%F%' THEN 6"
-    << "       ELSE 7 END ASC,"
-    << "  p.base_stat DESC,"
-    << "  p.firstname ASC, p.lastname ASC"
-    << " LIMIT " << limit << " OFFSET " << offset << ";";
-  DatabaseResult *r = GetDB()->Query(q.str());
-  if (!r) return out;
-
-  for (unsigned int i = 0; i < r->data.size(); i++) {
+  TeamData teamData(teamId);
+  int total = teamData.GetPlayerNum();
+  for (int i = 0; i < limit && offset + i < total; i++) {
     PreMatchLineupPlayer p;
-    std::string fn = DBCell(r, i, 0);
-    std::string ln = DBCell(r, i, 1);
-    std::string nn = DBCell(r, i, 4); // nickname
-
-    if (!nn.empty())
-      p.name = nn;
-    else if (!fn.empty() || !ln.empty())
-      p.name = fn.empty() ? ln : (ln.empty() ? fn : fn + " " + ln);
-    else
-      p.name = "Player";
-
-    int fo = atoi(DBCell(r, i, 3).c_str());
-    p.number = (fo >= 0 && fo <= 99) ? fo : (offset + (int)i);
+    PlayerData *pd = teamData.GetPlayerData(offset + i);
+    p.name = pd ? pd->GetDisplayName() : "Player";
+    p.number = offset + i;
 
     // Bench players always show "SUB"; starters use formation XML role
     if (offset > 0)
       p.role = "SUB";
-    else if (fo >= 0 && fo <= 10 && formationRoles.count(fo))
-      p.role = formationRoles[fo];
+    else if (i >= 0 && i < playerNum)
+      p.role = GetRoleName(teamData.GetFormationEntry(i).role);
     else
-      p.role = DBCell(r, i, 2);
+      p.role = pd ? pd->GetRoleRaw() : "";
 
     out.push_back(p);
   }
-  delete r;
 
   // Fill missing rows with TBD only for starting XI (offset==0).
   if (offset == 0) {

@@ -264,6 +264,7 @@ struct PausePlayer {
   float nx       = 0.f;   // [0,1] screen x pre-mapped with engine formula
   float ny       = 0.f;   // [0,1] screen y — 0=top(attack), 1=bottom(GK)
   int   jerseyNumber = 0;
+  int   playerDbId   = -1;
 };
 
 struct BenchPlayer {
@@ -271,6 +272,7 @@ struct BenchPlayer {
   std::string role;
   int         playersIdx    = 0;
   int         jerseyNumber  = 0;
+  int         playerDbId    = -1;
 };
 
 static bool                      s_pauseInitialized   = false;
@@ -297,11 +299,23 @@ static int                       s_lastKnownGoals[2] = {0, 0};
 static bool                      s_subPanelActive   = false;
 static int                       s_subOffSelected   = -1;
 static int                       s_subOnSelected    = -1;
-static int                       s_subsMadeCount    = 0;
 
 // Live tactic values read from TeamData under matchRenderMutex, updated on preset click.
 static std::map<std::string, float> s_liveTactics;
 
+static int CountQueuedSubsForTeam(int teamIdx) {
+  int count = 0;
+  for (const QueuedSub &sub : g_QueuedSubQueue) {
+    if (sub.teamIdx == teamIdx) count++;
+  }
+  return count;
+}
+
+static bool CanQueueSubForTeam(int teamIdx) {
+  int queuedForTeam = CountQueuedSubsForTeam(teamIdx);
+  if (g_SubsUsed + queuedForTeam >= 5) return false;
+  return g_WindowsUsed < 3 || g_SubWindowOpen || queuedForTeam > 0;
+}
 
 static void ResetPauseCache() {
   s_pauseInitialized = false;
@@ -319,7 +333,6 @@ static void ResetPauseCache() {
   s_subPanelActive      = false;
   s_subOffSelected      = -1;
   s_subOnSelected       = -1;
-  s_subsMadeCount       = 0;
   s_liveTactics.clear();
   g_TopBarSoftPause     = false;
   g_QueuedSubQueue.clear();
@@ -974,7 +987,10 @@ void RenderImGuiMatchOverlay() {
     tbdl->AddRectFilled(ImVec2(winX, winY), ImVec2(winX + winW, winY + winH),
                         IM_COL32(10, 14, 28, 220), 8.0f);
 
-    bool isPaused = g_TopBarSoftPause || g_ImGuiIngamePauseMenuActive;
+    auto gameTaskForPause = GetGameTask();
+    Match *matchForPause = gameTaskForPause ? gameTaskForPause->GetMatch() : nullptr;
+    bool isPaused = g_TopBarSoftPause || g_ImGuiIngamePauseMenuActive ||
+                    (matchForPause && matchForPause->GetPause());
     float cx2 = barX;
     float cy2 = barY2;
 
@@ -1027,7 +1043,11 @@ void RenderImGuiMatchOverlay() {
     };
 
     // Play button
-    if (IconBtn("##play", !isPaused, isPaused)) g_TopBarSoftPause = false;
+    bool playClicked = IconBtn("##play", !isPaused, isPaused);
+    if (playClicked) {
+      g_TopBarSoftPause = false;
+      if (matchForPause && matchForPause->GetPause()) matchForPause->Pause(false);
+    }
     DrawPlay(!isPaused);
 
     // Pause button
@@ -1293,7 +1313,7 @@ void RenderImGuiMatchOverlay() {
     }
 
     // Start drag — only if budget allows
-    bool budgetOk = (g_SubsUsed < 5) && (g_WindowsUsed < 3 || g_SubWindowOpen);
+    bool budgetOk = CanQueueSubForTeam(s_subUserTeamIdx);
     if (s_dragSubIdx < 0 && budgetOk && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && nearSub >= 0)
       s_dragSubIdx = nearSub;
 
@@ -1340,7 +1360,8 @@ void RenderImGuiMatchOverlay() {
 
     // Commit substitution on mouse release
     if (s_dragSubIdx >= 0 && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
-      if (s_hoverOnIdx >= 0 && s_hoverOnIdx < (int)s_pausePlayers.size() &&
+      if (budgetOk &&
+          s_hoverOnIdx >= 0 && s_hoverOnIdx < (int)s_pausePlayers.size() &&
           s_dragSubIdx < (int)s_benchPlayers.size()) {
         const BenchPlayer  &bp  = s_benchPlayers[s_dragSubIdx];
         const PausePlayer  &off = s_pausePlayers[s_hoverOnIdx];
@@ -1351,6 +1372,8 @@ void RenderImGuiMatchOverlay() {
         qs.teamIdx        = s_subUserTeamIdx;
         qs.offIdx         = s_hoverOnIdx;
         qs.onIdx          = bp.playersIdx;
+        qs.offPlayerDbId  = off.playerDbId;
+        qs.onPlayerDbId   = bp.playerDbId;
         qs.nameOut        = off.lastName;
         qs.nameIn         = bp.lastName;
         qs.teamBadgePath  = s_userBadgePath;
@@ -1365,6 +1388,7 @@ void RenderImGuiMatchOverlay() {
         incoming.nx          = off.nx;
         incoming.ny          = off.ny;
         incoming.jerseyNumber = bp.jerseyNumber;
+        incoming.playerDbId  = bp.playerDbId;
 
         s_pausePlayers.erase(s_pausePlayers.begin() + s_hoverOnIdx);
         s_pausePlayers.push_back(incoming);
@@ -1409,6 +1433,7 @@ static PausePlayer MakePausePlayer(TeamData *td, int i) {
   PlayerData *pd = td->GetPlayerData(i);
   pp.lastName    = pd->GetDisplayName();
   pp.jerseyNumber = pd->GetJerseyNumber();
+  pp.playerDbId  = pd->GetDatabaseID();
   FormationEntry fe = td->GetFormationEntry(i);
   pp.role = GetRoleName(fe.role);
   Vector3 pos = fe.databasePosition;
@@ -1568,9 +1593,12 @@ static void DrawSubstitutionPanel(float px, float py, float pw, float ph) {
   ImVec2      origin= ImGui::GetWindowPos();
 
   // ---- Header ---------------------------------------------------------------
-  int subsLeft = 3 - s_subsMadeCount;
+  int queuedForTeam = CountQueuedSubsForTeam(s_subUserTeamIdx);
+  int plannedSubs = g_SubsUsed + queuedForTeam;
+  bool budgetOk = CanQueueSubForTeam(s_subUserTeamIdx);
   char hdr[64];
-  snprintf(hdr, sizeof(hdr), "SUBSTITUTIONS  —  %d / 3 used", s_subsMadeCount);
+  snprintf(hdr, sizeof(hdr), "SUBSTITUTIONS  —  %d / 5 used, %d / 3 windows",
+           plannedSubs, g_WindowsUsed);
   ImVec2 hMin = ImVec2(origin.x, origin.y);
   ImVec2 hMax = ImVec2(origin.x + pw, origin.y + kHeaderH);
   dl->AddRectFilled(hMin, hMax, IM_COL32(18, 28, 52, 255));
@@ -1708,7 +1736,7 @@ static void DrawSubstitutionPanel(float px, float py, float pw, float ph) {
   const float btnW  = 110.0f;
   const float btnH  = 30.0f;
   const float btnY  = fY + (kFooterH - btnH) * 0.5f;
-  bool canConfirm   = (s_subOffSelected >= 0 && s_subOnSelected >= 0 && subsLeft > 0);
+  bool canConfirm   = (s_subOffSelected >= 0 && s_subOnSelected >= 0 && budgetOk);
 
   // Confirm
   ImVec2 confMin = ImVec2(origin.x + pw - btnW * 2.0f - 24.0f, btnY);
@@ -1728,12 +1756,19 @@ static void DrawSubstitutionPanel(float px, float py, float pw, float ph) {
     for (auto &bp : s_benchPlayers)
       if (bp.playersIdx == s_subOnSelected) { nameIn = bp.lastName; break; }
 
+    BenchPlayer incoming;
+    for (auto it = s_benchPlayers.begin(); it != s_benchPlayers.end(); ++it) {
+      if (it->playersIdx == s_subOnSelected) { incoming = *it; break; }
+    }
+
     // Push substitution onto queue — fires on next dead ball (gametask.cpp)
     QueuedSub qs2;
     qs2.pending        = true;
     qs2.teamIdx        = s_subUserTeamIdx;
     qs2.offIdx         = s_subOffSelected;
     qs2.onIdx          = s_subOnSelected;
+    qs2.offPlayerDbId  = (s_subOffSelected >= 0 && s_subOffSelected < (int)s_pausePlayers.size()) ? s_pausePlayers[s_subOffSelected].playerDbId : -1;
+    qs2.onPlayerDbId   = incoming.playerDbId;
     qs2.nameOut        = nameOut;
     qs2.nameIn         = nameIn;
     qs2.teamBadgePath  = s_userBadgePath;
@@ -1742,7 +1777,6 @@ static void DrawSubstitutionPanel(float px, float py, float pw, float ph) {
     g_QueuedSubQueue.push_back(qs2);
 
     // Update display lists so user can queue a 2nd sub immediately
-    BenchPlayer incoming;
     for (auto it = s_benchPlayers.begin(); it != s_benchPlayers.end(); ++it) {
       if (it->playersIdx == s_subOnSelected) { incoming = *it; s_benchPlayers.erase(it); break; }
     }
@@ -1761,8 +1795,9 @@ static void DrawSubstitutionPanel(float px, float py, float pw, float ph) {
     newPP.role     = outgoingRole;
     newPP.nx       = outgoingNx;
     newPP.ny       = outgoingNy;
+    newPP.jerseyNumber = incoming.jerseyNumber;
+    newPP.playerDbId = incoming.playerDbId;
     s_pausePlayers.push_back(newPP);
-    s_subsMadeCount++;
     s_subOffSelected = -1;
     s_subOnSelected  = -1;
   }
@@ -1826,6 +1861,7 @@ static void InitHUDDataIfNeeded(Match *match) {
       bp.role        = raw.empty() ? "SUB" : raw;
       bp.playersIdx  = i;
       bp.jerseyNumber = pd->GetJerseyNumber();
+      bp.playerDbId  = pd->GetDatabaseID();
       s_benchPlayers.push_back(bp);
     }
   }
@@ -1853,6 +1889,7 @@ static void InitHUDDataIfNeeded(Match *match) {
       bp.role        = raw.empty() ? "SUB" : raw;
       bp.playersIdx  = i;
       bp.jerseyNumber = pd->GetJerseyNumber();
+      bp.playerDbId  = pd->GetDatabaseID();
       s_awayBenchPlayers.push_back(bp);
     }
   }

@@ -454,7 +454,18 @@ Vector3 GetShotVector(Match *match, Player *player, const Vector3 &nextStartPos,
 
   // best case result
 
+  const bool managerMode = GetConfiguration()->GetReal("manager_mode", 0.0f) > 0.5f;
   float desiredHeight = 0.05f;
+  if (managerMode) {
+    float finishingSkill =
+      player->GetStat("technical_shot") * 0.45f +
+      player->GetStat("mental_calmness") * 0.25f +
+      player->GetStat("mental_offensivepositioning") * 0.15f +
+      player->GetStat("physical_shotpower") * 0.15f;
+    float controlledHeight = 0.04f + finishingSkill * 0.05f;
+    float difficultHeight = difficultyFactor * (0.20f - finishingSkill * 0.08f);
+    desiredHeight = clamp(controlledHeight + difficultHeight, 0.04f, 0.22f);
+  }
   Vector3 desiredShot = (currentAnim->originatingCommand.touchInfo.desiredDirection.Get2D() + Vector3(0, 0, desiredHeight)).GetNormalized() * power;
   if (Verbose()) {
     desiredShot.Print();
@@ -489,8 +500,21 @@ Vector3 GetShotVector(Match *match, Player *player, const Vector3 &nextStartPos,
   // actual result
 
   float worstCaseFactor = random(0.0f, 1.0f);
-  worstCaseFactor =
-      std::pow(worstCaseFactor, player->GetStat("technical_shot") * 0.7f);
+  if (managerMode) {
+    float finishingSkill =
+      player->GetStat("technical_shot") * 0.45f +
+      player->GetStat("mental_calmness") * 0.25f +
+      player->GetStat("mental_offensivepositioning") * 0.15f +
+      player->GetStat("physical_shotpower") * 0.15f;
+    float difficultyWeight = 0.45f + difficultyFactor * 0.75f;
+    float skillProtection = 0.55f + finishingSkill * 0.55f;
+    worstCaseFactor = std::pow(worstCaseFactor, skillProtection) * difficultyWeight;
+    worstCaseFactor *= 1.0f - finishingSkill * 0.28f;
+    worstCaseFactor = clamp(worstCaseFactor, 0.02f, 0.92f);
+  } else {
+    worstCaseFactor =
+        std::pow(worstCaseFactor, player->GetStat("technical_shot") * 0.7f);
+  }
 
   Vector3 shot = desiredShot * (1.0f - worstCaseFactor) +
                  worstCaseShot * worstCaseFactor;

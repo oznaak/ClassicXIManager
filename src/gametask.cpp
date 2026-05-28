@@ -14,6 +14,20 @@
 
 #include "menu/imgui_match.hpp"
 #include "onthepitch/team.hpp"
+#include "onthepitch/referee.hpp"
+
+static bool MatchIsFinalOrEnded(Match *match) {
+  if (!match) return true;
+  if (match->IsGameOver()) return true;
+  if (match->GetMatchPhase() == e_MatchPhase_Penalties) return true;
+  return false;
+}
+
+static bool MatchIsPhaseTransitioning(Match *match) {
+  if (!match) return true;
+  const RefereeBuffer &buffer = match->GetRefereeBuffer();
+  return buffer.active && buffer.endPhase;
+}
 
 void UploadFullbodyModel::Update() {
   for (unsigned int i = 0; i < geometryToUpload.size(); i++) {
@@ -152,10 +166,6 @@ void GameTask::ProcessPhase() {
       match->Process();
     }
 
-    matchPutBufferMutex.lock();
-    match->PreparePutBuffers();
-    matchPutBufferMutex.unlock();
-
     // Track window lifecycle: close the open window when play resumes.
     {
       static bool s_wasInPlay = false;
@@ -179,34 +189,62 @@ void GameTask::ProcessPhase() {
 
     // Execute queued substitutions one per frame on dead ball.
     // Rules: max 5 subs total, max 3 distinct windows; multiple subs in same stoppage = 1 window.
-    if (!g_QueuedSubQueue.empty() && !match->GetPause() && !match->IsInPlay() && !match->IsGoalScored()) {
+    if (!g_QueuedSubQueue.empty() && MatchIsFinalOrEnded(match)) {
+      printf("[SUB] Cleared %zu queued substitution(s): match is ending or ended phase=%d time=%lu\n",
+             g_QueuedSubQueue.size(), (int)match->GetMatchPhase(), match->GetMatchTime_ms());
+      g_QueuedSubQueue.clear();
+    }
+
+    if (!g_QueuedSubQueue.empty() && !match->GetPause() && !match->IsInPlay() &&
+        !match->IsGoalScored() && !MatchIsFinalOrEnded(match) && !MatchIsPhaseTransitioning(match)) {
       bool canSub = (g_SubsUsed < 5) && (g_WindowsUsed < 3 || g_SubWindowOpen);
       if (canSub) {
         QueuedSub sub = g_QueuedSubQueue.front();
         g_QueuedSubQueue.erase(g_QueuedSubQueue.begin());
 
+        printf("[SUB] Executing queued substitution team=%d offDb=%d onDb=%d offIdx=%d onIdx=%d phase=%d time=%lu used=%d windows=%d open=%d\n",
+               sub.teamIdx, sub.offPlayerDbId, sub.onPlayerDbId, sub.offIdx, sub.onIdx,
+               (int)match->GetMatchPhase(), match->GetMatchTime_ms(),
+               g_SubsUsed, g_WindowsUsed, g_SubWindowOpen ? 1 : 0);
+
+        matchLifetimeMutex.lock();
         matchPutBufferMutex.lock();
-        Team *team = match->GetTeam(sub.teamIdx);
-        if (team) team->SubstitutePlayer(sub.offIdx, sub.onIdx);
+        matchRenderMutex.lock();
+        Team *team = (sub.teamIdx >= 0 && sub.teamIdx < 2) ? match->GetTeam(sub.teamIdx) : 0;
+        bool subDone = team && team->SubstitutePlayerByDatabaseID(sub.offPlayerDbId, sub.onPlayerDbId,
+                                                                  sub.offIdx, sub.onIdx);
+        matchRenderMutex.unlock();
         matchPutBufferMutex.unlock();
+        matchLifetimeMutex.unlock();
 
-        if (!g_SubWindowOpen) { g_WindowsUsed++; g_SubWindowOpen = true; }
-        g_SubsUsed++;
+        if (subDone) {
+          if (!g_SubWindowOpen) { g_WindowsUsed++; g_SubWindowOpen = true; }
+          g_SubsUsed++;
 
-        SubGraphic sg;
-        sg.active         = true;
-        sg.nameOut        = sub.nameOut;
-        sg.nameIn         = sub.nameIn;
-        sg.teamBadgePath  = sub.teamBadgePath;
-        sg.leagueLogoPath = sub.leagueLogoPath;
-        sg.teamColor      = sub.teamColor;
-        sg.startTime      = -1.0;
-        g_SubGraphicQueue.push_back(sg);
+          SubGraphic sg;
+          sg.active         = true;
+          sg.nameOut        = sub.nameOut;
+          sg.nameIn         = sub.nameIn;
+          sg.teamBadgePath  = sub.teamBadgePath;
+          sg.leagueLogoPath = sub.leagueLogoPath;
+          sg.teamColor      = sub.teamColor;
+          sg.startTime      = -1.0;
+          g_SubGraphicQueue.push_back(sg);
+        } else {
+          printf("[SUB] Ignored stale substitution request team=%d offDb=%d onDb=%d offIdx=%d onIdx=%d\n",
+                 sub.teamIdx, sub.offPlayerDbId, sub.onPlayerDbId, sub.offIdx, sub.onIdx);
+        }
       } else {
         // Budget exhausted — drop remaining queued subs
+        printf("[SUB] Cleared %zu queued substitution(s): budget exhausted used=%d windows=%d open=%d\n",
+               g_QueuedSubQueue.size(), g_SubsUsed, g_WindowsUsed, g_SubWindowOpen ? 1 : 0);
         g_QueuedSubQueue.clear();
       }
     }
+
+    matchPutBufferMutex.lock();
+    match->PreparePutBuffers();
+    matchPutBufferMutex.unlock();
   }
 
   if (menuScene) {

@@ -808,6 +808,7 @@ void ElizaController::Reset() {
 
 void ElizaController::GetOnTheBallCommands(std::vector<PlayerCommand> &commandQueue, Vector3 &rawInputDirection, float &rawInputVelocityFloat) {
 
+  const bool managerMode = GetConfiguration()->GetReal("manager_mode", 0.0f) > 0.5f;
   float oneTouchIsHard = 0.0f;
   float movementDiff = NormalizedClamp((match->GetBall()->GetMovement() - CastPlayer()->GetMovement()).GetLength(), 0.0f, 10.0f);
   oneTouchIsHard = movementDiff - CastPlayer()->GetStat("technical_shortpass") * movementDiff * 0.8f;
@@ -946,7 +947,35 @@ void ElizaController::GetOnTheBallCommands(std::vector<PlayerCommand> &commandQu
   float goalDist = NormalizedClamp((Vector3(pitchHalfW * -team->GetSide(), 0, 0) - player->GetPosition()).GetLength(), 0.0f, 32.0f);
   float idealShotPosFactor = 1.0f - NormalizedClamp((Vector3((pitchHalfW - 7.0f) * -team->GetSide(), 0, 0) - player->GetPosition()).GetLength(), 0.0f, 16.0f);
   idealShotPosFactor = curve(idealShotPosFactor, 1.0f);
-  if (idealShotPosFactor > 0.1f) {
+  float managerShotIntent = 0.0f;
+  if (managerMode) {
+    float attackerSkill =
+      (CastPlayer()->GetStat("technical_shot") +
+       CastPlayer()->GetStat("physical_shotpower") +
+       CastPlayer()->GetStat("mental_offensivepositioning") +
+       CastPlayer()->GetStat("mental_calmness")) * 0.25f;
+    float possessionPatience = NormalizedClamp((float)CastPlayer()->GetPossessionDuration_ms(), 1800.0f, 6000.0f);
+    float bodyShape = CastPlayer()->GetDirectionVec().GetDotProduct(Vector3(-team->GetSide(), 0, 0)) * 0.5f + 0.5f;
+    int goals = match->GetMatchData()->GetGoalCount(team->GetID());
+    int oppGoals = match->GetMatchData()->GetGoalCount(abs(team->GetID() - 1));
+    float trailingNeed = clamp((float)(oppGoals - goals) * 0.18f, 0.0f, 0.35f);
+    managerShotIntent =
+      (1.0f - goalDist) * 0.26f +
+      idealShotPosFactor * 0.22f +
+      attackerSkill * 0.22f +
+      bodyShape * 0.12f +
+      possessionPatience * 0.08f +
+      trailingNeed;
+  }
+
+  float idealShotThreshold = managerMode ? 0.08f : 0.1f;
+  bool managerLongShotWindow =
+    managerMode &&
+    idealShotPosFactor > 0.035f &&
+    goalDist < 0.70f &&
+    managerShotIntent > 0.54f;
+
+  if (idealShotPosFactor > idealShotThreshold || managerLongShotWindow) {
     float odds1 = _GetPassingOdds(Vector3((pitchHalfW + 1.0f) * -team->GetSide(), -3.6f, 0), e_FunctionType_Shot, opponentPlayerImages, 3.0f);
     float odds2 = _GetPassingOdds(Vector3((pitchHalfW + 1.0f) * -team->GetSide(),  0.0f, 0), e_FunctionType_Shot, opponentPlayerImages, 3.0f);
     float odds3 = _GetPassingOdds(Vector3((pitchHalfW + 1.0f) * -team->GetSide(),  3.6f, 0), e_FunctionType_Shot, opponentPlayerImages, 3.0f);
@@ -957,16 +986,58 @@ void ElizaController::GetOnTheBallCommands(std::vector<PlayerCommand> &commandQu
     odds = std::pow(odds, 0.5f);
     if (Verbose()) printf("ODDS: %f\n", odds);
 
-    if (odds + random(0.0f, 0.5f) > 0.5f) {
+    float shotRequirement = 0.5f;
+    float randomWindow = 0.5f;
+    if (managerMode) {
+      float attackerSkill =
+        (CastPlayer()->GetStat("technical_shot") +
+         CastPlayer()->GetStat("physical_shotpower") +
+         CastPlayer()->GetStat("mental_offensivepositioning") +
+         CastPlayer()->GetStat("mental_calmness")) * 0.25f;
+      float possessionPatience = NormalizedClamp((float)CastPlayer()->GetPossessionDuration_ms(), 1800.0f, 6000.0f);
+      shotRequirement =
+        0.55f -
+        attackerSkill * 0.07f -
+        idealShotPosFactor * 0.11f -
+        possessionPatience * 0.05f -
+        managerShotIntent * 0.05f;
+      shotRequirement = clamp(shotRequirement, 0.38f, 0.58f);
+      randomWindow = managerLongShotWindow ? 0.28f : 0.34f;
+    }
+
+    if (odds + random(0.0f, randomWindow) > shotRequirement) {
       PlayerCommand command;
       command.desiredFunctionType = e_FunctionType_Shot;
       command.useDesiredMovement = false;
       command.useDesiredLookAt = false;
       command.desiredVelocityFloat = rawInputVelocityFloat; // this is so we can use sprint/dribble buttons as shot modifiers
-      command.touchInfo.desiredDirection = (Vector3((pitchHalfW + 1.0f) * -team->GetSide(), y + random(-1.0f + player->GetStat("technical_shot"), 1.0f - player->GetStat("technical_shot")), 0) - (CastPlayer()->GetPosition() + CastPlayer()->GetMovement() * 0.2f)).GetNormalized(Vector3(-team->GetSide(), 0, 0));
-      command.touchInfo.desiredDirection = (command.touchInfo.desiredDirection * 0.7f + -CastPlayer()->GetDirectionVec() * (CastPlayer()->GetFloatVelocity() / sprintVelocity) * 0.3f).GetNormalized();
+      float targetY = y;
+      if (managerMode) {
+        float finishingSkill =
+          (player->GetStat("technical_shot") * 0.45f +
+           player->GetStat("mental_calmness") * 0.25f +
+           player->GetStat("mental_offensivepositioning") * 0.15f +
+           player->GetStat("physical_shotpower") * 0.15f);
+        float aimSpread = 1.10f - finishingSkill * 0.85f;
+        if (fabs(targetY) < 0.1f && goalDist < 0.40f && random(0.0f, 1.0f) < finishingSkill) {
+          targetY = random(0.0f, 1.0f) < 0.5f ? -2.8f : 2.8f;
+        }
+        targetY += random(-aimSpread, aimSpread);
+      } else {
+        targetY += random(-1.0f + player->GetStat("technical_shot"), 1.0f - player->GetStat("technical_shot"));
+      }
+      command.touchInfo.desiredDirection = (Vector3((pitchHalfW + 1.0f) * -team->GetSide(), targetY, 0) - (CastPlayer()->GetPosition() + CastPlayer()->GetMovement() * 0.2f)).GetNormalized(Vector3(-team->GetSide(), 0, 0));
+      float movementBias = managerMode ? (0.24f - player->GetStat("mental_calmness") * 0.10f) : 0.3f;
+      command.touchInfo.desiredDirection = (command.touchInfo.desiredDirection * (1.0f - movementBias) + -CastPlayer()->GetDirectionVec() * (CastPlayer()->GetFloatVelocity() / sprintVelocity) * movementBias).GetNormalized();
       command.touchInfo.autoDirectionBias = 1.0f;
-      command.touchInfo.desiredPower = random(0.7f * (0.6f + goalDist * 0.4f), 1.0f * (0.6f + goalDist * 0.4f));
+      if (managerMode) {
+        float powerSkill = player->GetStat("physical_shotpower") * 0.65f + player->GetStat("technical_shot") * 0.35f;
+        float basePower = 0.62f + goalDist * 0.34f;
+        float powerSpread = 0.16f - powerSkill * 0.06f;
+        command.touchInfo.desiredPower = clamp(basePower + random(-powerSpread, powerSpread), 0.52f, 1.0f);
+      } else {
+        command.touchInfo.desiredPower = random(0.7f * (0.6f + goalDist * 0.4f), 1.0f * (0.6f + goalDist * 0.4f));
+      }
       commandQueue.push_back(command);
     }
   }

@@ -162,6 +162,9 @@ class Match {
 
     signed int GetBestPossessionTeamID();
     Player *GetDesignatedPossessionPlayer() { return designatedPossessionPlayer; }
+    void ReplaceDesignatedPossessionPlayer(Player *oldPlayer, Player *newPlayer) {
+      if (designatedPossessionPlayer == oldPlayer) designatedPossessionPlayer = newPlayer;
+    }
     Player *GetBallRetainer() { return ballRetainer; }
     void SetBallRetainer(Player *retainer) { ballRetainer = retainer; }
 
@@ -174,6 +177,7 @@ class Match {
     unsigned long GetActualTime_ms() const { return actualTime_ms; }
 
     void GameOver();
+    bool IsGameOver() const { return gameOver; }
 
     void GetCameraParams(float &zoom, float &height, float &fov, float &angleFactor);
     void SetCameraParams(float zoom, float height, float fov, float angleFactor);

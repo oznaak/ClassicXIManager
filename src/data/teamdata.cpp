@@ -13,7 +13,10 @@
 
 #include <boost/algorithm/string.hpp>
 
+#include <algorithm>
+#include <cstdlib>
 #include <sstream>
+#include <vector>
 
 Vector3 GetDefaultRolePosition(e_PlayerRole role) {
   switch (role) {
@@ -81,6 +84,327 @@ static void AppendLineupOrder(std::stringstream &query,
         << " " << baseStat << " DESC,"
         << " " << firstName << " ASC,"
         << " " << lastName << " ASC";
+}
+
+static std::string DBValue(DatabaseResult *r, unsigned int row, unsigned int col) {
+  if (!r || row >= r->data.size() || col >= r->data.at(row).size()) return "";
+  return r->data.at(row).at(col);
+}
+
+static bool DBHasColumn(const std::string &table, const std::string &column) {
+  std::stringstream q;
+  q << "PRAGMA table_info(" << table << ");";
+  DatabaseResult *r = GetDB()->Query(q.str());
+  bool found = false;
+  if (r) {
+    for (unsigned int i = 0; i < r->data.size(); i++) {
+      if (r->data.at(i).size() > 1 && r->data.at(i).at(1) == column) {
+        found = true;
+        break;
+      }
+    }
+  }
+  delete r;
+  return found;
+}
+
+static std::string NormalizeRoleCode(std::string role) {
+  boost::algorithm::trim(role);
+  role = boost::to_upper_copy(role);
+  if (role == "GK") return "GK";
+  if (role == "CB" || role == "DF" || role == "SW") return "CB";
+  if (role == "LB") return "LB";
+  if (role == "RB") return "RB";
+  if (role == "LWB") return "LB";
+  if (role == "RWB") return "RB";
+  if (role == "CDM" || role == "DM") return "DM";
+  if (role == "CM" || role == "MF") return "CM";
+  if (role == "CAM" || role == "AM") return "AM";
+  if (role == "LM" || role == "LW") return "LM";
+  if (role == "RM" || role == "RW") return "RM";
+  if (role == "ST" || role == "CF" || role == "FW" || role == "ATT") return "CF";
+  return role;
+}
+
+static void AddRoleToken(std::vector<std::string> &out, const std::string &role) {
+  std::string normalized = NormalizeRoleCode(role);
+  if (normalized.empty()) return;
+  if (std::find(out.begin(), out.end(), normalized) == out.end()) out.push_back(normalized);
+}
+
+static std::vector<std::string> ParseRoleList(const std::string &raw) {
+  std::vector<std::string> result;
+  std::vector<std::string> chunks;
+  tokenize(raw, chunks, ",");
+  if (chunks.empty()) chunks.push_back(raw);
+  for (unsigned int i = 0; i < chunks.size(); i++) {
+    std::vector<std::string> slashParts;
+    tokenize(chunks.at(i), slashParts, "/");
+    if (slashParts.empty()) slashParts.push_back(chunks.at(i));
+    for (unsigned int j = 0; j < slashParts.size(); j++) {
+      std::vector<std::string> spaceParts;
+      tokenize(slashParts.at(j), spaceParts, " ");
+      if (spaceParts.empty()) {
+        AddRoleToken(result, slashParts.at(j));
+      } else {
+        for (unsigned int k = 0; k < spaceParts.size(); k++) AddRoleToken(result, spaceParts.at(k));
+      }
+    }
+  }
+  return result;
+}
+
+static bool HasRole(const std::vector<std::string> &roles, const std::string &role) {
+  return std::find(roles.begin(), roles.end(), role) != roles.end();
+}
+
+static int RoleFamily(const std::string &role) {
+  if (role == "GK") return 0;
+  if (role == "LB" || role == "CB" || role == "RB") return 1;
+  if (role == "DM" || role == "CM" || role == "LM" || role == "RM" || role == "AM") return 2;
+  if (role == "CF") return 3;
+  return 2;
+}
+
+struct AISquadCandidate {
+  int id;
+  std::string primaryRole;
+  std::vector<std::string> altRoles;
+  double baseStat;
+  int fitness;
+  int finishing;
+  int shotPower;
+  int longShots;
+  int positioning;
+  int vision;
+  int shortPassing;
+  int ballControl;
+  int defensiveAwareness;
+  int standingTackle;
+  int slidingTackle;
+  int gkDiving;
+  int gkHandling;
+  int gkKicking;
+  int gkReflexes;
+  int gkPositioning;
+};
+
+static double Attr01(int v) {
+  if (v <= 0) return 0.0;
+  if (v > 100) v = 100;
+  return v / 100.0;
+}
+
+static double CandidateRoleRating(const AISquadCandidate &c, const std::string &slotRole) {
+  if (slotRole == "GK") {
+    double gk = (Attr01(c.gkDiving) + Attr01(c.gkHandling) + Attr01(c.gkKicking) +
+                 Attr01(c.gkReflexes) + Attr01(c.gkPositioning)) / 5.0;
+    return gk > 0.0 ? gk : c.baseStat;
+  }
+  if (slotRole == "LB" || slotRole == "CB" || slotRole == "RB") {
+    double def = (Attr01(c.defensiveAwareness) + Attr01(c.standingTackle) +
+                  Attr01(c.slidingTackle) + Attr01(c.positioning) +
+                  Attr01(c.shortPassing)) / 5.0;
+    return def > 0.0 ? def : c.baseStat;
+  }
+  if (slotRole == "DM" || slotRole == "CM") {
+    double mid = (Attr01(c.shortPassing) + Attr01(c.vision) + Attr01(c.ballControl) +
+                  Attr01(c.positioning) + Attr01(c.defensiveAwareness)) / 5.0;
+    return mid > 0.0 ? mid : c.baseStat;
+  }
+  if (slotRole == "LM" || slotRole == "RM" || slotRole == "AM") {
+    double attMid = (Attr01(c.shortPassing) + Attr01(c.vision) + Attr01(c.ballControl) +
+                     Attr01(c.positioning) + Attr01(c.finishing)) / 5.0;
+    return attMid > 0.0 ? attMid : c.baseStat;
+  }
+  double attack = (Attr01(c.finishing) + Attr01(c.shotPower) + Attr01(c.longShots) +
+                   Attr01(c.positioning) + Attr01(c.ballControl)) / 5.0;
+  return attack > 0.0 ? attack : c.baseStat;
+}
+
+static double PositionFitScore(const AISquadCandidate &c, const std::string &slotRole) {
+  if (slotRole == "GK") {
+    if (c.primaryRole == "GK") return 1000.0;
+    if (HasRole(c.altRoles, "GK")) return 820.0;
+    return -10000.0;
+  }
+  if (c.primaryRole == "GK" || HasRole(c.altRoles, "GK")) return -10000.0;
+
+  if (c.primaryRole == slotRole) return 1000.0;
+  if (HasRole(c.altRoles, slotRole)) return 880.0;
+
+  if ((slotRole == "LB" && c.primaryRole == "RB") || (slotRole == "RB" && c.primaryRole == "LB")) return 770.0;
+  if ((slotRole == "LM" && c.primaryRole == "RM") || (slotRole == "RM" && c.primaryRole == "LM")) return 750.0;
+  if ((slotRole == "LB" && HasRole(c.altRoles, "RB")) || (slotRole == "RB" && HasRole(c.altRoles, "LB"))) return 710.0;
+  if ((slotRole == "LM" && HasRole(c.altRoles, "RM")) || (slotRole == "RM" && HasRole(c.altRoles, "LM"))) return 690.0;
+
+  if ((slotRole == "LB" || slotRole == "RB") && c.primaryRole == "CB") return 620.0;
+  if (slotRole == "CB" && (c.primaryRole == "LB" || c.primaryRole == "RB")) return 640.0;
+  if ((slotRole == "LB" || slotRole == "RB") && HasRole(c.altRoles, "CB")) return 610.0;
+  if (slotRole == "CB" && (HasRole(c.altRoles, "LB") || HasRole(c.altRoles, "RB"))) return 620.0;
+
+  if ((slotRole == "DM" || slotRole == "CM" || slotRole == "AM") &&
+      (c.primaryRole == "DM" || c.primaryRole == "CM" || c.primaryRole == "AM")) return 720.0;
+  if ((slotRole == "LM" || slotRole == "RM") &&
+      (c.primaryRole == "AM" || c.primaryRole == "CM")) return 640.0;
+  if (slotRole == "AM" && (c.primaryRole == "LM" || c.primaryRole == "RM" || c.primaryRole == "CF")) return 640.0;
+  if (slotRole == "CF" && (c.primaryRole == "AM" || c.primaryRole == "LM" || c.primaryRole == "RM")) return 560.0;
+
+  if (RoleFamily(slotRole) == RoleFamily(c.primaryRole)) return 520.0;
+  for (unsigned int i = 0; i < c.altRoles.size(); i++) {
+    if (RoleFamily(slotRole) == RoleFamily(c.altRoles.at(i))) return 500.0;
+  }
+  return 260.0;
+}
+
+static double FitnessPenalty(int fitness) {
+  if (fitness < 0) fitness = 100;
+  if (fitness >= 75) return 0.0;
+  if (fitness >= 55) return (75 - fitness) * 3.0;
+  if (fitness >= 35) return 60.0 + (55 - fitness) * 6.0;
+  return 240.0 + (35 - fitness) * 10.0;
+}
+
+static double CandidateSlotScore(const AISquadCandidate &c, const std::string &slotRole) {
+  double fit = PositionFitScore(c, slotRole);
+  if (fit < -1000.0) return fit;
+  double roleRating = CandidateRoleRating(c, slotRole);
+  double fitnessMultiplier = 0.70 + clamp((float)c.fitness, 35.0f, 100.0f) / 100.0 * 0.30;
+  return fit + (c.baseStat * 180.0 + roleRating * 170.0) * fitnessMultiplier - FitnessPenalty(c.fitness);
+}
+
+static double CandidateBenchScore(const AISquadCandidate &c) {
+  double fitnessMultiplier = 0.65 + clamp((float)c.fitness, 35.0f, 100.0f) / 100.0 * 0.35;
+  return (c.baseStat * 280.0 + CandidateRoleRating(c, c.primaryRole) * 120.0) * fitnessMultiplier -
+         FitnessPenalty(c.fitness);
+}
+
+static bool CandidateBenchSort(const AISquadCandidate &a, const AISquadCandidate &b) {
+  double as = CandidateBenchScore(a);
+  double bs = CandidateBenchScore(b);
+  if (as == bs) return a.id < b.id;
+  return as > bs;
+}
+
+static bool CandidateInGroup(const AISquadCandidate &c, int group) {
+  if (RoleFamily(c.primaryRole) == group) return true;
+  for (unsigned int i = 0; i < c.altRoles.size(); i++) {
+    if (RoleFamily(c.altRoles.at(i)) == group) return true;
+  }
+  return false;
+}
+
+static void AddBestBenchGroup(std::vector<int> &ordered,
+                              std::vector<AISquadCandidate> &remaining,
+                              int group,
+                              int amount) {
+  for (int added = 0; added < amount; added++) {
+    int best = -1;
+    double bestScore = -999999.0;
+    for (unsigned int i = 0; i < remaining.size(); i++) {
+      if (!CandidateInGroup(remaining.at(i), group)) continue;
+      double score = CandidateBenchScore(remaining.at(i));
+      if (best == -1 || score > bestScore) {
+        best = (int)i;
+        bestScore = score;
+      }
+    }
+    if (best == -1) return;
+    ordered.push_back(remaining.at(best).id);
+    remaining.erase(remaining.begin() + best);
+  }
+}
+
+static std::vector<AISquadCandidate> LoadAISquadCandidates(int managerId, int teamDatabaseID) {
+  std::vector<AISquadCandidate> candidates;
+  const bool hasPlayerStamina = DBHasColumn("players", "player_stamina");
+
+  std::stringstream q;
+  q << "SELECT p.id, p.role, COALESCE(p.alternative_pos,''), p.base_stat,"
+    << (hasPlayerStamina ? " COALESCE(p.player_stamina,100)," : " 100,")
+    << " COALESCE(p.Finishing,0), COALESCE(p.ShotPower,0), COALESCE(p.LongShots,0),"
+    << " COALESCE(p.Positioning,0), COALESCE(p.Vision,0), COALESCE(p.ShortPassing,0),"
+    << " COALESCE(p.BallControl,0), COALESCE(p.DefensiveAwareness,0),"
+    << " COALESCE(p.StandingTackle,0), COALESCE(p.SlidingTackle,0),"
+    << " COALESCE(p.GkDiving,0), COALESCE(p.GkHandling,0), COALESCE(p.GkKicking,0),"
+    << " COALESCE(p.GkReflexes,0), COALESCE(p.GkPositioning,0)"
+    << " FROM players p"
+    << " LEFT JOIN player_save_state pss"
+    << " ON pss.manager_id = " << managerId
+    << " AND pss.player_id = p.id"
+    << " WHERE COALESCE(pss.team_id, p.team_id) = " << teamDatabaseID << ";";
+
+  DatabaseResult *r = GetDB()->Query(q.str());
+  if (!r) return candidates;
+  for (unsigned int i = 0; i < r->data.size(); i++) {
+    AISquadCandidate c;
+    c.id = atoi(DBValue(r, i, 0).c_str());
+    c.primaryRole = NormalizeRoleCode(DBValue(r, i, 1));
+    c.altRoles = ParseRoleList(DBValue(r, i, 2));
+    c.baseStat = atof(DBValue(r, i, 3).c_str());
+    c.fitness = DBValue(r, i, 4).empty() ? 100 : atoi(DBValue(r, i, 4).c_str());
+    c.finishing = atoi(DBValue(r, i, 5).c_str());
+    c.shotPower = atoi(DBValue(r, i, 6).c_str());
+    c.longShots = atoi(DBValue(r, i, 7).c_str());
+    c.positioning = atoi(DBValue(r, i, 8).c_str());
+    c.vision = atoi(DBValue(r, i, 9).c_str());
+    c.shortPassing = atoi(DBValue(r, i, 10).c_str());
+    c.ballControl = atoi(DBValue(r, i, 11).c_str());
+    c.defensiveAwareness = atoi(DBValue(r, i, 12).c_str());
+    c.standingTackle = atoi(DBValue(r, i, 13).c_str());
+    c.slidingTackle = atoi(DBValue(r, i, 14).c_str());
+    c.gkDiving = atoi(DBValue(r, i, 15).c_str());
+    c.gkHandling = atoi(DBValue(r, i, 16).c_str());
+    c.gkKicking = atoi(DBValue(r, i, 17).c_str());
+    c.gkReflexes = atoi(DBValue(r, i, 18).c_str());
+    c.gkPositioning = atoi(DBValue(r, i, 19).c_str());
+    candidates.push_back(c);
+  }
+  delete r;
+  return candidates;
+}
+
+static std::vector<int> BuildAIManagerPlayerOrder(int managerId,
+                                                  int teamDatabaseID,
+                                                  FormationEntry formation[playerNum]) {
+  std::vector<int> ordered;
+  std::vector<AISquadCandidate> remaining = LoadAISquadCandidates(managerId, teamDatabaseID);
+
+  for (int slot = 0; slot < playerNum && !remaining.empty(); slot++) {
+    std::string slotRole = GetRoleName(formation[slot].role);
+    int best = -1;
+    double bestScore = -999999.0;
+    for (unsigned int i = 0; i < remaining.size(); i++) {
+      double score = CandidateSlotScore(remaining.at(i), slotRole);
+      if (best == -1 || score > bestScore) {
+        best = (int)i;
+        bestScore = score;
+      }
+    }
+    if (best >= 0) {
+      ordered.push_back(remaining.at(best).id);
+      remaining.erase(remaining.begin() + best);
+    }
+  }
+
+  std::sort(remaining.begin(), remaining.end(), CandidateBenchSort);
+  AddBestBenchGroup(ordered, remaining, 0, 1); // GK
+  AddBestBenchGroup(ordered, remaining, 1, 2); // defensive coverage
+  AddBestBenchGroup(ordered, remaining, 2, 3); // midfield/wide coverage
+  AddBestBenchGroup(ordered, remaining, 3, 2); // attackers
+
+  std::sort(remaining.begin(), remaining.end(), CandidateBenchSort);
+  while (ordered.size() < 20 && !remaining.empty()) {
+    ordered.push_back(remaining.front().id);
+    remaining.erase(remaining.begin());
+  }
+  for (unsigned int i = 0; i < remaining.size(); i++) ordered.push_back(remaining.at(i).id);
+
+  printf("[AI LINEUP] Built transient matchday squad team=%d starters=%d total=%d\n",
+         teamDatabaseID,
+         (int)std::min((size_t)playerNum, ordered.size()),
+         (int)ordered.size());
+  return ordered;
 }
 
 TeamData::TeamData(int teamDatabaseID) : databaseID(teamDatabaseID) {
@@ -274,8 +598,26 @@ TeamData::TeamData(int teamDatabaseID) : databaseID(teamDatabaseID) {
 
   std::string order = national ? "nationalteamformationorder" : "formationorder";
   std::stringstream playerQuery;
+  std::vector<int> transientAIOrder;
+  bool useTransientAIOrder =
+    g_CareerMatchContext.active &&
+    g_CareerMatchContext.managerId > 0 &&
+    g_CareerMatchContext.userClubId > 0 &&
+    teamDatabaseID != g_CareerMatchContext.userClubId &&
+    !national;
 
-  if (g_CareerMatchContext.active && g_CareerMatchContext.managerId > 0 && !national) {
+  if (useTransientAIOrder) {
+    transientAIOrder = BuildAIManagerPlayerOrder(g_CareerMatchContext.managerId,
+                                                 teamDatabaseID,
+                                                 formation);
+    if ((signed int)transientAIOrder.size() < playerNum) {
+      printf("[AI LINEUP] Falling back to DB order team=%d; only %d candidates\n",
+             teamDatabaseID, (int)transientAIOrder.size());
+      useTransientAIOrder = false;
+    }
+  }
+
+  if (!useTransientAIOrder && g_CareerMatchContext.active && g_CareerMatchContext.managerId > 0 && !national) {
     playerQuery << "SELECT p.id"
                 << " FROM players p"
                 << " LEFT JOIN player_save_state pss"
@@ -283,25 +625,38 @@ TeamData::TeamData(int teamDatabaseID) : databaseID(teamDatabaseID) {
                 << " AND pss.player_id = p.id"
                 << " WHERE COALESCE(pss.team_id, p.team_id) = " << teamDatabaseID;
     AppendLineupOrder(playerQuery, "p", order);
-  } else {
+  } else if (!useTransientAIOrder) {
     playerQuery << "SELECT id"
                 << " FROM players"
                 << " WHERE team_id = " << teamDatabaseID
                 << " OR nationalteam_id = " << teamDatabaseID;
     AppendLineupOrder(playerQuery, "", order);
   }
-  playerQuery << ";";
 
-  result = GetDB()->Query(playerQuery.str());
-  for (unsigned int r = 0; r < result->data.size(); r++) {
-    //int playerDatabaseID = atoi(playerQuery.result[r * playerQuery.columns + c]);
-    int playerDatabaseID = atoi(result->data.at(r).at(0).c_str());
-    //printf("loading player %i\n", playerDatabaseID);
-    PlayerData *onePlayerData = new PlayerData(playerDatabaseID);
-    playerData.push_back(onePlayerData);
+  if (useTransientAIOrder) {
+    for (unsigned int r = 0; r < transientAIOrder.size(); r++) {
+      int playerDatabaseID = transientAIOrder.at(r);
+      PlayerData *onePlayerData = new PlayerData(playerDatabaseID);
+      playerData.push_back(onePlayerData);
+    }
+  } else {
+    playerQuery << ";";
+    result = GetDB()->Query(playerQuery.str());
+    for (unsigned int r = 0; r < result->data.size(); r++) {
+      //int playerDatabaseID = atoi(playerQuery.result[r * playerQuery.columns + c]);
+      int playerDatabaseID = atoi(result->data.at(r).at(0).c_str());
+      //printf("loading player %i\n", playerDatabaseID);
+      PlayerData *onePlayerData = new PlayerData(playerDatabaseID);
+      playerData.push_back(onePlayerData);
+    }
+
+    delete result;
   }
 
-  delete result;
+  if ((signed int)playerData.size() < playerNum) {
+    printf("[TEAMDATA] WARNING: team=%d loaded only %d players for match\n",
+           teamDatabaseID, (int)playerData.size());
+  }
 
 }
 

@@ -41,8 +41,9 @@ class Team {
     int GetSubsMade()         const { return subsMade; }
 
     // Make a mid-match substitution. offIdx is a players[] index that is active (0-10);
-    // onIdx is a players[] index on the bench (11+). Call under matchRenderMutex while paused.
+    // onIdx is a players[] index on the bench (11+).
     bool SubstitutePlayer(int offIdx, int onIdx);
+    bool SubstitutePlayerByDatabaseID(int offPlayerDbId, int onPlayerDbId, int fallbackOffIdx, int fallbackOnIdx);
 
     unsigned int GetHumanGamerCount() const { return humanGamers.size(); }
     void AddHumanGamer(IHIDevice *hid, e_PlayerColor color);

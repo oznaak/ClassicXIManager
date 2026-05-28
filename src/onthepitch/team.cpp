@@ -651,17 +651,58 @@ bool Team::SubstitutePlayer(int offIdx, int onIdx) {
   if (!players[offIdx]->IsActive())  return false;
   if ( players[onIdx ]->IsActive())  return false;
 
+  Player *outgoing = players[offIdx];
+
   // SetBench() is safe to call from the game thread — no GUI widget allocation/deletion.
   // Deactivate() (which calls MarkForDeletion on captions) is NOT safe mid-match from this thread.
-  players[offIdx]->SetBench();
+  outgoing->SetBench();
 
   // Swap so the incoming player sits at offIdx — a valid formation-entry index (0–10).
   std::swap(players[offIdx], players[onIdx]);
 
-  players[offIdx]->SetActive();
+  Player *incoming = players[offIdx];
+  incoming->SetActive();
+
+  if (designatedTeamPossessionPlayer == outgoing) designatedTeamPossessionPlayer = incoming;
+  match->ReplaceDesignatedPossessionPlayer(outgoing, incoming);
+  if (lastTouchPlayer == outgoing) lastTouchPlayer = 0;
+  for (unsigned int i = 0; i < e_TouchType_SIZE; i++) {
+    if (lastTouchPlayers[i] == outgoing) lastTouchPlayers[i] = 0;
+  }
+  if (match->GetBallRetainer() == outgoing) match->SetBallRetainer(0);
 
   subsMade++;
   printf("[SUB] Team %d: players[%d] off → players[%d] on (sub #%d)\n",
          id, offIdx, onIdx, subsMade);
   return true;
+}
+
+bool Team::SubstitutePlayerByDatabaseID(int offPlayerDbId, int onPlayerDbId, int fallbackOffIdx, int fallbackOnIdx) {
+  if (offPlayerDbId > 0 && onPlayerDbId > 0 && offPlayerDbId == onPlayerDbId) {
+    printf("[SUB] Ignored invalid substitution request: same player dbId=%d\n", offPlayerDbId);
+    return false;
+  }
+
+  int offIdx = -1;
+  int onIdx = -1;
+
+  if (offPlayerDbId > 0 && onPlayerDbId > 0) {
+    for (int i = 0; i < (int)players.size(); i++) {
+      PlayerData *pd = players[i]->GetPlayerData();
+      if (!pd) continue;
+      if (pd->GetDatabaseID() == offPlayerDbId && players[i]->IsActive()) offIdx = i;
+      if (pd->GetDatabaseID() == onPlayerDbId && !players[i]->IsActive()) onIdx = i;
+    }
+
+    if (offIdx < 0 || onIdx < 0) {
+      printf("[SUB] Ignored stale substitution request team=%d offDb=%d onDb=%d resolvedOff=%d resolvedOn=%d\n",
+             id, offPlayerDbId, onPlayerDbId, offIdx, onIdx);
+      return false;
+    }
+  }
+
+  if (offIdx < 0) offIdx = fallbackOffIdx;
+  if (onIdx < 0) onIdx = fallbackOnIdx;
+
+  return SubstitutePlayer(offIdx, onIdx);
 }

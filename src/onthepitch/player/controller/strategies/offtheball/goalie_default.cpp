@@ -8,6 +8,8 @@
 
 #include "../../../../../main.hpp"
 
+#include <cmath>
+
 GoalieDefaultStrategy::GoalieDefaultStrategy(ElizaController *controller) : Strategy(controller) {
   name = "goalie default";
 
@@ -39,6 +41,8 @@ Vector3 CalculateBestAchievableTarget(Player *player, const Vector3 &pos1, float
 }
 
 void GoalieDefaultStrategy::RequestInput(const MentalImage *mentalImage, Vector3 &direction, float &velocity) {
+
+  const bool managerMode = GetConfiguration()->GetReal("manager_mode", 0.0f) > 0.5f;
 
   // base position
   float lineDistance = 10.0f; // default distance keeper stays in front of goal line
@@ -216,6 +220,22 @@ void GoalieDefaultStrategy::RequestInput(const MentalImage *mentalImage, Vector3
         targetPos.coords[2] = 0.0;
         targetPos.coords[0] = clamp(targetPos.coords[0], -pitchHalfW + 0.2f,
                                     pitchHalfW - 0.2f); // not very useful to stand behind line
+      }
+
+      if (managerMode) {
+        float keeperSkill =
+          CastPlayer()->GetStat("physical_reaction") * 0.35f +
+          CastPlayer()->GetStat("physical_agility") * 0.25f +
+          CastPlayer()->GetStat("mental_defensivepositioning") * 0.25f +
+          CastPlayer()->GetStat("mental_vision") * 0.15f;
+        float shotHeight = mentalImage->GetBallPrediction(350).coords[2];
+        float reachDifficulty = NormalizedClamp(fabs(ballBoundForGoal_ycoord), 1.5f, 3.7f) * 0.7f +
+                                NormalizedClamp(shotHeight, 0.8f, 2.5f) * 0.3f;
+        float timingNoise =
+          std::sin(match->GetActualTime_ms() * 0.0017f + CastPlayer()->GetID() * 1.37f + ballBoundForGoal_ycoord) *
+          (1.0f - keeperSkill) * reachDifficulty * 0.85f;
+        targetPos.coords[1] = clamp(targetPos.coords[1] + timingNoise, -3.9f, 3.9f);
+        maxVelocity *= clamp(0.90f + keeperSkill * 0.14f - reachDifficulty * (1.0f - keeperSkill) * 0.10f, 0.82f, 1.04f);
       }
     }
   }

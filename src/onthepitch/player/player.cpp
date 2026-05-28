@@ -118,8 +118,13 @@ void Player::ActivateBench(boost::intrusive_ptr<Node> humanoidSourceNode, boost:
 
   buf_nameCaptionShowCondition = false;
   buf_debugCaptionShowCondition = false;
-  nameCaption = 0;
-  debugCaption = 0;
+  nameCaption = new Gui2Caption(GetMenuTask()->GetWindowManager(), "game_player_name_" + int_to_str(id), 0, 0, 1, 2.0, playerData->GetDisplayName());
+  nameCaption->SetTransparency(0.3f);
+  GetMenuTask()->GetWindowManager()->GetRoot()->AddView(nameCaption);
+  debugCaption = new Gui2Caption(GetMenuTask()->GetWindowManager(), "game_player_debug_" + int_to_str(id), 0, 0, 1, 1.6, "debug");
+  GetMenuTask()->GetWindowManager()->GetRoot()->AddView(debugCaption);
+  nameCaption->Hide();
+  debugCaption->Hide();
 
   // hide immediately — no formation lookup needed (bench indices 11+ are out of range)
   SetBench();
@@ -139,12 +144,16 @@ void Player::SetActive() {
   if (GetDebugMode() != e_DebugMode_Off) buf_nameCaptionShowCondition = true;
   if (GetDebugMode() != e_DebugMode_Off) buf_debugCaptionShowCondition = true;
 
-  // Create captions — Put2D/Hide2D assert these exist for all active players.
-  nameCaption = new Gui2Caption(GetMenuTask()->GetWindowManager(), "game_player_name_" + int_to_str(id), 0, 0, 1, 2.0, playerData->GetDisplayName());
-  nameCaption->SetTransparency(0.3f);
-  GetMenuTask()->GetWindowManager()->GetRoot()->AddView(nameCaption);
-  debugCaption = new Gui2Caption(GetMenuTask()->GetWindowManager(), "game_player_debug_" + int_to_str(id), 0, 0, 1, 1.6, "debug");
-  GetMenuTask()->GetWindowManager()->GetRoot()->AddView(debugCaption);
+  // Captions are pre-created for bench players; avoid GUI allocation while substituting.
+  if (!nameCaption) {
+    nameCaption = new Gui2Caption(GetMenuTask()->GetWindowManager(), "game_player_name_" + int_to_str(id), 0, 0, 1, 2.0, playerData->GetDisplayName());
+    nameCaption->SetTransparency(0.3f);
+    GetMenuTask()->GetWindowManager()->GetRoot()->AddView(nameCaption);
+  }
+  if (!debugCaption) {
+    debugCaption = new Gui2Caption(GetMenuTask()->GetWindowManager(), "game_player_debug_" + int_to_str(id), 0, 0, 1, 1.6, "debug");
+    GetMenuTask()->GetWindowManager()->GetRoot()->AddView(debugCaption);
+  }
 
   // After std::swap in SubstitutePlayer, this player sits at a valid 0-10 formation index
   FormationEntry fe = GetFormationEntry();

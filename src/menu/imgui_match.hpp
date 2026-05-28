@@ -28,6 +28,8 @@ struct QueuedSub {
   int          teamIdx        = 0;
   int          offIdx         = -1;
   int          onIdx          = -1;
+  int          offPlayerDbId  = -1;
+  int          onPlayerDbId   = -1;
   std::string  nameOut;
   std::string  nameIn;
   std::string  teamBadgePath;

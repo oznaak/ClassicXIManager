@@ -1504,9 +1504,9 @@ void ManagerMainScreenPage::PlayMatch() {
   GetConfiguration()->Set("manager_mode",           1.0f);
   GetConfiguration()->Set("manager_ai_difficulty",  1.0f);
   GetConfiguration()->Set("match_difficulty",       1.0f);
-  GetConfiguration()->Set("match_duration",         0.0f); // shortest: 5-minute halves
+  GetConfiguration()->Set("match_duration",         1.0f); // full manager-match duration; use x2/x4/x8 to watch faster
   GetConfiguration()->Set("match_allow_extra_time", 0.0f); // test engine: no extra time
-  printf("[MANAGER MODE] Match duration forced to shortest: match_duration=0.0 (5 min halves)\n");
+  printf("[MANAGER MODE] Match duration set to full: match_duration=1.0 (use speed controls to watch faster)\n");
 
   // Do NOT call CreatePage(LoadingMatch) here — this runs from the GL thread.
   // LoadingMatchPage constructor calls LoadImage which needs the main-thread ObjectFactory.
@@ -1952,11 +1952,11 @@ void ManagerMainScreenPage::PlayFixture() {
   GetConfiguration()->Set("manager_mode",         1.0f);
   GetConfiguration()->Set("manager_ai_difficulty", 1.0f);
   GetConfiguration()->Set("match_difficulty",      1.0f);
-  GetConfiguration()->Set("match_duration",        0.0f); // shortest: 5-minute halves
+  GetConfiguration()->Set("match_duration",        1.0f); // full manager-match duration; use x2/x4/x8 to watch faster
   // Allow extra time only for knockout fixtures; league games end at 90 min.
   float allowExtraTime = (g_CareerHub.todayFixture.type == "ko") ? 1.0f : 0.0f;
   GetConfiguration()->Set("match_allow_extra_time", allowExtraTime);
-  printf("[MANAGER MODE] Match duration forced to shortest: match_duration=0.0 (5 min halves)\n");
+  printf("[MANAGER MODE] Match duration set to full: match_duration=1.0 (use speed controls to watch faster)\n");
   printf("[CAREER MATCH] Fixture type=%s allow_extra_time=%.0f\n",
          g_CareerHub.todayFixture.type.c_str(), allowExtraTime);
 
