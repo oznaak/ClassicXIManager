@@ -50,6 +50,32 @@
 #include <wingdi.h>
 #endif
 
+namespace {
+
+void SetGameplayWindowIcon(SDL_Window *window) {
+  if (!window) return;
+
+  static const char *kIconPaths[] = {
+    "data/media/logos/favicon.png",
+    "media/logos/favicon.png",
+    "../data/media/logos/favicon.png",
+    nullptr
+  };
+
+  for (const char **path = kIconPaths; *path; ++path) {
+    SDL_Surface *icon = IMG_Load(*path);
+    if (!icon) continue;
+
+    SDL_SetWindowIcon(window, icon);
+    SDL_FreeSurface(icon);
+    return;
+  }
+
+  printf("[WINDOW ICON] failed to load favicon.png: %s\n", IMG_GetError());
+}
+
+}
+
 namespace blunted {
 
 struct GLfunctions {
@@ -401,6 +427,7 @@ struct GLfunctions {
                                 SDL_WINDOWPOS_UNDEFINED, width, height,
                                 SDL_WINDOW_OPENGL /* | SDL_RESIZABLE*/ |
                                 (fullscreen ? SDL_WINDOW_FULLSCREEN : 0));
+    SetGameplayWindowIcon(window);
     context = SDL_GL_CreateContext(window);
 
 

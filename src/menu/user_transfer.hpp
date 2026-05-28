@@ -38,7 +38,12 @@ void InitiateLoanOffer(int managerId, int userClubId, int playerId,
                        int seasonYear, const std::string &currentDate);
 void RespondToLoanOffer(int managerId, int loanDealId,
                         const std::string &action, int counterFee,
-                        int counterWagePct);
+                        int counterWagePct,
+                        int optionFee = 0,
+                        const std::string &optionDeadline = "",
+                        int mandatoryFee = 0,
+                        const std::string &mandatoryTrigger = "",
+                        int mandatoryAppearances = 0);
 
 // ---- Side effects (called from within sell-side flow) -----------------------
 void ProcessSquadHarmonyOnSale(int managerId, int playerId, int userClubId,
