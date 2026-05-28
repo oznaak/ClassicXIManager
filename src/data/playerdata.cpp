@@ -4,18 +4,40 @@
 
 #include "playerdata.hpp"
 
+#include <algorithm>
+#include <cctype>
+
 #include "utils/database.hpp"
 
 #include "base/utils.hpp"
 
 #include "../main.hpp"
 
+namespace {
+
+std::string Lowercase(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+  return value;
+}
+
+int ClampTraitRating(int rating, int fallback) {
+  if (rating <= 0) rating = fallback;
+  return clamp(rating, 1, 5);
+}
+
+float TraitRating01(int rating) {
+  return clamp((rating - 1) / 4.0f, 0.0f, 1.0f);
+}
+
+}
+
 PlayerData::PlayerData(int playerDatabaseID) : databaseID(playerDatabaseID) {
 
   //std::string test = "select * from players where id = " + int_to_str(databaseID) + " limit 1";
   //printf("test: %s\n", test.c_str());
 
-  DatabaseResult *result = GetDB()->Query("select firstname, lastname, COALESCE(nickname, '') as nickname, role, base_stat, profile_xml, age, skincolor, hairstyle, haircolor, height, jersey_number from players where id = " + int_to_str(databaseID) + " limit 1");
+  DatabaseResult *result = GetDB()->Query("select firstname, lastname, COALESCE(nickname, '') as nickname, role, base_stat, profile_xml, age, skincolor, hairstyle, haircolor, height, jersey_number, COALESCE(foot, 'right') as foot, COALESCE(weakFoot, 3) as weakFoot, COALESCE(skillMoves, 2) as skillMoves from players where id = " + int_to_str(databaseID) + " limit 1");
 
   std::string roleString;
   std::string profileString;
@@ -40,6 +62,13 @@ PlayerData::PlayerData(int playerDatabaseID) : databaseID(playerDatabaseID) {
     if (result->header.at(c).compare("haircolor") == 0) hairColor = result->data.at(0).at(c);
     if (result->header.at(c).compare("height") == 0) height = atof(result->data.at(0).at(c).c_str());
     if (result->header.at(c).compare("jersey_number") == 0) jerseyNumber = atoi(result->data.at(0).at(c).c_str());
+    if (result->header.at(c).compare("foot") == 0) {
+      preferredFootRaw = result->data.at(0).at(c);
+      std::string preferredFoot = Lowercase(preferredFootRaw);
+      preferredFootLeft = preferredFoot.find("left") != std::string::npos;
+    }
+    if (result->header.at(c).compare("weakFoot") == 0) weakFoot = ClampTraitRating(atoi(result->data.at(0).at(c).c_str()), 3);
+    if (result->header.at(c).compare("skillMoves") == 0) skillMoves = ClampTraitRating(atoi(result->data.at(0).at(c).c_str()), 2);
   }
 
   delete result;
@@ -103,6 +132,14 @@ PlayerData::PlayerData() {
 }
 
 PlayerData::~PlayerData() {
+}
+
+float PlayerData::GetWeakFootRating01() const {
+  return TraitRating01(weakFoot);
+}
+
+float PlayerData::GetSkillMovesRating01() const {
+  return TraitRating01(skillMoves);
 }
 
 const std::vector<e_PlayerRole> &PlayerData::GetRoles() const {

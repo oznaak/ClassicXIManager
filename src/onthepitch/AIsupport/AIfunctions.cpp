@@ -383,6 +383,13 @@ void AI_GetBestDribbleMovement(Match *match, int thisPlayerID, const MentalImage
 
   float offenseFactor = 0.7f + teamTactics.userProperties.GetReal("dribble_offensiveness", 0.5f) * 0.05f + AI_GetMindSet(player->GetDynamicFormationEntry().role) * 0.05f;
   float powerMultiplier = 1.0f; // should alter (average) resulting velocity
+  float skillMoves01 = 0.0f;
+  float closePressure = 0.0f;
+  if (GetConfiguration()->GetReal("manager_mode", 0.0f) > 0.5f && player->GetPlayerData()) {
+    skillMoves01 = player->GetPlayerData()->GetSkillMovesRating01();
+    closePressure = 1.0f - NormalizedClamp(player->GetClosestOpponentDistance(), 0.6f, 2.2f);
+    offenseFactor += closePressure * skillMoves01 * 0.08f;
+  }
 
   float future_sec = 0.25f;
 
@@ -419,7 +426,7 @@ void AI_GetBestDribbleMovement(Match *match, int thisPlayerID, const MentalImage
     spot.origin = oppPos;
     spot.magnetType = e_MagnetType_Repel;
     spot.decayType = e_DecayType_Variable;
-    spot.power = 2.0f * powerMultiplier;//1.0f;
+    spot.power = 2.0f * powerMultiplier * (1.0f - closePressure * skillMoves01 * 0.18f);//1.0f;
     spot.scale = 10.0f;//16.0f;
     spot.exp = 1.0f;//0.7f;
     forceField.push_back(spot);
@@ -469,6 +476,9 @@ void AI_GetBestDribbleMovement(Match *match, int thisPlayerID, const MentalImage
 
   desiredDirection = forceFieldMovement.GetNormalized(player->GetDirectionVec());
   desiredVelocity = clamp(forceFieldMovement.GetLength() * distanceToVelocityMultiplier, idleVelocity, sprintVelocity);
+  if (skillMoves01 > 0.0f && closePressure > 0.0f) {
+    desiredVelocity = clamp(desiredVelocity * (1.0f + closePressure * skillMoves01 * 0.04f), idleVelocity, sprintVelocity);
+  }
   desiredVelocity = RangeVelocity(desiredVelocity);
 }
 

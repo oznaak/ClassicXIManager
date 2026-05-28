@@ -26,6 +26,13 @@ class PlayerData {
     int GetDatabaseID() const { return databaseID; }
     const std::vector<e_PlayerRole> &GetRoles() const;
     const std::string &GetRoleRaw() const { return roleRaw; }
+    const std::string &GetPreferredFootRaw() const { return preferredFootRaw; }
+    bool IsPreferredFootLeft() const { return preferredFootLeft; }
+    bool IsPreferredFootRight() const { return !preferredFootLeft; }
+    int GetWeakFootRating() const { return weakFoot; }
+    float GetWeakFootRating01() const;
+    int GetSkillMovesRating() const { return skillMoves; }
+    float GetSkillMovesRating01() const;
 
     float GetStat(const char *name);
 
@@ -42,6 +49,10 @@ class PlayerData {
     std::string nickname;
     std::vector<e_PlayerRole> roles;
     std::string roleRaw;
+    std::string preferredFootRaw = "right";
+    bool preferredFootLeft = false;
+    int weakFoot = 3;
+    int skillMoves = 2;
 
     Properties stats;
 

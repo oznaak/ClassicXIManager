@@ -2456,11 +2456,26 @@ Vector3 Humanoid::GetBestPossibleTouch(const Vector3 &desiredTouch, e_FunctionTy
   // difficulty
 
   float difficultyFactor = atof(currentAnim->anim->GetVariable("touch_difficultyfactor").c_str());
+  float wrongFootPenalty = 0.0f;
+  if (GetConfiguration()->GetReal("manager_mode", 0.0f) > 0.5f && CastPlayer()->GetPlayerData()) {
+    e_Foot touchFoot = currentAnim->anim->GetCurrentFoot();
+    bool wrongFoot =
+        (touchFoot == e_Foot_Left && CastPlayer()->GetPlayerData()->IsPreferredFootRight()) ||
+        (touchFoot == e_Foot_Right && CastPlayer()->GetPlayerData()->IsPreferredFootLeft());
+    if (wrongFoot) wrongFootPenalty = 1.0f - CastPlayer()->GetPlayerData()->GetWeakFootRating01();
+  }
 
   // apply stats
   if (functionType == e_FunctionType_ShortPass ||
       functionType == e_FunctionType_LongPass) difficultyFactor *= (1.0f - CastPlayer()->GetStat("technical_shortpass") * 0.5f);
   if (functionType == e_FunctionType_HighPass) difficultyFactor *= (1.0f - CastPlayer()->GetStat("technical_highpass")  * 0.5f);
+  if (wrongFootPenalty > 0.0f &&
+      (functionType == e_FunctionType_ShortPass ||
+       functionType == e_FunctionType_LongPass ||
+       functionType == e_FunctionType_HighPass)) {
+    difficultyFactor = clamp(difficultyFactor + wrongFootPenalty * 0.14f, 0.0f, 1.0f);
+    resultTouch *= 1.0f - wrongFootPenalty * 0.035f;
+  }
   if (Verbose()) printf("short pass stat: %f\n", CastPlayer()->GetStat("technical_shortpass"));
 
   float distanceFactor = 0.0f;

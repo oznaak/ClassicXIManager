@@ -37,6 +37,26 @@ e_TouchType GetTouchTypeForBodyPart(const std::string &bodypartname) {
     return e_TouchType_Intentional_Nonkicked;
 }
 
+static bool ManagerModeEnabled() {
+  return GetConfiguration()->GetReal("manager_mode", 0.0f) > 0.5f;
+}
+
+static float GetWrongFootPenalty(Player *player, e_Foot touchFoot) {
+  if (!ManagerModeEnabled() || !player || !player->GetPlayerData()) return 0.0f;
+
+  bool wrongFoot =
+      (touchFoot == e_Foot_Left && player->GetPlayerData()->IsPreferredFootRight()) ||
+      (touchFoot == e_Foot_Right && player->GetPlayerData()->IsPreferredFootLeft());
+  if (!wrongFoot) return 0.0f;
+
+  return 1.0f - player->GetPlayerData()->GetWeakFootRating01();
+}
+
+static float GetSkillMoves01(Player *player) {
+  if (!ManagerModeEnabled() || !player || !player->GetPlayerData()) return 0.0f;
+  return player->GetPlayerData()->GetSkillMovesRating01();
+}
+
 unsigned int CalculateTimeNeededToChangeMovement_ms(const Vector3 &currentMovement, const Vector3 &desiredMovement) {
 
   // this function is quick 'n dirty, just how i like it
@@ -252,6 +272,10 @@ Vector3 GetBallControlVector(Ball *ball, Player *player, const Vector3 &nextStar
   Vector3 FFOsrc = GetFrontOfFootOffsetRel(physicsVelocity, nextBodyAngle - spatialState.angle, ball->Predict(0).coords[2]);
   float annoyanceVeloFactor = curve(NormalizedClamp(currentAnim->anim->GetOutgoingVelocity(), idleVelocity, sprintVelocity), 0.7f); // do not apply effect to low velo's; makes it too chaotic
   float opponentAnnoyanceFactor = (1.0f - NormalizedClamp(player->GetClosestOpponentDistance(), 0.5f, 1.5f)) * (1.0f - (player->GetStat("mental_calmness") * 0.5f + player->GetStat("physical_balance") * 0.3f)) * annoyanceVeloFactor;
+  float skillMoves01 = GetSkillMoves01(player);
+  if (skillMoves01 > 0.0f) {
+    opponentAnnoyanceFactor *= 1.0f - skillMoves01 * 0.22f;
+  }
   Vector3 FFO = Vector3(0, -1, 0).GetRotated2D(nextBodyAngle) * (FFOsrc.GetLength() + ffoOffset + opponentAnnoyanceFactor * 3.0f); // positionOffset is already in ffoOffset (though only for trap atm)
   float heightFFOOffset = NormalizedClamp(ball->Predict(0).coords[2], 0.5f, 1.0f) * 0.5f; // bounce high balls off body - else they keep colliding inside body and stuff like that
   FFO += FFOsrc * heightFFOOffset * 0.5f +
@@ -309,6 +333,11 @@ Vector3 GetBallControlVector(Ball *ball, Player *player, const Vector3 &nextStar
   float powerMultiplier = 1.2f - (player->GetStat("technical_ballcontrol") * 0.03f); // 1.24 .. * 0.1
   float veloBias = NormalizedClamp(velocity, walkVelocity, sprintVelocity - 0.8f); // this multiplier only applies to high velocities
   powerMultiplier = 1.0f * (1.0f - veloBias) + powerMultiplier * veloBias;
+  float weakFootPenalty = GetWrongFootPenalty(player, currentAnim->anim->GetCurrentFoot());
+  if (weakFootPenalty > 0.0f) {
+    powerMultiplier *= 1.0f + weakFootPenalty * 0.035f * veloBias;
+    height += weakFootPenalty * 0.04f * veloBias;
+  }
 
   Vector3 touchVec = direction * power * powerMultiplier + Vector3(0, 0, height);
 /*
@@ -354,6 +383,8 @@ Vector3 GetTrapVector(Match *match, Player *player, const Vector3 &nextStartPos,
 Vector3 GetShotVector(Match *match, Player *player, const Vector3 &nextStartPos, radian nextStartAngle, radian nextBodyAngle, const Vector3 &outgoingMovement, const Anim *currentAnim, int frameNum, const SpatialState &spatialState, const Vector3 &positionOffset, radian &xRot, radian &yRot, radian &zRot, float autoDirectionBias) {
 
   Ball *ball = match->GetBall();
+  const bool managerMode = ManagerModeEnabled();
+  const float wrongFootPenalty = GetWrongFootPenalty(player, currentAnim->anim->GetCurrentFoot());
 
   const std::vector<Vector3> &origPositionCache = match->GetAnimPositionCache(currentAnim->anim);
   Vector3 touchMovement = CalculateMovementAtFrame(origPositionCache, currentAnim->frameNum).GetRotated2D(spatialState.angle); // spatialState.movement isn't reliable because of smuggles and such
@@ -419,6 +450,9 @@ Vector3 GetShotVector(Match *match, Player *player, const Vector3 &nextStartPos,
   power *= 1.0f + playerMovBallMovPowerFactor * 0.2f;
 
   if (Verbose()) printf("(power) RESULTING power: %f (stat: %f)\n", power, player->GetStat("physical_shotpower"));
+  if (managerMode && wrongFootPenalty > 0.0f) {
+    power *= 1.0f - wrongFootPenalty * 0.06f;
+  }
 
 
   // calculate difficulty, based on factors like desired power, player/ball movement, skill, positionoffset etcetera
@@ -448,13 +482,15 @@ Vector3 GetShotVector(Match *match, Player *player, const Vector3 &nextStartPos,
                          (0.6f + playerMovBallMovEasinessFactor * 0.4f) *
                          (0.6f + powerEasinessFactor * 0.4f);
   float difficultyFactor = clamp(1.0f - easinessFactor, 0.0f, 1.0f);
+  if (managerMode && wrongFootPenalty > 0.0f) {
+    difficultyFactor = clamp(difficultyFactor + wrongFootPenalty * 0.16f, 0.0f, 1.0f);
+  }
 
   if (Verbose()) printf("(ease) RESULTING difficultyFactor: %f\n", difficultyFactor);
 
 
   // best case result
 
-  const bool managerMode = GetConfiguration()->GetReal("manager_mode", 0.0f) > 0.5f;
   float desiredHeight = 0.05f;
   if (managerMode) {
     float finishingSkill =
