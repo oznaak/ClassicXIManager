@@ -75,102 +75,180 @@ def profile_value_for_target(target_0_99: float, base_stat: float, age: int) -> 
     target = max(1.0, min(99.0, target_0_99)) / 100.0
     scale = 2.0 * aged_base_stat(base_stat, age)
     if scale <= 0.0:
-      return clamp(target_0_99)
+        return clamp(target_0_99)
     return round(max(0.01, min(0.99, target / scale)), 2)
 
 
-def build_profile(p: dict) -> str:
+def blend(*weighted_values: tuple[float, float]) -> float:
+    total_weight = sum(weight for _, weight in weighted_values)
+    if total_weight <= 0.0:
+        return 0.0
+    return sum(value * weight for value, weight in weighted_values) / total_weight
+
+
+def is_goalkeeper(p: dict) -> bool:
+    return "GK" in (p.get("role") or "").upper()
+
+
+def build_target_attributes(p: dict) -> dict[str, float]:
     height_m  = p["height"] or 1.78
     height    = height_m * 100       # convert to cm for bonus calculations
+
+    if is_goalkeeper(p):
+        # The engine has one shared player profile schema. Map goalkeeper
+        # attributes onto the generic stats the keeper AI actually reads.
+        balance = blend((p["Strength"], 0.35), (p["Balance"], 0.25),
+                        (p["Jumping"], 0.20), (p["GkHandling"], 0.20))
+        reaction = blend((p["GkReflexes"], 0.65), (p["Reactions"], 0.35))
+        acceleration = blend((p["Acceleration"], 0.45), (p["GkDiving"], 0.30),
+                             (p["Agility"], 0.25))
+        velocity = blend((p["SprintSpeed"], 0.70), (p["Acceleration"], 0.30))
+        stamina = p["stamina"]
+        agility = blend((p["GkDiving"], 0.45), (p["Agility"], 0.35),
+                        (p["GkReflexes"], 0.20))
+        shotpower = blend((p["GkKicking"], 0.75), (p["ShotPower"], 0.25))
+
+        standingtackle = blend((p["DefensiveAwareness"], 0.60), (p["StandingTackle"], 0.40))
+        slidingtackle = blend((p["DefensiveAwareness"], 0.65), (p["SlidingTackle"], 0.35))
+        ballcontrol = blend((p["GkHandling"], 0.65), (p["BallControl"], 0.35))
+        dribble = blend((p["BallControl"], 0.65), (p["Agility"], 0.35))
+        shortpass = blend((p["GkKicking"], 0.45), (p["ShortPassing"], 0.35), (p["Vision"], 0.20))
+        highpass = blend((p["GkKicking"], 0.65), (p["LongPassing"], 0.25), (p["Vision"], 0.10))
+        header = blend((p["GkHandling"], 0.45), (p["Jumping"], 0.35), (p["Strength"], 0.20))
+        shot = blend((p["Finishing"], 0.50), (p["LongShots"], 0.30), (p["ShotPower"], 0.20))
+        volley = p["Volleys"]
+
+        calmness = p["Composure"]
+        workrate = blend((p["stamina"], 0.40), (p["Reactions"], 0.35), (p["Aggression"], 0.25))
+        resilience = blend((p["Strength"], 0.45), (p["GkHandling"], 0.30), (p["Composure"], 0.25))
+        defensivepositioning = blend((p["GkPositioning"], 0.75), (p["DefensiveAwareness"], 0.25))
+        offensivepositioning = p["Positioning"]
+        vision = blend((p["Vision"], 0.70), (p["GkKicking"], 0.30))
+    else:
+        # --- Physical ---
+        balance      = p["Balance"]
+        reaction     = p["Reactions"]
+        acceleration = p["Acceleration"]
+        velocity     = p["SprintSpeed"]
+        stamina      = p["stamina"]
+        agility      = p["Agility"]
+        shotpower    = p["ShotPower"]
+
+        # --- Technical ---
+        standingtackle = p["StandingTackle"]
+        slidingtackle  = p["SlidingTackle"]
+
+        # BallControl: no bonus (skillMoves bonus goes to dribble only)
+        ballcontrol = p["BallControl"]
+
+        # Dribble: base Dribbling + skillMoves bonus (each level above 1 adds 3 pts, max +12)
+        sm = p["skillMoves"] or 1
+        dribble = p["Dribbling"] + (sm - 1) * 3
+
+        shortpass = p["ShortPassing"]
+        highpass  = blend((p["LongPassing"], 0.75), (p["Crossing"], 0.25))
+
+        # Header: HeadingAccuracy base + height bonus (each cm above 175) + jumping bonus
+        height_bonus = max(0.0, (height - 175.0)) * 0.3
+        jump_bonus   = (p["Jumping"] / 99.0) * 10.0
+        header = p["HeadingAccuracy"] + height_bonus + jump_bonus
+
+        # Shot: finishing-led. Curve matters, but should not rival finishing.
+        shot = p["Finishing"] * 0.65 + p["LongShots"] * 0.25 + p["Curve"] * 0.10
+
+        volley = p["Volleys"]
+
+        # --- Mental ---
+        # Calmness should reflect composure, not inverse aggression.
+        calmness = p["Composure"]
+
+        # No direct work-rate column exists in this DB, so blend effort-like traits.
+        workrate = p["stamina"] * 0.45 + p["Aggression"] * 0.30 + p["Reactions"] * 0.25
+
+        # Resilience driven by Strength
+        resilience = p["Strength"]
+
+        defensivepositioning  = p["DefensiveAwareness"]
+        offensivepositioning  = p["Positioning"]
+        vision                = p["Vision"]
+
+    return {
+        "balance": balance,
+        "reaction": reaction,
+        "acceleration": acceleration,
+        "velocity": velocity,
+        "stamina": stamina,
+        "agility": agility,
+        "shotpower": shotpower,
+        "standingtackle": standingtackle,
+        "slidingtackle": slidingtackle,
+        "ballcontrol": ballcontrol,
+        "dribble": dribble,
+        "shortpass": shortpass,
+        "highpass": highpass,
+        "header": header,
+        "shot": shot,
+        "volley": volley,
+        "calmness": calmness,
+        "workrate": workrate,
+        "resilience": resilience,
+        "defensivepositioning": defensivepositioning,
+        "offensivepositioning": offensivepositioning,
+        "vision": vision,
+    }
+
+
+def build_profile_values(p: dict) -> dict[str, float]:
     base_stat = p["base_stat"] or 0.6
-    age       = p["age"] or 27
+    age = p["age"] or 27
+    return {
+        key: profile_value_for_target(value, base_stat, age)
+        for key, value in build_target_attributes(p).items()
+    }
 
-    def xml(value: float) -> float:
-        return profile_value_for_target(value, base_stat, age)
 
-    # --- Physical ---
-    balance      = xml(p["Balance"])
-    reaction     = xml(p["Reactions"])
-    acceleration = xml(p["Acceleration"])
-    velocity     = xml(p["SprintSpeed"])
-    stamina      = xml(p["stamina"])
-    agility      = xml(p["Agility"])
-    shotpower    = xml(p["ShotPower"])
-
-    # --- Technical ---
-    standingtackle = xml(p["StandingTackle"])
-    slidingtackle  = xml(p["SlidingTackle"])
-
-    # BallControl: no bonus (skillMoves bonus goes to dribble only)
-    ballcontrol = xml(p["BallControl"])
-
-    # Dribble: base Dribbling + skillMoves bonus (each level above 1 adds 3 pts, max +12)
-    sm = p["skillMoves"] or 1
-    dribble = xml(p["Dribbling"] + (sm - 1) * 3)
-
-    shortpass = xml(p["ShortPassing"])
-    highpass  = xml(p["LongPassing"])
-
-    # Header: HeadingAccuracy base + height bonus (each cm above 175) + jumping bonus
-    height_bonus = max(0.0, (height - 175.0)) * 0.3
-    jump_bonus   = (p["Jumping"] / 99.0) * 10.0
-    header = xml(p["HeadingAccuracy"] + height_bonus + jump_bonus)
-
-    # Shot: finishing-led. Curve matters, but should not rival finishing.
-    shot = xml(p["Finishing"] * 0.65 + p["LongShots"] * 0.25 + p["Curve"] * 0.10)
-
-    volley = xml(p["Volleys"])
-
-    # --- Mental ---
-    # Calmness should reflect composure, not inverse aggression.
-    calmness = xml(p["Composure"])
-
-    # No direct work-rate column exists in this DB, so blend effort-like traits.
-    workrate = xml(p["stamina"] * 0.45 + p["Aggression"] * 0.30 + p["Reactions"] * 0.25)
-
-    # Resilience driven by Strength
-    resilience = xml(p["Strength"])
-
-    defensivepositioning  = xml(p["DefensiveAwareness"])
-    offensivepositioning  = xml(p["Positioning"])
-    vision                = xml(p["Vision"])
+def build_profile(p: dict) -> str:
+    values = build_profile_values(p)
 
     return XML_TEMPLATE.format(
-        balance=balance,
-        reaction=reaction,
-        acceleration=acceleration,
-        velocity=velocity,
-        stamina=stamina,
-        agility=agility,
-        shotpower=shotpower,
-        standingtackle=standingtackle,
-        slidingtackle=slidingtackle,
-        ballcontrol=ballcontrol,
-        dribble=dribble,
-        shortpass=shortpass,
-        highpass=highpass,
-        header=header,
-        shot=shot,
-        volley=volley,
-        calmness=calmness,
-        workrate=workrate,
-        resilience=resilience,
-        defensivepositioning=defensivepositioning,
-        offensivepositioning=offensivepositioning,
-        vision=vision,
+        **values,
     )
 
 
 COLUMNS = [
-    "id", "nickname", "height", "age", "base_stat",
+    "id", "firstname", "lastname", "nickname", "role", "height", "age", "base_stat",
     "Balance", "Reactions", "Acceleration", "SprintSpeed", "stamina",
     "Agility", "ShotPower", "StandingTackle", "SlidingTackle",
     "BallControl", "Dribbling", "skillMoves",
-    "ShortPassing", "LongPassing", "HeadingAccuracy", "Jumping",
+    "ShortPassing", "LongPassing", "Crossing", "HeadingAccuracy", "Jumping",
     "Finishing", "LongShots", "Curve", "Volleys",
     "Aggression", "Composure", "Strength",
     "DefensiveAwareness", "Positioning", "Vision",
+    "GkDiving", "GkHandling", "GkKicking", "GkReflexes", "GkPositioning",
 ]
+
+NUMERIC_DEFAULTS = {
+    "height": 1.78,
+    "age": 27,
+    "base_stat": 0.6,
+    "skillMoves": 1,
+}
+
+GENERIC_ATTRIBUTE_COLUMNS = [
+    "Balance", "Reactions", "Acceleration", "SprintSpeed", "stamina",
+    "Agility", "ShotPower", "StandingTackle", "SlidingTackle",
+    "BallControl", "Dribbling", "ShortPassing", "LongPassing", "Crossing",
+    "HeadingAccuracy", "Jumping", "Finishing", "LongShots", "Curve", "Volleys",
+    "Aggression", "Composure", "Strength", "DefensiveAwareness", "Positioning", "Vision",
+]
+
+GK_FALLBACKS = {
+    "GkDiving": "Agility",
+    "GkHandling": "BallControl",
+    "GkKicking": "LongPassing",
+    "GkReflexes": "Reactions",
+    "GkPositioning": "DefensiveAwareness",
+}
 
 
 def resolve_db_path(cli_path: str | None) -> Path:
@@ -185,10 +263,58 @@ def resolve_db_path(cli_path: str | None) -> Path:
     raise FileNotFoundError(f"No non-empty database found. Searched: {searched}")
 
 
+def engine_final_stat(profile_value: float, base_stat: float, age: int) -> float:
+    return round(max(0.01, min(1.0, profile_value * 2.0 * aged_base_stat(base_stat, age))), 3)
+
+
+def player_name(p: dict) -> str:
+    if p.get("nickname"):
+        return p["nickname"]
+    full = f"{p.get('firstname') or ''} {p.get('lastname') or ''}".strip()
+    return full or str(p["id"])
+
+
+def normalize_player(p: dict) -> dict:
+    normalized = dict(p)
+    for key, fallback in NUMERIC_DEFAULTS.items():
+        if normalized.get(key) is None:
+            normalized[key] = fallback
+
+    for key in GENERIC_ATTRIBUTE_COLUMNS:
+        if normalized.get(key) is None:
+            normalized[key] = 50
+
+    for key, fallback_key in GK_FALLBACKS.items():
+        if normalized.get(key) is None:
+            normalized[key] = normalized.get(fallback_key, 50)
+
+    return normalized
+
+
+def print_report(players: list[dict]) -> None:
+    print("\nEngine-final profile report")
+    print("id     player                  role base age kind  shot pwr calm pos  gkReact gkAgi gkPos gkHand")
+    for p in players:
+        values = build_profile_values(p)
+        final = {
+            key: engine_final_stat(value, p["base_stat"] or 0.6, p["age"] or 27)
+            for key, value in values.items()
+        }
+        kind = "GK" if is_goalkeeper(p) else "OUT"
+        print(
+            f"{p['id']:<6} {player_name(p)[:22]:<22} {(p.get('role') or '')[:4]:<4} "
+            f"{p['base_stat']:.2f} {p['age']:<3} {kind:<4} "
+            f"{final['shot']:.2f} {final['shotpower']:.2f} {final['calmness']:.2f} {final['offensivepositioning']:.2f} "
+            f"{final['reaction']:.2f}    {final['agility']:.2f}  {final['defensivepositioning']:.2f}  {final['ballcontrol']:.2f}"
+        )
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate engine profile_xml from imported player attributes.")
     parser.add_argument("--db", default=None, help="SQLite database path")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--report", action="store_true", help="Print target engine-final stats for sampled players")
+    parser.add_argument("--report-limit", type=int, default=12)
     args = parser.parse_args()
 
     db_path = resolve_db_path(args.db)
@@ -206,15 +332,8 @@ def main():
     updated = 0
 
     for row in rows:
-        p = dict(row)
-        name = p["nickname"] or str(p["id"])
-
-        # Skip if any required attribute is NULL
-        missing = [c for c in COLUMNS[2:] if p[c] is None]
-        if missing:
-            print(f"  SKIP {name} — missing: {missing}")
-            skipped += 1
-            continue
+        p = normalize_player(dict(row))
+        name = player_name(p)
 
         xml = build_profile(p)
 
@@ -227,6 +346,15 @@ def main():
                 (xml, p["id"]),
             )
         updated += 1
+
+    if args.report:
+        sample = []
+        for row in rows:
+            p = normalize_player(dict(row))
+            sample.append(p)
+            if len(sample) >= args.report_limit:
+                break
+        print_report(sample)
 
     if not args.dry_run:
         con.commit()
