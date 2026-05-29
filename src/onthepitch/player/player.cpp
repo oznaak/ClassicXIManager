@@ -18,6 +18,7 @@
 #include "player.hpp"
 
 #include <cmath>
+#include <cstring>
 
 #include "../match.hpp"
 #include "../team.hpp"
@@ -29,6 +30,35 @@
 #include "../../utils.hpp"
 
 #include "base/geometry/triangle.hpp"
+
+namespace {
+
+bool IsManagerModeHomeBoostStat(const char *name) {
+  return strcmp(name, "mental_calmness") == 0 ||
+         strcmp(name, "mental_workrate") == 0 ||
+         strcmp(name, "mental_resilience") == 0 ||
+         strcmp(name, "physical_reaction") == 0 ||
+         strcmp(name, "physical_balance") == 0 ||
+         strcmp(name, "technical_ballcontrol") == 0 ||
+         strcmp(name, "technical_shortpass") == 0 ||
+         strcmp(name, "technical_highpass") == 0;
+}
+
+float GetManagerModeHomeAdvantageMultiplier(Team *team, const char *name) {
+  if (!team || team->GetID() != 0) return 1.0f;
+  if (GetConfiguration()->GetReal("manager_mode", 0.0f) <= 0.5f) return 1.0f;
+  if (!IsManagerModeHomeBoostStat(name)) return 1.0f;
+
+  // Tiny home comfort boost: enough to be felt over a match, not enough to override player quality.
+  if (strcmp(name, "mental_calmness") == 0 ||
+      strcmp(name, "mental_workrate") == 0 ||
+      strcmp(name, "mental_resilience") == 0) {
+    return 1.025f;
+  }
+  return 1.015f;
+}
+
+}
 
 Player::Player(Team *team, PlayerData *playerData) : PlayerBase(team->GetMatch(), playerData), team(team) {
   menuTask = GetMenuTask();
@@ -588,12 +618,14 @@ float Player::GetStat(const char *name) const {
   //if (team->GetID() == 0) multiplier = 0.5f; else multiplier = 1.0f;
   if (team->GetHumanGamerCount() == 0) multiplier = 0.3f + 0.7f * team->GetMatch()->GetMatchDifficulty();
   multiplier *= 0.7f + 0.3f * GetFatigueFactorInv(); // todo: some stats are more affected by fatigue than others
+  multiplier *= GetManagerModeHomeAdvantageMultiplier(team, name);
   //if (GetExternalController()) printf("stat %s: %f\n", name, playerData->GetStat(name));
   //if (GetDebug()) printf("stat %s == %f\n", name, playerData->GetStat(name) * multiplier);
 
-  if (playerData->GetStat(name) == 0.0f) printf("NULLSTAT: name: %s\n", name);
-  //printf("stat %s: %f * %f\n", name, playerData->GetStat(name), multiplier);
-  return playerData->GetStat(name) * multiplier;
+  float stat = playerData->GetStat(name);
+  if (stat == 0.0f) printf("NULLSTAT: name: %s\n", name);
+  //printf("stat %s: %f * %f\n", name, stat, multiplier);
+  return clamp(stat * multiplier, 0.0f, 1.0f);
 }
 
 void Player::ResetSituation(const Vector3 &focusPos) {
