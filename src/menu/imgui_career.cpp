@@ -4199,38 +4199,106 @@ static void DrawBoardObjectivesCard(ImVec2 sz) {
 }
 
 static void DrawMedicalCentreCard(ImVec2 sz) {
-  BeginModernCard("##medical_ph", sz);
+  BeginModernCard("##medical_live", sz);
+
+  struct MedRow {
+    std::string name;
+    std::string meta;
+    int severity = 0; // 2 injured, 1 risk
+    int condition = 100;
+  };
+  std::vector<MedRow> injured;
+  std::vector<MedRow> risk;
+
+  for (const auto &p : g_CareerHub.players) {
+    std::string name = DisplayName(p);
+    if (name.empty()) name = "Unknown player";
+    if (p.injuryDays > 0) {
+      MedRow row;
+      row.name = name;
+      row.severity = 2;
+      row.condition = p.currentStamina;
+      row.meta = (p.injuryType.empty() ? "Injured" : p.injuryType) + " - " + int_to_str(p.injuryDays) + "d";
+      injured.push_back(row);
+    } else if (p.currentStamina > 0 && p.currentStamina <= 68) {
+      MedRow row;
+      row.name = name;
+      row.severity = 1;
+      row.condition = p.currentStamina;
+      row.meta = int_to_str(p.currentStamina) + "% condition";
+      risk.push_back(row);
+    }
+  }
+
+  std::sort(injured.begin(), injured.end(), [](const MedRow &a, const MedRow &b) {
+    return a.meta < b.meta;
+  });
+  std::sort(risk.begin(), risk.end(), [](const MedRow &a, const MedRow &b) {
+    return a.condition < b.condition;
+  });
 
   ImDrawList *dl = ImGui::GetWindowDrawList();
-  PushMgrFont(g_ManagerFontSmall);
-  float lh = ImGui::GetTextLineHeight();
-  float cr = lh * 0.48f;
+  ImVec2 origin = ImGui::GetCursorScreenPos();
+  float avW = ImGui::GetContentRegionAvail().x;
+  const float padX = 8.0f;
+  float y = origin.y + 2.0f;
 
-  auto IconRow = [&](ImU32 iconCol, const char *text, ImVec4 textCol) {
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 8.0f);
-    ImVec2 p = ImGui::GetCursorScreenPos();
-    dl->AddCircleFilled(ImVec2(p.x + cr, p.y + lh * 0.5f), cr, iconCol);
-    ImVec2 psz = ImGui::CalcTextSize("+");
-    dl->AddText(ImGui::GetFont(), lh,
-                ImVec2(p.x + cr - psz.x * 0.5f, p.y + lh * 0.5f - psz.y * 0.5f),
-                IM_COL32(255,255,255,220), "+");
-    ImGui::Dummy(ImVec2(cr * 2.0f + 8.0f, lh));
-    ImGui::SameLine(0, 0);
-    ImGui::PushStyleColor(ImGuiCol_Text, textCol);
-    ImGui::TextUnformatted(text);
-    ImGui::PopStyleColor();
+  auto DrawHeader = [&](const char *label, int count, ImU32 col) {
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%s %d", label, count);
+    dl->AddCircleFilled(ImVec2(origin.x + padX + 5.0f, y + 8.0f), 5.0f, col, 16);
+    dl->AddText(g_ManagerFontBold ? g_ManagerFontBold : ImGui::GetFont(), 13.0f,
+                ImVec2(origin.x + padX + 18.0f, y),
+                IM_COL32(220, 232, 255, 235), buf);
+    y += 20.0f;
   };
 
-  ImGui::Dummy(ImVec2(0, 4.0f));
-  IconRow(IM_COL32(200,30,30,220),  "No players injured",          kTextPri);
-  ImGui::Spacing();
-  ImGui::PushStyleColor(ImGuiCol_Separator, kBorder);
-  ImGui::Separator();
-  ImGui::PopStyleColor();
-  ImGui::Spacing();
-  IconRow(IM_COL32(190,100,20,220), "0 players at risk of injury", kTextPri);
+  auto DrawRow = [&](const MedRow &row) {
+    ImU32 col = row.severity == 2 ? IM_COL32(230, 76, 86, 235)
+                                  : IM_COL32(235, 170, 55, 235);
+    ImVec2 r0(origin.x + padX, y);
+    ImVec2 r1(origin.x + avW - padX, y + 24.0f);
+    dl->AddRectFilled(r0, r1, IM_COL32(14, 23, 48, 205), 5.0f);
+    dl->AddRectFilled(r0, ImVec2(r0.x + 3.0f, r1.y), col, 2.0f);
+    dl->AddText(g_ManagerFontSmall, 13.0f, ImVec2(r0.x + 9.0f, r0.y + 2.0f),
+                IM_COL32(232, 238, 252, 238), row.name.c_str());
+    ImVec2 msz = g_ManagerFontSmall
+      ? g_ManagerFontSmall->CalcTextSizeA(12.0f, FLT_MAX, 0.0f, row.meta.c_str())
+      : ImGui::CalcTextSize(row.meta.c_str());
+    dl->AddText(g_ManagerFontSmall, 12.0f,
+                ImVec2(r1.x - msz.x - 8.0f, r0.y + 4.0f),
+                row.severity == 2 ? IM_COL32(255, 145, 150, 230)
+                                  : IM_COL32(255, 210, 120, 230),
+                row.meta.c_str());
+    y += 28.0f;
+  };
 
-  PopMgrFont(g_ManagerFontSmall);
+  DrawHeader("Injured", (int)injured.size(), IM_COL32(230, 76, 86, 235));
+  if (injured.empty()) {
+    dl->AddText(g_ManagerFontSmall, 13.0f, ImVec2(origin.x + padX + 2.0f, y),
+                IM_COL32(130, 148, 184, 220), "No players injured");
+    y += 22.0f;
+  } else {
+    int limit = std::min(2, (int)injured.size());
+    for (int i = 0; i < limit; i++) DrawRow(injured[i]);
+  }
+
+  y += 3.0f;
+  dl->AddLine(ImVec2(origin.x + padX, y), ImVec2(origin.x + avW - padX, y),
+              IM_COL32(255, 255, 255, 18), 1.0f);
+  y += 8.0f;
+
+  DrawHeader("At risk", (int)risk.size(), IM_COL32(235, 170, 55, 235));
+  if (risk.empty()) {
+    dl->AddText(g_ManagerFontSmall, 13.0f, ImVec2(origin.x + padX + 2.0f, y),
+                IM_COL32(130, 148, 184, 220), "No high-risk players");
+    y += 22.0f;
+  } else {
+    int limit = std::min(2, (int)risk.size());
+    for (int i = 0; i < limit; i++) DrawRow(risk[i]);
+  }
+
+  ImGui::Dummy(ImVec2(avW, std::max(0.0f, y - origin.y)));
   EndModernCard();
 }
 
@@ -4429,8 +4497,6 @@ static std::string FmtMoney(long long v); // forward declaration
 static void DrawTransfersCard(ImVec2 sz) {
   BeginModernCard("##transfers_card", sz);
   ImDrawList *dl = ImGui::GetWindowDrawList();
-  PushMgrFont(g_ManagerFontSmall);
-  float lh = ImGui::GetTextLineHeight();
   int mid = g_CareerHub.managerId;
 
   // Window open/closed status
@@ -4461,44 +4527,66 @@ static void DrawTransfersCard(ImVec2 sz) {
     DatabaseResult *r = GetDB()->Query(q.str().c_str());
     if (r) { if (r->data.size()>0) budget=atoll(DBCell(r,0,0).c_str()); delete r; } }
 
-  // Window status row
-  {
-    ImVec2 p = ImGui::GetCursorScreenPos();
-    ImU32 winCol = windowOpen ? IM_COL32(100,220,140,255) : IM_COL32(200,100,100,220);
-    std::string winLabel = windowOpen
-      ? ("Window open — " + std::to_string(daysLeft) + " days left")
-      : "Transfer window closed";
-    dl->AddText(p, winCol, winLabel.c_str());
-    ImGui::Dummy(ImVec2(0, lh + 3.0f));
-  }
+  ImVec2 origin = ImGui::GetCursorScreenPos();
+  float avW = ImGui::GetContentRegionAvail().x;
+  float avH = sz.y - 24.0f;
+  const float padX = 10.0f;
+  const float cardW = avW - padX * 2.0f;
+  float y = origin.y + 2.0f;
 
-  // Active bids
-  {
-    ImVec2 p = ImGui::GetCursorScreenPos();
-    ImU32 col = activeBids > 0 ? IM_COL32(180,200,255,230) : IM_COL32(160,160,160,180);
-    char buf[64]; snprintf(buf, sizeof(buf), "Active bids:  %d", activeBids);
-    dl->AddText(p, col, buf);
-    ImGui::Dummy(ImVec2(0, lh + 3.0f));
-  }
+  ImU32 statusCol = windowOpen ? IM_COL32(45, 205, 115, 245)
+                               : IM_COL32(220, 92, 92, 235);
+  std::string statusText = windowOpen
+    ? ("Window open - " + std::to_string(std::max(0, daysLeft)) + " days left")
+    : "Transfer window closed";
 
-  // Incoming bids
-  {
-    ImVec2 p = ImGui::GetCursorScreenPos();
-    ImU32 col = incomingBids > 0 ? IM_COL32(255,210,100,240) : IM_COL32(160,160,160,180);
-    char buf[64]; snprintf(buf, sizeof(buf), "Incoming bids: %d", incomingBids);
-    dl->AddText(p, col, buf);
-    ImGui::Dummy(ImVec2(0, lh + 3.0f));
-  }
+  ImVec2 banner0(origin.x + padX, y);
+  ImVec2 banner1(origin.x + padX + cardW, y + 34.0f);
+  dl->AddRectFilled(banner0, banner1, IM_COL32(14, 24, 50, 230), 7.0f);
+  dl->AddRect(banner0, banner1, IM_COL32(64, 86, 140, 120), 7.0f);
+  dl->AddCircleFilled(ImVec2(banner0.x + 17.0f, banner0.y + 17.0f), 5.0f, statusCol, 16);
+  dl->AddText(g_ManagerFontBold ? g_ManagerFontBold : ImGui::GetFont(), 14.0f,
+              ImVec2(banner0.x + 30.0f, banner0.y + 8.0f),
+              IM_COL32(226, 236, 255, 245), statusText.c_str());
+  y += 42.0f;
 
-  // Budget
-  {
-    ImVec2 p = ImGui::GetCursorScreenPos();
-    std::string bstr = "Budget: " + FmtMoney(budget);
-    dl->AddText(p, IM_COL32(200,200,200,220), bstr.c_str());
-    ImGui::Dummy(ImVec2(0, lh + 3.0f));
-  }
+  auto DrawMetric = [&](float x, float w, const char *label, const std::string &value,
+                        ImU32 valueCol) {
+    ImVec2 r0(x, y);
+    ImVec2 r1(x + w, y + 44.0f);
+    dl->AddRectFilled(r0, r1, IM_COL32(12, 20, 43, 220), 7.0f);
+    dl->AddRect(r0, r1, IM_COL32(50, 70, 118, 110), 7.0f);
+    dl->AddText(g_ManagerFontSmall, 12.0f, ImVec2(r0.x + 10.0f, r0.y + 7.0f),
+                IM_COL32(130, 148, 184, 230), label);
+    ImVec2 vs = g_ManagerFontBold
+      ? g_ManagerFontBold->CalcTextSizeA(18.0f, FLT_MAX, 0.0f, value.c_str())
+      : ImGui::CalcTextSize(value.c_str());
+    dl->AddText(g_ManagerFontBold ? g_ManagerFontBold : ImGui::GetFont(), 18.0f,
+                ImVec2(r1.x - vs.x - 10.0f, r0.y + 18.0f),
+                valueCol, value.c_str());
+  };
 
-  PopMgrFont(g_ManagerFontSmall);
+  float half = (cardW - 8.0f) * 0.5f;
+  DrawMetric(origin.x + padX, half, "My bids", int_to_str(activeBids),
+             activeBids > 0 ? IM_COL32(130, 170, 255, 245) : IM_COL32(95, 112, 150, 230));
+  DrawMetric(origin.x + padX + half + 8.0f, half, "Incoming", int_to_str(incomingBids),
+             incomingBids > 0 ? IM_COL32(255, 203, 85, 245) : IM_COL32(95, 112, 150, 230));
+  y += 54.0f;
+
+  ImVec2 budget0(origin.x + padX, y);
+  ImVec2 budget1(origin.x + padX + cardW, y + 30.0f);
+  dl->AddRectFilled(budget0, budget1, IM_COL32(10, 18, 38, 210), 6.0f);
+  dl->AddText(g_ManagerFontSmall, 13.0f, ImVec2(budget0.x + 10.0f, budget0.y + 7.0f),
+              IM_COL32(146, 164, 200, 230), "Budget");
+  std::string bstr = FmtMoney(budget);
+  ImVec2 bsz = g_ManagerFontBold
+    ? g_ManagerFontBold->CalcTextSizeA(15.0f, FLT_MAX, 0.0f, bstr.c_str())
+    : ImGui::CalcTextSize(bstr.c_str());
+  dl->AddText(g_ManagerFontBold ? g_ManagerFontBold : ImGui::GetFont(), 15.0f,
+              ImVec2(budget1.x - bsz.x - 10.0f, budget0.y + 6.0f),
+              IM_COL32(220, 230, 248, 240), bstr.c_str());
+
+  ImGui::Dummy(ImVec2(avW, std::max(avH, budget1.y - origin.y)));
   EndModernCard();
 }
 
@@ -4726,7 +4814,7 @@ static void DrawHomePage(float w, float h) {
 
   const float kTrainH  = 5.0f * msgFontH + 6.0f;
   const float kBoardH  = 3.0f * (msgFontH + 10.0f) + 36.0f;
-  const float kMedH    = 3.0f * (msgFontH + 10.0f) + 46.0f;
+  const float kMedH    = 176.0f;
   const float kTransH  = 2.0f * (msgFontH * 2.4f + 12.0f) + 58.0f;
   const float kTacH    = 220.0f;
   // Squad snapshot: header + 20 compact rows. rowH = (msgFontH+2)+3 = msgFontH+5
