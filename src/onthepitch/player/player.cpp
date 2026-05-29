@@ -46,6 +46,24 @@ bool IsManagerModeHomeBoostStat(const char *name) {
          strcmp(name, "technical_highpass") == 0;
 }
 
+bool IsManagerModeSeparationStat(const char *name) {
+  return strcmp(name, "physical_reaction") == 0 ||
+         strcmp(name, "physical_agility") == 0 ||
+         strcmp(name, "physical_balance") == 0 ||
+         strcmp(name, "physical_shotpower") == 0 ||
+         strcmp(name, "technical_standingtackle") == 0 ||
+         strcmp(name, "technical_slidingtackle") == 0 ||
+         strcmp(name, "technical_ballcontrol") == 0 ||
+         strcmp(name, "technical_dribble") == 0 ||
+         strcmp(name, "technical_shortpass") == 0 ||
+         strcmp(name, "technical_highpass") == 0 ||
+         strcmp(name, "technical_shot") == 0 ||
+         strcmp(name, "mental_calmness") == 0 ||
+         strcmp(name, "mental_defensivepositioning") == 0 ||
+         strcmp(name, "mental_offensivepositioning") == 0 ||
+         strcmp(name, "mental_vision") == 0;
+}
+
 float GetManagerModeHomeAdvantageMultiplier(Team *team, const char *name) {
   if (!team || team->GetID() != 0) return 1.0f;
   if (GetConfiguration()->GetReal("manager_mode", 0.0f) <= 0.5f) return 1.0f;
@@ -639,7 +657,12 @@ float Player::GetStat(const char *name) const {
   float stat = playerData->GetStat(name);
   if (stat == 0.0f) printf("NULLSTAT: name: %s\n", name);
   //printf("stat %s: %f * %f\n", name, stat, multiplier);
-  return clamp(stat * multiplier, 0.0f, 1.0f);
+  stat = clamp(stat * multiplier, 0.0f, 1.0f);
+  if (GetConfiguration()->GetReal("manager_mode", 0.0f) > 0.5f &&
+      IsManagerModeSeparationStat(name)) {
+    stat = clamp(0.50f + (stat - 0.50f) * 1.18f, 0.03f, 1.0f);
+  }
+  return stat;
 }
 
 void Player::ResetSituation(const Vector3 &focusPos) {

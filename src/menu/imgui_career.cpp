@@ -793,16 +793,16 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
   {
     tactics.clear();
     // Seed factory defaults first
-    tactics["position_offense_depth_factor"]      = 0.9f;
-    tactics["position_defense_depth_factor"]      = 0.75f;
-    tactics["position_offense_width_factor"]      = 0.9f;
-    tactics["position_defense_width_factor"]      = 0.8f;
-    tactics["position_offense_midfieldfocus"]     = 0.6f;
+    tactics["position_offense_depth_factor"]      = 0.5f;
+    tactics["position_defense_depth_factor"]      = 0.5f;
+    tactics["position_offense_width_factor"]      = 0.5f;
+    tactics["position_defense_width_factor"]      = 0.5f;
+    tactics["position_offense_midfieldfocus"]     = 0.5f;
     tactics["position_defense_midfieldfocus"]     = 0.5f;
-    tactics["position_offense_sidefocus_strength"]  = 0.1f;
-    tactics["position_defense_sidefocus_strength"]  = 0.4f;
-    tactics["position_offense_microfocus_strength"] = 0.7f;
-    tactics["position_defense_microfocus_strength"] = 0.8f;
+    tactics["position_offense_sidefocus_strength"]  = 0.5f;
+    tactics["position_defense_sidefocus_strength"]  = 0.5f;
+    tactics["position_offense_microfocus_strength"] = 0.5f;
+    tactics["position_defense_microfocus_strength"] = 0.5f;
     tactics["dribble_offensiveness"]              = 0.5f;
     tactics["dribble_centermagnet"]               = 0.5f;
 

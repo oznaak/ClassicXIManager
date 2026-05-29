@@ -319,10 +319,19 @@ static void AddBestBenchGroup(std::vector<int> &ordered,
 static std::vector<AISquadCandidate> LoadAISquadCandidates(int managerId, int teamDatabaseID) {
   std::vector<AISquadCandidate> candidates;
   const bool hasPlayerStamina = DBHasColumn("players", "player_stamina");
+  const bool hasSaveStamina = DBHasColumn("player_save_state", "player_stamina") &&
+                              managerId > 0;
 
   std::stringstream q;
-  q << "SELECT p.id, p.role, COALESCE(p.alternative_pos,''), p.base_stat,"
-    << (hasPlayerStamina ? " COALESCE(p.player_stamina,100)," : " 100,")
+  q << "SELECT p.id, p.role, COALESCE(p.alternative_pos,''), p.base_stat,";
+  if (hasSaveStamina) {
+    q << (hasPlayerStamina
+            ? " COALESCE(pss.player_stamina,p.player_stamina,100),"
+            : " COALESCE(pss.player_stamina,100),");
+  } else {
+    q << (hasPlayerStamina ? " COALESCE(p.player_stamina,100)," : " 100,");
+  }
+  q
     << " COALESCE(p.Finishing,0), COALESCE(p.ShotPower,0), COALESCE(p.LongShots,0),"
     << " COALESCE(p.Positioning,0), COALESCE(p.Vision,0), COALESCE(p.ShortPassing,0),"
     << " COALESCE(p.BallControl,0), COALESCE(p.DefensiveAwareness,0),"

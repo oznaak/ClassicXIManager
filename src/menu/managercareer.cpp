@@ -435,8 +435,11 @@ static void EnsureCareerTables() {
     "team_id    INTEGER,"
     "weekly_wage INTEGER,"
     "contract_expiry TEXT,"
+    "player_stamina INTEGER,"
     "PRIMARY KEY(manager_id, player_id));"
   ); delete GetDB()->Query("SELECT 1;");
+  AddColumnIfMissing("player_save_state", "player_stamina",
+                     "player_stamina INTEGER");
 
   GetDB()->Query(
     "CREATE TABLE IF NOT EXISTS club_player_relationship("
@@ -499,9 +502,12 @@ static void EnsureCareerTables() {
   // first recorded seller so new saves start from default-like data again.
   {
     DatabaseResult *r = GetDB()->Query(
-      "INSERT OR REPLACE INTO player_save_state(manager_id,player_id,team_id,weekly_wage)"
+      "INSERT INTO player_save_state(manager_id,player_id,team_id,weekly_wage)"
       " SELECT manager_id,player_id,buying_club_id,offered_wage"
-      " FROM transfer_negotiations WHERE state='completed';");
+      " FROM transfer_negotiations WHERE state='completed'"
+      " ON CONFLICT(manager_id,player_id) DO UPDATE SET"
+      " team_id=excluded.team_id,"
+      " weekly_wage=COALESCE(excluded.weekly_wage, player_save_state.weekly_wage);");
     delete r;
   }
   {
@@ -1903,17 +1909,17 @@ static void ProcessCompletedScouts(int managerId, const std::string &newDate) {
 }
 
 static void ProcessDailyPlayerStaminaRecovery(int managerId) {
-  if (!TableHasColumn("players", "player_stamina")) return;
-  (void)managerId;
+  if (managerId <= 0 || !TableHasColumn("player_save_state", "player_stamina")) return;
 
   std::stringstream q;
-  q << "UPDATE players SET player_stamina = MIN(100, player_stamina + "
+  q << "UPDATE player_save_state SET player_stamina = MIN(100, COALESCE(player_stamina,100) + "
     << "CASE "
-    << "WHEN stamina >= 85 THEN 16 "
-    << "WHEN stamina >= 70 THEN 14 "
-    << "WHEN stamina >= 55 THEN 12 "
+    << "WHEN (SELECT stamina FROM players WHERE players.id=player_save_state.player_id) >= 85 THEN 16 "
+    << "WHEN (SELECT stamina FROM players WHERE players.id=player_save_state.player_id) >= 70 THEN 14 "
+    << "WHEN (SELECT stamina FROM players WHERE players.id=player_save_state.player_id) >= 55 THEN 12 "
     << "ELSE 9 END"
-    << ");";
+    << ") WHERE manager_id=" << managerId
+    << " AND player_stamina IS NOT NULL;";
   DatabaseResult *r = GetDB()->Query(q.str());
   delete r;
 }

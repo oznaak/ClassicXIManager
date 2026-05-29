@@ -19,7 +19,9 @@
 
 #include "elizacontroller.hpp"
 
+#include <algorithm>
 #include <cmath>
+#include <vector>
 
 #include "../../AIsupport/mentalimage.hpp"
 #include "../../AIsupport/AIfunctions.hpp"
@@ -33,6 +35,34 @@
 #include "strategies/offtheball/default_off.hpp"
 #include "strategies/offtheball/goalie_default.hpp"
 #include "../playerofficial.hpp"
+
+namespace {
+
+float ManagerTeamStrength(Team *team) {
+  if (!team) return 0.65f;
+  std::vector<Player*> activePlayers;
+  team->GetActivePlayers(activePlayers);
+  if (activePlayers.empty()) activePlayers = team->GetAllPlayers();
+
+  float total = 0.0f;
+  int count = 0;
+  for (unsigned int i = 0; i < activePlayers.size() && count < playerNum; i++) {
+    Player *p = activePlayers.at(i);
+    if (!p) continue;
+    total += p->GetAverageStat() * (0.78f + clamp(p->GetFatigueFactorInv(), 0.45f, 1.0f) * 0.22f);
+    count++;
+  }
+  if (count == 0) return 0.65f;
+  return total / (float)count;
+}
+
+float ManagerQualityEdge(Team *team, Match *match) {
+  if (!team || !match || GetConfiguration()->GetReal("manager_mode", 0.0f) <= 0.5f) return 0.0f;
+  Team *opp = match->GetTeam(abs(team->GetID() - 1));
+  return clamp(ManagerTeamStrength(team) - ManagerTeamStrength(opp), -0.18f, 0.18f);
+}
+
+}
 
 ElizaController::ElizaController(Match *match) : PlayerController(match) {
   lastDesiredDirection = Vector3(0);
@@ -949,6 +979,7 @@ void ElizaController::GetOnTheBallCommands(std::vector<PlayerCommand> &commandQu
   idealShotPosFactor = curve(idealShotPosFactor, 1.0f);
   float managerShotIntent = 0.0f;
   if (managerMode) {
+    float qualityEdge = ManagerQualityEdge(team, match);
     float attackerSkill =
       (CastPlayer()->GetStat("technical_shot") +
        CastPlayer()->GetStat("physical_shotpower") +
@@ -965,7 +996,8 @@ void ElizaController::GetOnTheBallCommands(std::vector<PlayerCommand> &commandQu
       attackerSkill * 0.22f +
       bodyShape * 0.12f +
       possessionPatience * 0.08f +
-      trailingNeed;
+      trailingNeed +
+      qualityEdge * 0.34f;
   }
 
   float idealShotThreshold = managerMode ? 0.08f : 0.1f;
@@ -989,20 +1021,24 @@ void ElizaController::GetOnTheBallCommands(std::vector<PlayerCommand> &commandQu
     float shotRequirement = 0.5f;
     float randomWindow = 0.5f;
     if (managerMode) {
+      float qualityEdge = ManagerQualityEdge(team, match);
       float attackerSkill =
         (CastPlayer()->GetStat("technical_shot") +
          CastPlayer()->GetStat("physical_shotpower") +
          CastPlayer()->GetStat("mental_offensivepositioning") +
          CastPlayer()->GetStat("mental_calmness")) * 0.25f;
       float possessionPatience = NormalizedClamp((float)CastPlayer()->GetPossessionDuration_ms(), 1800.0f, 6000.0f);
+      float closePressure = 1.0f - NormalizedClamp(CastPlayer()->GetClosestOpponentDistance(), 0.9f, 3.5f);
       shotRequirement =
         0.55f -
         attackerSkill * 0.07f -
         idealShotPosFactor * 0.11f -
         possessionPatience * 0.05f -
-        managerShotIntent * 0.05f;
-      shotRequirement = clamp(shotRequirement, 0.38f, 0.58f);
-      randomWindow = managerLongShotWindow ? 0.28f : 0.34f;
+        managerShotIntent * 0.05f -
+        qualityEdge * 0.14f +
+        closePressure * (0.04f + std::max(0.0f, 0.78f - attackerSkill) * 0.08f);
+      shotRequirement = clamp(shotRequirement, 0.39f, 0.62f);
+      randomWindow = managerLongShotWindow ? 0.22f : 0.29f;
     }
 
     if (odds + random(0.0f, randomWindow) > shotRequirement) {
@@ -1019,6 +1055,7 @@ void ElizaController::GetOnTheBallCommands(std::vector<PlayerCommand> &commandQu
            player->GetStat("mental_offensivepositioning") * 0.15f +
            player->GetStat("physical_shotpower") * 0.15f);
         float aimSpread = 1.10f - finishingSkill * 0.85f;
+        aimSpread += std::max(0.0f, 0.76f - finishingSkill) * 0.55f;
         if (fabs(targetY) < 0.1f && goalDist < 0.40f && random(0.0f, 1.0f) < finishingSkill) {
           targetY = random(0.0f, 1.0f) < 0.5f ? -2.8f : 2.8f;
         }

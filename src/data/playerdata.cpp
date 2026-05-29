@@ -13,6 +13,7 @@
 #include "base/utils.hpp"
 
 #include "../main.hpp"
+#include "../menu/careermatchcontext.hpp"
 
 namespace {
 
@@ -56,13 +57,28 @@ PlayerData::PlayerData(int playerDatabaseID) : databaseID(playerDatabaseID) {
   //printf("test: %s\n", test.c_str());
 
   const bool hasPlayerStamina = DBHasColumn("players", "player_stamina");
+  const bool hasSaveStamina = DBHasColumn("player_save_state", "player_stamina") &&
+                              g_CareerMatchContext.active &&
+                              g_CareerMatchContext.managerId > 0;
   std::stringstream q;
-  q << "select firstname, lastname, COALESCE(nickname, '') as nickname, role, base_stat, profile_xml, age,"
-    << " skincolor, hairstyle, haircolor, height, jersey_number,"
+  q << "select p.firstname, p.lastname, COALESCE(p.nickname, '') as nickname, p.role, p.base_stat, p.profile_xml, p.age,"
+    << " p.skincolor, p.hairstyle, p.haircolor, p.height, p.jersey_number,"
     << " COALESCE(foot, 'right') as foot, COALESCE(weakFoot, 3) as weakFoot,"
-    << " COALESCE(skillMoves, 2) as skillMoves,"
-    << (hasPlayerStamina ? " COALESCE(player_stamina, 100)" : " 100")
-    << " as player_stamina from players where id = " << int_to_str(databaseID) << " limit 1";
+    << " COALESCE(p.skillMoves, 2) as skillMoves,";
+  if (hasSaveStamina) {
+    q << " COALESCE(pss.player_stamina,"
+      << (hasPlayerStamina ? "p.player_stamina" : "100")
+      << ",100)";
+  } else {
+    q << (hasPlayerStamina ? " COALESCE(p.player_stamina, 100)" : " 100");
+  }
+  q << " as player_stamina from players p";
+  if (hasSaveStamina) {
+    q << " LEFT JOIN player_save_state pss"
+      << " ON pss.manager_id=" << g_CareerMatchContext.managerId
+      << " AND pss.player_id=p.id";
+  }
+  q << " where p.id = " << int_to_str(databaseID) << " limit 1";
   DatabaseResult *result = GetDB()->Query(q.str());
 
   std::string roleString;

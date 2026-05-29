@@ -52,14 +52,16 @@ TeamAIController::TeamAIController(Team *team) : team(team) {
   endApplyKeeperRush_ms = 0;
   forwardSupportPlayer = 0;
 
-  baseTeamTactics.Set("position_offense_depth_factor", 0.9f);
-  baseTeamTactics.Set("position_defense_depth_factor", 0.75f);
-  baseTeamTactics.Set("position_offense_width_factor", 0.9f);
-  baseTeamTactics.Set("position_defense_width_factor", 0.8f);
+  // Balanced manager baseline. Team-specific tactics and AI match context
+  // nudge from here instead of every club starting in an all-out shape.
+  baseTeamTactics.Set("position_offense_depth_factor", 0.55f);
+  baseTeamTactics.Set("position_defense_depth_factor", 0.55f);
+  baseTeamTactics.Set("position_offense_width_factor", 0.60f);
+  baseTeamTactics.Set("position_defense_width_factor", 0.55f);
   baseTeamTactics.Set("position_offense_ownhalf_factor", 0.52f);
   baseTeamTactics.Set("position_defense_ownhalf_factor", 0.54f);
-  baseTeamTactics.Set("position_offense_midfieldfocus", 0.6f);
-  baseTeamTactics.Set("position_defense_midfieldfocus", 0.5f);
+  baseTeamTactics.Set("position_offense_midfieldfocus", 0.50f);
+  baseTeamTactics.Set("position_defense_midfieldfocus", 0.50f);
   baseTeamTactics.Set("position_offense_midfieldfocus_strength", 0.35f);
   baseTeamTactics.Set("position_defense_midfieldfocus_strength", 0.35f);
   baseTeamTactics.Set("position_offense_sidefocus_strength", 0.1f); // take possession factor more seriously (high) or ball position (low)
@@ -122,6 +124,37 @@ static std::string NormalizeBadgePath(std::string raw) {
   const std::string kPfx = "databases/default/";
   if (raw.substr(0, kPfx.size()) == kPfx) raw = raw.substr(kPfx.size());
   return raw;
+}
+
+static float ManagerTeamStrength(Team *team) {
+  if (!team) return 0.65f;
+  std::vector<Player*> activePlayers;
+  team->GetActivePlayers(activePlayers);
+  if (activePlayers.empty()) activePlayers = team->GetAllPlayers();
+
+  float total = 0.0f;
+  int count = 0;
+  for (unsigned int i = 0; i < activePlayers.size() && count < playerNum; i++) {
+    Player *p = activePlayers.at(i);
+    if (!p) continue;
+    float condition = clamp(p->GetFatigueFactorInv(), 0.45f, 1.0f);
+    total += p->GetAverageStat() * (0.78f + condition * 0.22f);
+    count++;
+  }
+  if (count == 0) return 0.65f;
+  return total / (float)count;
+}
+
+static bool IsManagerUserClubTeam(Team *team) {
+  return GetConfiguration()->GetReal("manager_mode", 0.0f) > 0.5f &&
+         g_CareerMatchContext.active &&
+         team &&
+         team->GetTeamData() &&
+         team->GetTeamData()->GetDatabaseID() == g_CareerMatchContext.userClubId;
+}
+
+static void SetTactic(Properties &tactics, const char *key, float value) {
+  tactics.Set(key, clamp(value, 0.0f, 1.0f));
 }
 
 void TeamAIController::ProcessDynamicSubstitutions() {
@@ -280,6 +313,16 @@ void TeamAIController::Process() {
     info.player = players.at(i);
 
     info.dangerFactor = 1.0 - NormalizedClamp((players.at(i)->GetPosition() - mostDangerousPos).GetLength(), 0, pitchHalfW * 2);
+    if (GetConfiguration()->GetReal("manager_mode", 0.0f) > 0.5f) {
+      float attackerDanger =
+        players.at(i)->GetStat("technical_shot") * 0.24f +
+        players.at(i)->GetStat("technical_dribble") * 0.18f +
+        players.at(i)->GetStat("mental_offensivepositioning") * 0.24f +
+        players.at(i)->GetStat("mental_calmness") * 0.14f +
+        players.at(i)->GetStat("physical_acceleration") * 0.10f +
+        players.at(i)->GetStat("physical_velocity") * 0.10f;
+      info.dangerFactor = info.dangerFactor * 0.74f + attackerDanger * 0.26f;
+    }
 
     // player on ball is most dangerous
     info.dangerFactor *= 0.95f;
@@ -294,8 +337,8 @@ void TeamAIController::Process() {
 
   // team pressure
 
-/* DISABLED, interferes with other defense AI code for now
-  if (team->GetHumanGamerCount() == 0) {
+  if (GetConfiguration()->GetReal("manager_mode", 0.0f) > 0.5f &&
+      team->GetHumanGamerCount() == 0) {
     if (match->GetBestPossessionTeamID() != team->GetID()) {
 
       bool opponentFreeRun = false;
@@ -311,12 +354,12 @@ void TeamAIController::Process() {
       bool closeEnemy = false;
       if (oppDangerDistance < 20) closeEnemy = true;
 
-      if (opponentFreeRun || closeEnemy) {
+      float teamDefQuality = ManagerTeamStrength(team);
+      if (opponentFreeRun || closeEnemy || (teamDefQuality > 0.66f && oppDangerDistance < 27)) {
         ApplyTeamPressure();
       }
     }
   }
-*/
 
 
   // trigger attacking runs
@@ -698,6 +741,26 @@ float TeamAIController::CalculateMarkingQuality(Player *player, Player *opp) {
   float oppDistance = 1.0 - NormalizedClamp((playerPosition - oppPosition).GetLength(), 0.0, pitchHalfW * 2.0f);
   result = result * 0.8f + oppDistance * 0.2f;
 
+  if (GetConfiguration()->GetReal("manager_mode", 0.0f) > 0.5f) {
+    float defenderQuality =
+      player->GetStat("mental_defensivepositioning") * 0.34f +
+      player->GetStat("technical_standingtackle") * 0.20f +
+      player->GetStat("technical_slidingtackle") * 0.10f +
+      player->GetStat("physical_reaction") * 0.16f +
+      player->GetStat("physical_acceleration") * 0.10f +
+      player->GetStat("physical_balance") * 0.10f;
+    float attackerMovement =
+      opp->GetStat("mental_offensivepositioning") * 0.30f +
+      opp->GetStat("technical_dribble") * 0.22f +
+      opp->GetStat("technical_ballcontrol") * 0.14f +
+      opp->GetStat("physical_acceleration") * 0.14f +
+      opp->GetStat("physical_agility") * 0.10f +
+      opp->GetStat("mental_calmness") * 0.10f;
+    float qualityDelta = defenderQuality - attackerMovement;
+    float dangerDistance = 1.0f - NormalizedClamp((oppPosition - goalPos).GetLength(), 8.0f, 34.0f);
+    result = clamp(result + qualityDelta * (0.34f + dangerDistance * 0.18f), 0.0f, 1.0f);
+  }
+
   /*
   if (player == match->GetDesignatedPossessionPlayer() && opp->GetTimeNeededToGetToBall_ms() < 2000) {
     printf("u: %f\n", u);
@@ -715,7 +778,7 @@ void TeamAIController::CalculateManMarking() {
 
   // new method
 
-  int numMarkedOpponents = 3;//std::min(match->GetTeam(0)->GetActivePlayerCount(), match->GetTeam(1)->GetActivePlayerCount());
+  int numMarkedOpponents = GetConfiguration()->GetReal("manager_mode", 0.0f) > 0.5f ? 4 : 3;
 
   const std::vector<TacticalOpponentInfo> &oppInfo = GetTacticalOpponentInfo();
 
@@ -1108,11 +1171,15 @@ void TeamAIController::UpdateTactics() {
   //printf("timefactor: %f\n", timeFactor);
 
   float offenseBias = clamp(0.5f + (goalFactor - 0.5f) * (timeFactor * 1.0f), 0.0f, 1.0f);
-  if (GetConfiguration()->GetReal("manager_mode", 0.0f) > 0.5f &&
-      g_CareerMatchContext.active &&
-      team->GetTeamData() &&
-      team->GetTeamData()->GetDatabaseID() == g_CareerMatchContext.userClubId) {
+  bool managerMode = GetConfiguration()->GetReal("manager_mode", 0.0f) > 0.5f &&
+                     g_CareerMatchContext.active;
+  bool userClubTeam = IsManagerUserClubTeam(team);
+  if (userClubTeam) {
     offenseBias = clamp(offenseBias + g_MatchPlanMentality * 0.11f, 0.05f, 0.95f);
+  } else if (managerMode) {
+    Team *opp = match ? match->GetTeam(abs(team->GetID() - 1)) : 0;
+    float strengthDiff = ManagerTeamStrength(team) - ManagerTeamStrength(opp);
+    offenseBias = clamp(offenseBias + strengthDiff * 0.65f, 0.12f, 0.88f);
   }
   // todo: add skills/opp skills and difficulty as factors
   // todo: add off/def slider/tactics
@@ -1149,6 +1216,37 @@ void TeamAIController::UpdateTactics() {
       liveTeamTactics.Set(iter->first.c_str(), clamp(baseValue + offset, 0.0f, 1.0f));
     }
     iter++;
+  }
+
+  if (managerMode && !userClubTeam) {
+    Team *opp = match ? match->GetTeam(abs(team->GetID() - 1)) : 0;
+    float strengthDiff = ManagerTeamStrength(team) - ManagerTeamStrength(opp);
+    int goals = match->GetMatchData()->GetGoalCount(team->GetID());
+    int oppGoals = match->GetMatchData()->GetGoalCount(abs(team->GetID() - 1));
+    int goalDiff = goals - oppGoals;
+    float minute = match->GetMatchTime_ms() / 60000.0f;
+
+    // Negative posture protects weaker/leading sides. Positive posture lets
+    // stronger or chasing sides commit bodies forward.
+    float posture = clamp(strengthDiff * 5.2f, -0.75f, 0.75f);
+    if (goalDiff <= -2) posture += 0.85f;
+    else if (goalDiff == -1 && minute > 58.0f) posture += 0.38f;
+    else if (goalDiff >= 2) posture -= 0.75f;
+    else if (goalDiff == 1 && minute > 70.0f) posture -= 0.28f;
+    posture = clamp(posture, -1.0f, 1.0f);
+
+    SetTactic(liveTeamTactics, "dribble_offensiveness", 0.50f + posture * 0.18f);
+    SetTactic(liveTeamTactics, "position_offense_depth_factor", 0.53f + posture * 0.15f);
+    SetTactic(liveTeamTactics, "position_offense_width_factor", 0.58f + posture * 0.08f);
+    SetTactic(liveTeamTactics, "position_offense_midfieldfocus", 0.50f + posture * 0.18f);
+    SetTactic(liveTeamTactics, "position_offense_sidefocus_strength", 0.42f + posture * 0.11f);
+    SetTactic(liveTeamTactics, "position_offense_microfocus_strength", 0.52f + posture * 0.09f);
+
+    SetTactic(liveTeamTactics, "position_defense_depth_factor", 0.50f + posture * 0.09f);
+    SetTactic(liveTeamTactics, "position_defense_width_factor", 0.52f + posture * 0.06f);
+    SetTactic(liveTeamTactics, "position_defense_midfieldfocus", 0.48f + posture * 0.13f);
+    SetTactic(liveTeamTactics, "position_defense_sidefocus_strength", 0.48f - posture * 0.08f);
+    SetTactic(liveTeamTactics, "position_defense_microfocus_strength", 0.62f - posture * 0.10f);
   }
 
 }

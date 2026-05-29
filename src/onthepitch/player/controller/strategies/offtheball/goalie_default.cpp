@@ -231,11 +231,12 @@ void GoalieDefaultStrategy::RequestInput(const MentalImage *mentalImage, Vector3
         float shotHeight = mentalImage->GetBallPrediction(350).coords[2];
         float reachDifficulty = NormalizedClamp(fabs(ballBoundForGoal_ycoord), 1.5f, 3.7f) * 0.7f +
                                 NormalizedClamp(shotHeight, 0.8f, 2.5f) * 0.3f;
+        float keeperWeakness = clamp((0.82f - keeperSkill) / 0.38f, 0.0f, 1.0f);
         float timingNoise =
           std::sin(match->GetActualTime_ms() * 0.0017f + CastPlayer()->GetID() * 1.37f + ballBoundForGoal_ycoord) *
-          (1.0f - keeperSkill) * reachDifficulty * 0.85f;
+          keeperWeakness * reachDifficulty * 1.05f;
         targetPos.coords[1] = clamp(targetPos.coords[1] + timingNoise, -3.9f, 3.9f);
-        maxVelocity *= clamp(0.90f + keeperSkill * 0.14f - reachDifficulty * (1.0f - keeperSkill) * 0.10f, 0.82f, 1.04f);
+        maxVelocity *= clamp(0.86f + keeperSkill * 0.22f - reachDifficulty * keeperWeakness * 0.16f, 0.78f, 1.08f);
       }
     }
   }

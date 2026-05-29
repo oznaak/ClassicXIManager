@@ -1028,6 +1028,30 @@ void Match::Process() {
         int assistDatabaseID = ownGoal ? 0 :
           matchData->GetAssistCandidate(GetLastGoalTeamID(), scorerDatabaseID, GetActualTime_ms());
         matchData->AddGoalEvent(GetLastGoalTeamID(), scorerDatabaseID, assistDatabaseID, ownGoal);
+        if (GetConfiguration()->GetReal("manager_mode", 0.0f) > 0.5f) {
+          Player *keeper = teams[abs(GetLastGoalTeamID() - 1)]->GetGoalie();
+          float scorerFinishing = lastGoalScorer ?
+            lastGoalScorer->GetStat("technical_shot") * 0.45f +
+            lastGoalScorer->GetStat("mental_calmness") * 0.25f +
+            lastGoalScorer->GetStat("mental_offensivepositioning") * 0.15f +
+            lastGoalScorer->GetStat("physical_shotpower") * 0.15f : 0.0f;
+          float keeperSkill = keeper ?
+            keeper->GetStat("physical_reaction") * 0.35f +
+            keeper->GetStat("physical_agility") * 0.25f +
+            keeper->GetStat("mental_defensivepositioning") * 0.25f +
+            keeper->GetStat("mental_vision") * 0.15f : 0.0f;
+          printf("[MANAGER GOAL] minute=%.1f team=%s scorer=%s own=%d scorerFin=%.3f keeper=%s keeperSkill=%.3f score=%d-%d shots=%d-%d sot=%d-%d\n",
+                 GetMatchTime_ms() / 60000.0f,
+                 matchData->GetTeamData(GetLastGoalTeamID())->GetName().c_str(),
+                 lastGoalScorer ? lastGoalScorer->GetPlayerData()->GetDisplayName().c_str() : "unknown",
+                 ownGoal ? 1 : 0,
+                 scorerFinishing,
+                 keeper ? keeper->GetPlayerData()->GetDisplayName().c_str() : "unknown",
+                 keeperSkill,
+                 matchData->GetGoalCount(0), matchData->GetGoalCount(1),
+                 matchData->GetShots(0), matchData->GetShots(1),
+                 matchData->GetShotsOnTarget(0), matchData->GetShotsOnTarget(1));
+        }
 
       }
     }

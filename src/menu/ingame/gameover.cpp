@@ -291,7 +291,10 @@ void PersistWatchedPlayerStats(Match *match, int managerId, int fixtureId, int s
 
 void PersistWatchedMatchStamina(Match *match) {
   if (!match || GetConfiguration()->GetReal("manager_mode", 0.0f) <= 0.5f) return;
-  if (!DBHasColumn("players", "player_stamina")) return;
+  bool hasSaveStamina = DBHasColumn("player_save_state", "player_stamina") &&
+                        g_CareerMatchContext.managerId > 0;
+  bool hasPlayerStamina = DBHasColumn("players", "player_stamina");
+  if (!hasSaveStamina && !hasPlayerStamina) return;
 
   for (int teamId = 0; teamId < 2; teamId++) {
     Team *team = match->GetTeam(teamId);
@@ -323,11 +326,28 @@ void PersistWatchedMatchStamina(Match *match) {
         newCondition = ClampCondition(startCondition + 2);
       }
 
-      std::stringstream uq;
-      uq << "UPDATE players SET player_stamina=" << newCondition
-         << " WHERE id=" << playerId << ";";
-      DatabaseResult *ur = GetDB()->Query(uq.str());
-      delete ur;
+      if (hasSaveStamina) {
+        int clubId = team->GetTeamData() ? team->GetTeamData()->GetDatabaseID() : 0;
+        std::stringstream iq;
+        iq << "INSERT OR IGNORE INTO player_save_state(manager_id,player_id,team_id,player_stamina)"
+           << " VALUES(" << g_CareerMatchContext.managerId << "," << playerId << ","
+           << clubId << "," << newCondition << ");";
+        DatabaseResult *ir = GetDB()->Query(iq.str());
+        delete ir;
+
+        std::stringstream uq;
+        uq << "UPDATE player_save_state SET player_stamina=" << newCondition
+           << " WHERE manager_id=" << g_CareerMatchContext.managerId
+           << " AND player_id=" << playerId << ";";
+        DatabaseResult *ur = GetDB()->Query(uq.str());
+        delete ur;
+      } else {
+        std::stringstream uq;
+        uq << "UPDATE players SET player_stamina=" << newCondition
+           << " WHERE id=" << playerId << ";";
+        DatabaseResult *ur = GetDB()->Query(uq.str());
+        delete ur;
+      }
     }
   }
 }

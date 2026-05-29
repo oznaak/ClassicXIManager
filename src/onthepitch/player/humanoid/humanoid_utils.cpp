@@ -16,6 +16,7 @@
 // i do not offer support, so don't ask. to be used for inspiration :)
 
 #include "humanoid_utils.hpp"
+#include <algorithm>
 #include <cmath>
 
 #include "../../../main.hpp"
@@ -485,6 +486,18 @@ Vector3 GetShotVector(Match *match, Player *player, const Vector3 &nextStartPos,
   if (managerMode && wrongFootPenalty > 0.0f) {
     difficultyFactor = clamp(difficultyFactor + wrongFootPenalty * 0.16f, 0.0f, 1.0f);
   }
+  if (managerMode) {
+    float finishingSkill =
+      player->GetStat("technical_shot") * 0.45f +
+      player->GetStat("mental_calmness") * 0.25f +
+      player->GetStat("mental_offensivepositioning") * 0.15f +
+      player->GetStat("physical_shotpower") * 0.15f;
+    float closePressure = 1.0f - NormalizedClamp(player->GetClosestOpponentDistance(), 0.8f, 3.2f);
+    difficultyFactor = clamp(difficultyFactor +
+                             std::max(0.0f, 0.74f - finishingSkill) * 0.24f +
+                             closePressure * (0.08f + std::max(0.0f, 0.78f - finishingSkill) * 0.10f),
+                             0.0f, 1.0f);
+  }
 
   if (Verbose()) printf("(ease) RESULTING difficultyFactor: %f\n", difficultyFactor);
 
@@ -542,10 +555,10 @@ Vector3 GetShotVector(Match *match, Player *player, const Vector3 &nextStartPos,
       player->GetStat("mental_calmness") * 0.25f +
       player->GetStat("mental_offensivepositioning") * 0.15f +
       player->GetStat("physical_shotpower") * 0.15f;
-    float difficultyWeight = 0.45f + difficultyFactor * 0.75f;
-    float skillProtection = 0.55f + finishingSkill * 0.55f;
+    float difficultyWeight = 0.48f + difficultyFactor * 0.82f;
+    float skillProtection = 0.48f + std::pow(finishingSkill, 1.45f) * 0.68f;
     worstCaseFactor = std::pow(worstCaseFactor, skillProtection) * difficultyWeight;
-    worstCaseFactor *= 1.0f - finishingSkill * 0.28f;
+    worstCaseFactor *= 1.10f - finishingSkill * 0.30f;
     worstCaseFactor = clamp(worstCaseFactor, 0.02f, 0.92f);
   } else {
     worstCaseFactor =

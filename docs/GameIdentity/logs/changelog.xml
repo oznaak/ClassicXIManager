@@ -4,7 +4,7 @@
 - Engine/3d sim needs work. Moreirense 5 - 0 FC Porto at 50min. Non sense. at 30min was 3-0. Yan Lincon hat trick. final score 6-1 to moreirense. 0 sense. this never happend in real life, neveer. 20 shots for moreirense 9 for porto
 - Also lost 2-3 vs Estrela.
 - Maybe still too may shots happening??
-
+- Scorers and cards json still null
 - Add hide button to formation boards ingame/engine.
 - Add stamina display (maybe refactor formation boards design)
 - Implement shouts (clear ball, relax/calm,push push)
@@ -36,3 +36,5 @@ Implement training
 Implement Cups
 Implement Search teams in top navbar search bar
 
+Teams to fix primary and secondary color:
+Athletic Club, CA Osasuna, RC Celta, and RCD Espanyol
