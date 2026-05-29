@@ -1,14 +1,37 @@
-Transfers/Loans:
-- Arsenal FC making loan bids with role "squad_player" to FC Porto player Andre Alexandre Mendes Miranda - Weird? Big clubs like Arsenal dont need to loan young still in development players.
-- Hide bid button after bidding until colpase.
 
-Main/Inbox:
-- Too much transfer messages
 
-Player Details:
-- Add compare player feature
+3d engine/ingame:
+- Engine/3d sim needs work. Moreirense 5 - 0 FC Porto at 50min. Non sense. at 30min was 3-0. Yan Lincon hat trick. final score 6-1 to moreirense. 0 sense. this never happend in real life, neveer. 20 shots for moreirense 9 for porto
+- Also lost 2-3 vs Estrela.
+- Maybe still too may shots happening??
 
-Engine/Ingame:
-- Users club badge bugged showing a square instead.
+- Add hide button to formation boards ingame/engine.
+- Add stamina display (maybe refactor formation boards design)
+- Implement shouts (clear ball, relax/calm,push push)
+- Implement Mentality and Agression modifiers panel
+- Start 2nd half screen.
+- Confirm Tactics update user clubs tactics mid game. and isnt miss updating the other club tactics instead
+- Implement position change mid game.
 
+Settings:
+- Video settings
+- Audio volume slider
+- Simulate rest of match.
+- Exit (forfeit)
+
+
+Load career screen:
+- When 0 saves design is bad. fix
+
+Main Panel:
+- Transfer panel fix centering.
+- Bring board objetives to life
+- News panel display recent news.
+- Fix too many messages about transfers
+
+
+Implement injury and card suspensions
+Implement training
+Implement Cups
+Implement Search teams in top navbar search bar
 
