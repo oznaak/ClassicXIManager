@@ -259,22 +259,23 @@ static double PositionFitScore(const AISquadCandidate &c, const std::string &slo
 
 static double FitnessPenalty(int fitness) {
   if (fitness < 0) fitness = 100;
-  if (fitness >= 75) return 0.0;
-  if (fitness >= 55) return (75 - fitness) * 3.0;
-  if (fitness >= 35) return 60.0 + (55 - fitness) * 6.0;
-  return 240.0 + (35 - fitness) * 10.0;
+  if (fitness >= 85) return 0.0;
+  if (fitness >= 70) return (85 - fitness) * 4.0;
+  if (fitness >= 55) return 60.0 + (70 - fitness) * 8.0;
+  if (fitness >= 40) return 180.0 + (55 - fitness) * 13.0;
+  return 375.0 + (40 - fitness) * 18.0;
 }
 
 static double CandidateSlotScore(const AISquadCandidate &c, const std::string &slotRole) {
   double fit = PositionFitScore(c, slotRole);
   if (fit < -1000.0) return fit;
   double roleRating = CandidateRoleRating(c, slotRole);
-  double fitnessMultiplier = 0.70 + clamp((float)c.fitness, 35.0f, 100.0f) / 100.0 * 0.30;
+  double fitnessMultiplier = 0.58 + clamp((float)c.fitness, 35.0f, 100.0f) / 100.0 * 0.42;
   return fit + (c.baseStat * 180.0 + roleRating * 170.0) * fitnessMultiplier - FitnessPenalty(c.fitness);
 }
 
 static double CandidateBenchScore(const AISquadCandidate &c) {
-  double fitnessMultiplier = 0.65 + clamp((float)c.fitness, 35.0f, 100.0f) / 100.0 * 0.35;
+  double fitnessMultiplier = 0.55 + clamp((float)c.fitness, 35.0f, 100.0f) / 100.0 * 0.45;
   return (c.baseStat * 280.0 + CandidateRoleRating(c, c.primaryRole) * 120.0) * fitnessMultiplier -
          FitnessPenalty(c.fitness);
 }

@@ -13,6 +13,7 @@
 #include "blunted.hpp"
 
 #include "menu/imgui_match.hpp"
+#include "menu/imgui_career.hpp"
 #include "onthepitch/team.hpp"
 #include "onthepitch/referee.hpp"
 
@@ -27,6 +28,12 @@ static bool MatchIsPhaseTransitioning(Match *match) {
   if (!match) return true;
   const RefereeBuffer &buffer = match->GetRefereeBuffer();
   return buffer.active && buffer.endPhase;
+}
+
+static bool MatchIsPreparingKickOffRestart(Match *match) {
+  if (!match) return true;
+  const RefereeBuffer &buffer = match->GetRefereeBuffer();
+  return buffer.active && buffer.desiredSetPiece == e_SetPiece_KickOff;
 }
 
 void UploadFullbodyModel::Update() {
@@ -189,56 +196,72 @@ void GameTask::ProcessPhase() {
 
     // Execute queued substitutions one per frame on dead ball.
     // Rules: max 5 subs total, max 3 distinct windows; multiple subs in same stoppage = 1 window.
-    if (!g_QueuedSubQueue.empty() && MatchIsFinalOrEnded(match)) {
+    if (!QueueSubEmpty() && MatchIsFinalOrEnded(match)) {
       printf("[SUB] Cleared %zu queued substitution(s): match is ending or ended phase=%d time=%lu\n",
-             g_QueuedSubQueue.size(), (int)match->GetMatchPhase(), match->GetMatchTime_ms());
-      g_QueuedSubQueue.clear();
+             QueueSubSize(), (int)match->GetMatchPhase(), match->GetMatchTime_ms());
+      QueueSubClear();
     }
 
-    if (!g_QueuedSubQueue.empty() && !match->GetPause() && !match->IsInPlay() &&
-        !match->IsGoalScored() && !MatchIsFinalOrEnded(match) && !MatchIsPhaseTransitioning(match)) {
-      bool canSub = (g_SubsUsed < 5) && (g_WindowsUsed < 3 || g_SubWindowOpen);
-      if (canSub) {
-        QueuedSub sub = g_QueuedSubQueue.front();
-        g_QueuedSubQueue.erase(g_QueuedSubQueue.begin());
+    if (!QueueSubEmpty() && !match->GetPause() && !match->IsInPlay() &&
+        !match->IsGoalScored() && !MatchIsFinalOrEnded(match) &&
+        !MatchIsPhaseTransitioning(match) && !MatchIsPreparingKickOffRestart(match)) {
+      QueuedSub nextSub;
+      bool hasQueuedSub = QueueSubPeekFront(nextSub);
+      bool canSub = false;
+      if (hasQueuedSub) {
+        if (nextSub.aiControlled) {
+          Team *team = (nextSub.teamIdx >= 0 && nextSub.teamIdx < 2) ? match->GetTeam(nextSub.teamIdx) : 0;
+          canSub = team && team->GetSubsMade() < 5;
+        } else {
+          canSub = (g_SubsUsed < 5) && (g_WindowsUsed < 3 || g_SubWindowOpen);
+        }
+      }
+      if (hasQueuedSub && canSub) {
+        QueuedSub sub;
+        if (!QueueSubPopFront(sub)) sub.pending = false;
 
-        printf("[SUB] Executing queued substitution team=%d offDb=%d onDb=%d offIdx=%d onIdx=%d phase=%d time=%lu used=%d windows=%d open=%d\n",
+        if (sub.pending) {
+          printf("[SUB] Executing queued substitution team=%d offDb=%d onDb=%d offIdx=%d onIdx=%d phase=%d time=%lu used=%d windows=%d open=%d\n",
                sub.teamIdx, sub.offPlayerDbId, sub.onPlayerDbId, sub.offIdx, sub.onIdx,
                (int)match->GetMatchPhase(), match->GetMatchTime_ms(),
                g_SubsUsed, g_WindowsUsed, g_SubWindowOpen ? 1 : 0);
 
-        matchLifetimeMutex.lock();
-        matchPutBufferMutex.lock();
-        matchRenderMutex.lock();
-        Team *team = (sub.teamIdx >= 0 && sub.teamIdx < 2) ? match->GetTeam(sub.teamIdx) : 0;
-        bool subDone = team && team->SubstitutePlayerByDatabaseID(sub.offPlayerDbId, sub.onPlayerDbId,
-                                                                  sub.offIdx, sub.onIdx);
-        matchRenderMutex.unlock();
-        matchPutBufferMutex.unlock();
-        matchLifetimeMutex.unlock();
+          matchLifetimeMutex.lock();
+          matchPutBufferMutex.lock();
+          matchRenderMutex.lock();
+          Team *team = (sub.teamIdx >= 0 && sub.teamIdx < 2) ? match->GetTeam(sub.teamIdx) : 0;
+          bool subDone = team && team->SubstitutePlayerByDatabaseID(sub.offPlayerDbId, sub.onPlayerDbId,
+                                                                    sub.offIdx, sub.onIdx);
+          matchRenderMutex.unlock();
+          matchPutBufferMutex.unlock();
+          matchLifetimeMutex.unlock();
 
-        if (subDone) {
-          if (!g_SubWindowOpen) { g_WindowsUsed++; g_SubWindowOpen = true; }
-          g_SubsUsed++;
+          if (subDone) {
+            if (!sub.aiControlled) {
+              if (!g_SubWindowOpen) { g_WindowsUsed++; g_SubWindowOpen = true; }
+              g_SubsUsed++;
+            }
 
-          SubGraphic sg;
-          sg.active         = true;
-          sg.nameOut        = sub.nameOut;
-          sg.nameIn         = sub.nameIn;
-          sg.teamBadgePath  = sub.teamBadgePath;
-          sg.leagueLogoPath = sub.leagueLogoPath;
-          sg.teamColor      = sub.teamColor;
-          sg.startTime      = -1.0;
-          g_SubGraphicQueue.push_back(sg);
-        } else {
-          printf("[SUB] Ignored stale substitution request team=%d offDb=%d onDb=%d offIdx=%d onIdx=%d\n",
-                 sub.teamIdx, sub.offPlayerDbId, sub.onPlayerDbId, sub.offIdx, sub.onIdx);
+            SubGraphic sg;
+            sg.active         = true;
+            sg.nameOut        = sub.nameOut;
+            sg.nameIn         = sub.nameIn;
+            sg.teamBadgePath  = sub.teamBadgePath;
+            sg.leagueLogoPath = sub.leagueLogoPath;
+            if (sg.leagueLogoPath.empty()) sg.leagueLogoPath = g_MatchCompetitionLogoPath;
+            sg.teamColor      = sub.teamColor;
+            sg.startTime      = -1.0;
+            SubGraphicPush(sg);
+          } else {
+            printf("[SUB] Ignored stale substitution request team=%d offDb=%d onDb=%d offIdx=%d onIdx=%d\n",
+                   sub.teamIdx, sub.offPlayerDbId, sub.onPlayerDbId, sub.offIdx, sub.onIdx);
+          }
         }
-      } else {
+      } else if (hasQueuedSub) {
         // Budget exhausted — drop remaining queued subs
         printf("[SUB] Cleared %zu queued substitution(s): budget exhausted used=%d windows=%d open=%d\n",
-               g_QueuedSubQueue.size(), g_SubsUsed, g_WindowsUsed, g_SubWindowOpen ? 1 : 0);
-        g_QueuedSubQueue.clear();
+               QueueSubSize(), g_SubsUsed, g_WindowsUsed, g_SubWindowOpen ? 1 : 0);
+        QueueSubClear();
       }
     }
 

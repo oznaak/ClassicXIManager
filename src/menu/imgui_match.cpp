@@ -15,6 +15,7 @@
 #include <string>
 #include <sstream>
 #include <cstdio>
+#include <boost/thread/mutex.hpp>
 
 #include "main.hpp"
 #include "../gamedefines.hpp"
@@ -42,6 +43,92 @@ bool       g_TopBarSoftPause         = false;
 bool       g_MatchStatsVisible       = false;
 bool       g_TacticsPanelVisible     = false;
 std::vector<TacticChange> g_PendingTacticsChanges;
+
+static boost::mutex g_QueuedSubMutex;
+static boost::mutex g_SubGraphicMutex;
+
+bool QueueSubEmpty() {
+  boost::mutex::scoped_lock lock(g_QueuedSubMutex);
+  return g_QueuedSubQueue.empty();
+}
+
+size_t QueueSubSize() {
+  boost::mutex::scoped_lock lock(g_QueuedSubMutex);
+  return g_QueuedSubQueue.size();
+}
+
+bool QueueSubPeekFront(QueuedSub &sub) {
+  boost::mutex::scoped_lock lock(g_QueuedSubMutex);
+  if (g_QueuedSubQueue.empty()) return false;
+  sub = g_QueuedSubQueue.front();
+  return true;
+}
+
+bool QueueSubPopFront(QueuedSub &sub) {
+  boost::mutex::scoped_lock lock(g_QueuedSubMutex);
+  if (g_QueuedSubQueue.empty()) return false;
+  sub = g_QueuedSubQueue.front();
+  g_QueuedSubQueue.erase(g_QueuedSubQueue.begin());
+  return true;
+}
+
+void QueueSubPush(const QueuedSub &sub) {
+  boost::mutex::scoped_lock lock(g_QueuedSubMutex);
+  g_QueuedSubQueue.push_back(sub);
+}
+
+void QueueSubClear() {
+  boost::mutex::scoped_lock lock(g_QueuedSubMutex);
+  g_QueuedSubQueue.clear();
+}
+
+int QueueSubCountUserForTeam(int teamIdx) {
+  boost::mutex::scoped_lock lock(g_QueuedSubMutex);
+  int count = 0;
+  for (const QueuedSub &sub : g_QueuedSubQueue) {
+    if (!sub.aiControlled && sub.teamIdx == teamIdx) count++;
+  }
+  return count;
+}
+
+bool QueueSubHasUserForTeam(int teamIdx) {
+  boost::mutex::scoped_lock lock(g_QueuedSubMutex);
+  for (const QueuedSub &sub : g_QueuedSubQueue) {
+    if (!sub.aiControlled && sub.userTeamIdx == teamIdx) return true;
+  }
+  return false;
+}
+
+bool QueueSubHasAiForTeam(int teamIdx) {
+  boost::mutex::scoped_lock lock(g_QueuedSubMutex);
+  for (const QueuedSub &sub : g_QueuedSubQueue) {
+    if (sub.aiControlled && sub.teamIdx == teamIdx) return true;
+  }
+  return false;
+}
+
+bool SubGraphicPeekForRender(double now, SubGraphic &graphic) {
+  boost::mutex::scoped_lock lock(g_SubGraphicMutex);
+  if (g_SubGraphicQueue.empty()) return false;
+  if (g_SubGraphicQueue.front().startTime < 0.0) g_SubGraphicQueue.front().startTime = now;
+  graphic = g_SubGraphicQueue.front();
+  return true;
+}
+
+void SubGraphicPopFront() {
+  boost::mutex::scoped_lock lock(g_SubGraphicMutex);
+  if (!g_SubGraphicQueue.empty()) g_SubGraphicQueue.erase(g_SubGraphicQueue.begin());
+}
+
+void SubGraphicPush(const SubGraphic &graphic) {
+  boost::mutex::scoped_lock lock(g_SubGraphicMutex);
+  g_SubGraphicQueue.push_back(graphic);
+}
+
+void SubGraphicClear() {
+  boost::mutex::scoped_lock lock(g_SubGraphicMutex);
+  g_SubGraphicQueue.clear();
+}
 
 // Panel drag positions — declared here so ResetMatchOverlayState() can reach them.
 static float s_statsPanelX   = -1.f;
@@ -304,11 +391,17 @@ static int                       s_subOnSelected    = -1;
 static std::map<std::string, float> s_liveTactics;
 
 static int CountQueuedSubsForTeam(int teamIdx) {
-  int count = 0;
-  for (const QueuedSub &sub : g_QueuedSubQueue) {
-    if (sub.teamIdx == teamIdx) count++;
-  }
-  return count;
+  return QueueSubCountUserForTeam(teamIdx);
+}
+
+static bool HasUserQueuedSubForTeam(int teamIdx) {
+  return QueueSubHasUserForTeam(teamIdx);
+}
+
+static std::string NormalizeBadgePath(std::string raw) {
+  const std::string kPfx = "databases/default/";
+  if (raw.substr(0, kPfx.size()) == kPfx) raw = raw.substr(kPfx.size());
+  return raw;
 }
 
 static bool CanQueueSubForTeam(int teamIdx) {
@@ -335,8 +428,8 @@ static void ResetPauseCache() {
   s_subOnSelected       = -1;
   s_liveTactics.clear();
   g_TopBarSoftPause     = false;
-  g_QueuedSubQueue.clear();
-  g_SubGraphicQueue.clear();
+  QueueSubClear();
+  SubGraphicClear();
 }
 
 // Landscape mini-pitch (horizontal) for the bottom HUD.
@@ -815,14 +908,15 @@ void RenderImGuiMatchOverlay() {
               IM_COL32(50, 55, 80, 180), 2.0f, 0, 1.0f);
 
   // ---- Substitution banner (BBC Sport style) --------------------------------
-  if (!g_SubGraphicQueue.empty()) {
-    SubGraphic &g_SubGraphic = g_SubGraphicQueue.front();
-    if (g_SubGraphic.startTime < 0.0) g_SubGraphic.startTime = ImGui::GetTime();
-    const double elapsed   = ImGui::GetTime() - g_SubGraphic.startTime;
-    const double kDuration = 5.5;
-    if (elapsed >= kDuration) {
-      g_SubGraphicQueue.erase(g_SubGraphicQueue.begin());
-    } else {
+  {
+    SubGraphic g_SubGraphic;
+    const double now = ImGui::GetTime();
+    if (SubGraphicPeekForRender(now, g_SubGraphic)) {
+      const double elapsed   = now - g_SubGraphic.startTime;
+      const double kDuration = 5.5;
+      if (elapsed >= kDuration) {
+        SubGraphicPopFront();
+      } else {
       float alpha = 1.0f;
       if (elapsed < 0.3) alpha = (float)(elapsed / 0.3f);           // fade in
       if (elapsed > kDuration - 0.8) alpha = (float)((kDuration - elapsed) / 0.8);
@@ -872,9 +966,12 @@ void RenderImGuiMatchOverlay() {
       {
         static GLuint s_subLeagueTex = 0;
         static std::string s_subLeaguePath;
-        if (s_subLeaguePath != g_SubGraphic.leagueLogoPath) {
+        std::string leagueLogoPath = g_SubGraphic.leagueLogoPath.empty()
+                                       ? s_leagueLogoPath
+                                       : g_SubGraphic.leagueLogoPath;
+        if (s_subLeaguePath != leagueLogoPath) {
           s_subLeagueTex  = 0;
-          s_subLeaguePath = g_SubGraphic.leagueLogoPath;
+          s_subLeaguePath = leagueLogoPath;
         }
         if (s_subLeagueTex == 0 && !s_subLeaguePath.empty())
           s_subLeagueTex = LoadBadgeTex(s_subLeaguePath);
@@ -947,6 +1044,7 @@ void RenderImGuiMatchOverlay() {
       // Outer border
       dl->AddRect(ImVec2(bx, by), ImVec2(bx + bw, by + bh),
                   IM_COL32(12, 20, 55, A(200)), 0.0f, 0, 1.5f);
+      }
     }
   }
 
@@ -1267,7 +1365,7 @@ void RenderImGuiMatchOverlay() {
       }
 
       // Pending-sub: highlight stroke around board + centered "Waiting for stoppage..." text
-      if (!g_QueuedSubQueue.empty()) {
+      if (HasUserQueuedSubForTeam(s_subUserTeamIdx)) {
         // Animated alpha pulse using time
         float t      = (float)fmod(ImGui::GetTime() * 2.0, 1.0);
         float alpha  = 0.5f + 0.5f * sinf(t * 3.14159f * 2.0f);
@@ -1370,6 +1468,7 @@ void RenderImGuiMatchOverlay() {
         QueuedSub qs;
         qs.pending        = true;
         qs.teamIdx        = s_subUserTeamIdx;
+        qs.userTeamIdx    = s_subUserTeamIdx;
         qs.offIdx         = s_hoverOnIdx;
         qs.onIdx          = bp.playersIdx;
         qs.offPlayerDbId  = off.playerDbId;
@@ -1379,7 +1478,7 @@ void RenderImGuiMatchOverlay() {
         qs.teamBadgePath  = s_userBadgePath;
         qs.leagueLogoPath = s_leagueLogoPath;
         qs.teamColor      = s_pauseUserColor;
-        g_QueuedSubQueue.push_back(qs);
+        QueueSubPush(qs);
 
         // Update formation board immediately so display reflects the change
         PausePlayer incoming;
@@ -1765,6 +1864,7 @@ static void DrawSubstitutionPanel(float px, float py, float pw, float ph) {
     QueuedSub qs2;
     qs2.pending        = true;
     qs2.teamIdx        = s_subUserTeamIdx;
+    qs2.userTeamIdx    = s_subUserTeamIdx;
     qs2.offIdx         = s_subOffSelected;
     qs2.onIdx          = s_subOnSelected;
     qs2.offPlayerDbId  = (s_subOffSelected >= 0 && s_subOffSelected < (int)s_pausePlayers.size()) ? s_pausePlayers[s_subOffSelected].playerDbId : -1;
@@ -1774,7 +1874,7 @@ static void DrawSubstitutionPanel(float px, float py, float pw, float ph) {
     qs2.teamBadgePath  = s_userBadgePath;
     qs2.leagueLogoPath = s_leagueLogoPath;
     qs2.teamColor      = (unsigned int)s_pauseUserColor;
-    g_QueuedSubQueue.push_back(qs2);
+    QueueSubPush(qs2);
 
     // Update display lists so user can queue a 2nd sub immediately
     for (auto it = s_benchPlayers.begin(); it != s_benchPlayers.end(); ++it) {
@@ -1848,9 +1948,7 @@ static void InitHUDDataIfNeeded(Match *match) {
     s_subUserTeamIdx = teamIdx;
     {
       std::string raw = td->GetLogoUrl();
-      const std::string kPfx = "databases/default/";
-      if (raw.substr(0, kPfx.size()) == kPfx) raw = raw.substr(kPfx.size());
-      s_userBadgePath = raw;
+      s_userBadgePath = NormalizeBadgePath(raw);
     }
     int total = std::min(td->GetPlayerNum(), 20);
     for (int i = 11; i < total; i++) {
@@ -1871,9 +1969,7 @@ static void InitHUDDataIfNeeded(Match *match) {
     s_pauseAwayTeamName = tdOpp->GetName();
     {
       std::string raw = tdOpp->GetLogoUrl();
-      const std::string kPfx = "databases/default/";
-      if (raw.substr(0, kPfx.size()) == kPfx) raw = raw.substr(kPfx.size());
-      s_oppBadgePath = raw;
+      s_oppBadgePath = NormalizeBadgePath(raw);
     }
     Vector3 c           = tdOpp->GetColor1();
     s_pauseOppColor     = Vec3ToCol32(c.coords[0], c.coords[1], c.coords[2]);

@@ -401,6 +401,9 @@ void Player::Process() {
     if (externalController) externalController->Process(); else CastController()->Process();
 
     if (match->IsInPlay()) {
+      if (!match->IsInSetPiece()) {
+        playedMatchTime_ms += (unsigned long)(10 * (1.0f / match->GetMatchDurationFactor()));
+      }
       if (match->GetActualTime_ms() % 1000 == 0) {
         positionHistoryPerSecond.push_back(GetPosition());
         //if (GetDebug()) printf("average velo (5): %f, (50): %f\n", GetAverageVelocity(5), GetAverageVelocity(50));

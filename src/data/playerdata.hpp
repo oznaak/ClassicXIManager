@@ -33,6 +33,7 @@ class PlayerData {
     float GetWeakFootRating01() const;
     int GetSkillMovesRating() const { return skillMoves; }
     float GetSkillMovesRating01() const;
+    int GetCurrentCondition() const { return currentCondition; }
 
     float GetStat(const char *name);
 
@@ -53,6 +54,7 @@ class PlayerData {
     bool preferredFootLeft = false;
     int weakFoot = 3;
     int skillMoves = 2;
+    int currentCondition = 100;
 
     Properties stats;
 

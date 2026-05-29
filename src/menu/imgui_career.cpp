@@ -113,6 +113,23 @@ static std::string DBCell(DatabaseResult *r, unsigned int row, unsigned int col)
   return r->data.at(row).at(col);
 }
 
+static bool DBHasColumn(const std::string &table, const std::string &column) {
+  std::stringstream q;
+  q << "PRAGMA table_info(" << table << ");";
+  DatabaseResult *r = GetDB()->Query(q.str());
+  bool found = false;
+  if (r) {
+    for (unsigned int i = 0; i < r->data.size(); i++) {
+      if (r->data.at(i).size() > 1 && r->data.at(i).at(1) == column) {
+        found = true;
+        break;
+      }
+    }
+  }
+  delete r;
+  return found;
+}
+
 static std::string SqlEsc(const std::string &in) {
   std::string out;
   for (char c : in) { if (c == '\'') out += "''"; else out += c; }
@@ -566,11 +583,14 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
 
   players.clear();
   {
+    const bool hasPlayerStamina = DBHasColumn("players", "player_stamina");
     std::stringstream q;
     q << "SELECT id, firstname, lastname, role, age, base_stat,"
       << " formationorder, COALESCE(pss.weekly_wage, players.weekly_wage),"
       << " COALESCE(pss.contract_expiry, players.contract_expiry), player_potential,"
-      << " foot, stamina, height, reputation,"
+      << " foot, stamina,"
+      << (hasPlayerStamina ? " COALESCE(players.player_stamina,100)," : " 100,")
+      << " height, reputation,"
       << kPlayerAttrCols
       << " FROM players LEFT JOIN player_save_state pss"
       << " ON pss.manager_id=" << mgrId << " AND pss.player_id=players.id"
@@ -599,12 +619,13 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
       p.foot             = DBCell(r, i, 10);
       std::string stStr  = DBCell(r, i, 11);
       p.stamina          = stStr.empty() ? 0 : atoi(stStr.c_str());
-      std::string htStr  = DBCell(r, i, 12);
+      std::string csStr  = DBCell(r, i, 12);
+      p.currentStamina   = csStr.empty() ? 100 : atoi(csStr.c_str());
+      std::string htStr  = DBCell(r, i, 13);
       p.height           = htStr.empty() ? 0.0f : (float)atof(htStr.c_str());
-      std::string repStr = DBCell(r, i, 13);
+      std::string repStr = DBCell(r, i, 14);
       p.reputation       = repStr.empty() ? 0.0f : (float)atof(repStr.c_str());
-      p.currentStamina   = 100; // current_stamina not yet in DB
-      ParsePlayerAttrsFromRow(p, r, i, 14);
+      ParsePlayerAttrsFromRow(p, r, i, 15);
       players.push_back(p);
     }
     delete r;
@@ -5102,11 +5123,14 @@ static void ParsePlayerAttrsFromRow(CareerHubState::Player &p,
 
 // Load a full player detail from DB by id into a Player struct
 static void LoadPlayerFullDetail(int playerId, CareerHubState::Player &out) {
+  const bool hasPlayerStamina = DBHasColumn("players", "player_stamina");
   std::stringstream q;
   q << "SELECT id, firstname, lastname, role, age, base_stat,"
     << " formationorder, COALESCE(pss.weekly_wage,players.weekly_wage),"
     << " COALESCE(pss.contract_expiry,players.contract_expiry), player_potential,"
-    << " foot, stamina, height, reputation,"
+    << " foot, stamina,"
+    << (hasPlayerStamina ? " COALESCE(players.player_stamina,100)," : " 100,")
+    << " height, reputation,"
     << kPlayerAttrCols
     << " FROM players LEFT JOIN player_save_state pss"
     << " ON pss.manager_id=" << g_CareerHub.managerId << " AND pss.player_id=players.id"
@@ -5125,10 +5149,10 @@ static void LoadPlayerFullDetail(int playerId, CareerHubState::Player &out) {
   { std::string s = DBCell(r,0,9); out.potential = s.empty() ? 0 : atoi(s.c_str()); }
   out.foot           = DBCell(r,0,10);
   { std::string s = DBCell(r,0,11); out.stamina = s.empty() ? 0 : atoi(s.c_str()); }
-  { std::string s = DBCell(r,0,12); out.height = s.empty() ? 0.0f : (float)atof(s.c_str()); }
-  { std::string s = DBCell(r,0,13); out.reputation = s.empty() ? 0.0f : (float)atof(s.c_str()); }
-  out.currentStamina = 100; // current_stamina column not yet in DB
-  ParsePlayerAttrsFromRow(out, r, 0, 14);
+  { std::string s = DBCell(r,0,12); out.currentStamina = s.empty() ? 100 : atoi(s.c_str()); }
+  { std::string s = DBCell(r,0,13); out.height = s.empty() ? 0.0f : (float)atof(s.c_str()); }
+  { std::string s = DBCell(r,0,14); out.reputation = s.empty() ? 0.0f : (float)atof(s.c_str()); }
+  ParsePlayerAttrsFromRow(out, r, 0, 15);
   delete r;
 }
 
@@ -7204,7 +7228,7 @@ static void DrawSquadPage(float w, float h) {
         ImGui::TextUnformatted("\xe2\x80\x94");
         ImGui::PopStyleColor();
       };
-      // Stamina bar (col 10) — based on current_stamina (defaults to 100)
+      // Stamina bar (col 10) — based on current condition.
       ImGui::TableSetColumnIndex(10);
       {
         int cs = p.currentStamina; // 0-100

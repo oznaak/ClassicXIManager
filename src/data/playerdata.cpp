@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <sstream>
 
 #include "utils/database.hpp"
 
@@ -30,6 +31,23 @@ float TraitRating01(int rating) {
   return clamp((rating - 1) / 4.0f, 0.0f, 1.0f);
 }
 
+bool DBHasColumn(const std::string &table, const std::string &column) {
+  std::stringstream q;
+  q << "PRAGMA table_info(" << table << ");";
+  DatabaseResult *r = GetDB()->Query(q.str());
+  bool found = false;
+  if (r) {
+    for (unsigned int i = 0; i < r->data.size(); i++) {
+      if (r->data.at(i).size() > 1 && r->data.at(i).at(1) == column) {
+        found = true;
+        break;
+      }
+    }
+  }
+  delete r;
+  return found;
+}
+
 }
 
 PlayerData::PlayerData(int playerDatabaseID) : databaseID(playerDatabaseID) {
@@ -37,7 +55,15 @@ PlayerData::PlayerData(int playerDatabaseID) : databaseID(playerDatabaseID) {
   //std::string test = "select * from players where id = " + int_to_str(databaseID) + " limit 1";
   //printf("test: %s\n", test.c_str());
 
-  DatabaseResult *result = GetDB()->Query("select firstname, lastname, COALESCE(nickname, '') as nickname, role, base_stat, profile_xml, age, skincolor, hairstyle, haircolor, height, jersey_number, COALESCE(foot, 'right') as foot, COALESCE(weakFoot, 3) as weakFoot, COALESCE(skillMoves, 2) as skillMoves from players where id = " + int_to_str(databaseID) + " limit 1");
+  const bool hasPlayerStamina = DBHasColumn("players", "player_stamina");
+  std::stringstream q;
+  q << "select firstname, lastname, COALESCE(nickname, '') as nickname, role, base_stat, profile_xml, age,"
+    << " skincolor, hairstyle, haircolor, height, jersey_number,"
+    << " COALESCE(foot, 'right') as foot, COALESCE(weakFoot, 3) as weakFoot,"
+    << " COALESCE(skillMoves, 2) as skillMoves,"
+    << (hasPlayerStamina ? " COALESCE(player_stamina, 100)" : " 100")
+    << " as player_stamina from players where id = " << int_to_str(databaseID) << " limit 1";
+  DatabaseResult *result = GetDB()->Query(q.str());
 
   std::string roleString;
   std::string profileString;
@@ -69,6 +95,7 @@ PlayerData::PlayerData(int playerDatabaseID) : databaseID(playerDatabaseID) {
     }
     if (result->header.at(c).compare("weakFoot") == 0) weakFoot = ClampTraitRating(atoi(result->data.at(0).at(c).c_str()), 3);
     if (result->header.at(c).compare("skillMoves") == 0) skillMoves = ClampTraitRating(atoi(result->data.at(0).at(c).c_str()), 2);
+    if (result->header.at(c).compare("player_stamina") == 0) currentCondition = clamp(atoi(result->data.at(0).at(c).c_str()), 1, 100);
   }
 
   delete result;

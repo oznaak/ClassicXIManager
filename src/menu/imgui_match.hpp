@@ -1,4 +1,5 @@
 #pragma once
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -35,8 +36,19 @@ struct QueuedSub {
   std::string  teamBadgePath;
   std::string  leagueLogoPath;
   unsigned int teamColor      = 0;  // club primary color (same as scoreboard)
+  bool          aiControlled   = false;
+  int           userTeamIdx    = -1;
 };
 extern std::vector<QueuedSub> g_QueuedSubQueue;
+bool QueueSubEmpty();
+size_t QueueSubSize();
+bool QueueSubPeekFront(QueuedSub &sub);
+bool QueueSubPopFront(QueuedSub &sub);
+void QueueSubPush(const QueuedSub &sub);
+void QueueSubClear();
+int QueueSubCountUserForTeam(int teamIdx);
+bool QueueSubHasUserForTeam(int teamIdx);
+bool QueueSubHasAiForTeam(int teamIdx);
 
 // Substitution budget tracking (reset each match)
 extern int  g_SubsUsed;      // total subs executed this match (0–5)
@@ -54,6 +66,10 @@ struct SubGraphic {
   double       startTime    = 0.0; // ImGui::GetTime() when activated; -1 = set on first frame
 };
 extern std::vector<SubGraphic> g_SubGraphicQueue; // shown one at a time, front-first
+bool SubGraphicPeekForRender(double now, SubGraphic &graphic);
+void SubGraphicPopFront();
+void SubGraphicPush(const SubGraphic &graphic);
+void SubGraphicClear();
 
 void RenderImGuiMatchPauseOverlay();
 

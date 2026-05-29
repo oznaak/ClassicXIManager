@@ -8,8 +8,91 @@
 
 #include "../pagefactory.hpp"
 #include "../careermatchcontext.hpp"
+#include "utils/database.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <sstream>
 
 using namespace blunted;
+
+namespace {
+
+float RoleStaminaLoad(e_PlayerRole role) {
+  if (role == e_PlayerRole_GK) return 0.25f;
+  if (role == e_PlayerRole_CB) return 0.82f;
+  if (role == e_PlayerRole_LB || role == e_PlayerRole_RB) return 1.12f;
+  if (role == e_PlayerRole_DM || role == e_PlayerRole_CM) return 1.08f;
+  if (role == e_PlayerRole_LM || role == e_PlayerRole_RM) return 1.15f;
+  if (role == e_PlayerRole_AM) return 1.05f;
+  return 1.00f;
+}
+
+int ClampCondition(int value) {
+  return clamp(value, 1, 100);
+}
+
+bool DBHasColumn(const std::string &table, const std::string &column) {
+  std::stringstream q;
+  q << "PRAGMA table_info(" << table << ");";
+  DatabaseResult *r = GetDB()->Query(q.str());
+  bool found = false;
+  if (r) {
+    for (unsigned int i = 0; i < r->data.size(); i++) {
+      if (r->data.at(i).size() > 1 && r->data.at(i).at(1) == column) {
+        found = true;
+        break;
+      }
+    }
+  }
+  delete r;
+  return found;
+}
+
+void PersistWatchedMatchStamina(Match *match) {
+  if (!match || GetConfiguration()->GetReal("manager_mode", 0.0f) <= 0.5f) return;
+  if (!DBHasColumn("players", "player_stamina")) return;
+
+  for (int teamId = 0; teamId < 2; teamId++) {
+    Team *team = match->GetTeam(teamId);
+    if (!team) continue;
+
+    const std::vector<Player*> &players = team->GetAllPlayers();
+    for (unsigned int i = 0; i < players.size(); i++) {
+      Player *player = players.at(i);
+      if (!player || !player->GetPlayerData()) continue;
+
+      int playerId = player->GetPlayerData()->GetDatabaseID();
+      if (playerId <= 0) continue;
+
+      int startCondition = ClampCondition(player->GetPlayerData()->GetCurrentCondition());
+      float playedMinutes = player->GetPlayedMatchTime_ms() / 60000.0f;
+      int newCondition = startCondition;
+
+      if (playedMinutes > 0.5f) {
+        float staminaAttr = player->GetPlayerData()->GetStat("physical_stamina");
+        float roleLoad = RoleStaminaLoad(player->GetDynamicFormationEntry().role);
+        float minutesFactor = clamp(playedMinutes / 90.0f, 0.0f, 1.35f);
+        float baseLoss = (11.0f + (1.0f - staminaAttr) * 6.0f) * roleLoad * minutesFactor;
+        float liveDrain = std::min(8.0f, std::max(0.0f, player->GetStartingFatigueFactorInv() - player->GetFatigueFactorInv()) * 12.0f);
+        float overuse = startCondition < 70 ? 1.0f + (70 - startCondition) * 0.01f : 1.0f;
+        int loss = (int)round((baseLoss + liveDrain) * overuse);
+        if (playedMinutes < 20.0f) loss = std::max(1, (int)round(loss * 0.55f));
+        newCondition = ClampCondition(startCondition - loss);
+      } else if (i >= 11) {
+        newCondition = ClampCondition(startCondition + 2);
+      }
+
+      std::stringstream uq;
+      uq << "UPDATE players SET player_stamina=" << newCondition
+         << " WHERE id=" << playerId << ";";
+      DatabaseResult *ur = GetDB()->Query(uq.str());
+      delete ur;
+    }
+  }
+}
+
+}
 
 GameOverPage::GameOverPage(Gui2WindowManager *windowManager, const Gui2PageData &pageData) : Gui2Page(windowManager, pageData) {
 
@@ -21,6 +104,7 @@ GameOverPage::GameOverPage(Gui2WindowManager *windowManager, const Gui2PageData 
 
   int homeScore = match->GetMatchData()->GetGoalCount(0);
   int awayScore = match->GetMatchData()->GetGoalCount(1);
+  PersistWatchedMatchStamina(match);
 
   // Capture result for scheduled career fixture.
   if (g_CareerMatchContext.active) {

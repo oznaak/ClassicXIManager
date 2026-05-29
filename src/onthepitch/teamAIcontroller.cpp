@@ -27,6 +27,8 @@
 #include "../misc/hungarian.h"
 
 #include "../main.hpp"
+#include "../menu/careermatchcontext.hpp"
+#include "../menu/imgui_match.hpp"
 
 bool ReverseSortTacticalOpponentInfo(const TacticalOpponentInfo &a, const TacticalOpponentInfo &b) {
   return a.dangerFactor > b.dangerFactor;
@@ -96,9 +98,128 @@ Player *SelectAttackingRunPlayer(Team *team) {
   return attackingRunPlayer;
 }
 
+static int RoleFamilyForSub(e_PlayerRole role) {
+  if (role == e_PlayerRole_GK) return 0;
+  if (role == e_PlayerRole_CB || role == e_PlayerRole_LB || role == e_PlayerRole_RB) return 1;
+  if (role == e_PlayerRole_DM || role == e_PlayerRole_CM || role == e_PlayerRole_AM) return 2;
+  if (role == e_PlayerRole_LM || role == e_PlayerRole_RM) return 3;
+  return 4;
+}
+
+static bool PlayerCanCoverRole(Player *player, e_PlayerRole role) {
+  if (!player || !player->GetPlayerData()) return false;
+  const std::vector<e_PlayerRole> &roles = player->GetPlayerData()->GetRoles();
+  for (unsigned int i = 0; i < roles.size(); i++) {
+    if (roles.at(i) == role) return true;
+  }
+  for (unsigned int i = 0; i < roles.size(); i++) {
+    if (RoleFamilyForSub(roles.at(i)) == RoleFamilyForSub(role)) return true;
+  }
+  return false;
+}
+
+static std::string NormalizeBadgePath(std::string raw) {
+  const std::string kPfx = "databases/default/";
+  if (raw.substr(0, kPfx.size()) == kPfx) raw = raw.substr(kPfx.size());
+  return raw;
+}
+
+void TeamAIController::ProcessDynamicSubstitutions() {
+  if (GetConfiguration()->GetReal("manager_mode", 0.0f) <= 0.5f) return;
+  if (g_CareerMatchContext.active &&
+      team->GetTeamData() &&
+      team->GetTeamData()->GetDatabaseID() == g_CareerMatchContext.userClubId) return;
+  if (team->GetSubsMade() >= 5) return;
+  if (QueueSubHasAiForTeam(team->GetID())) return;
+  if (match->GetPause() || match->IsGameOver()) return;
+  if (match->GetMatchTime_ms() < 55 * 60000) return;
+  if (match->GetActualTime_ms() - lastSubCheck_ms < 15000) return;
+  lastSubCheck_ms = match->GetActualTime_ms();
+
+  float minute = match->GetMatchTime_ms() / 60000.0f;
+  const std::vector<Player*> &players = team->GetAllPlayers();
+  int offIdx = -1;
+  float bestOffScore = -9999.0f;
+
+  for (int i = 0; i < (int)players.size() && i < playerNum; i++) {
+    Player *p = players.at(i);
+    if (!p || !p->IsActive()) continue;
+    e_PlayerRole role = p->GetFormationEntry().role;
+    if (role == e_PlayerRole_GK) continue;
+
+    float condition = p->GetFatigueFactorInv() * 100.0f;
+    float playedMinutes = p->GetPlayedMatchTime_ms() / 60000.0f;
+    bool forced = condition < 52.0f;
+    bool fatigueSub = minute >= 60.0f && condition < 67.0f;
+    bool preventiveSub = minute >= 70.0f && condition < 76.0f && playedMinutes > 55.0f;
+    bool lateUse = minute >= 80.0f && condition < 84.0f && playedMinutes > 65.0f;
+    bool routineRotation = minute >= 76.0f && team->GetSubsMade() < 3 && condition < 98.0f && playedMinutes > 65.0f;
+    bool finalFreshLegs = minute >= 86.0f && team->GetSubsMade() < 5 && condition < 99.0f && playedMinutes > 70.0f;
+    if (!forced && !fatigueSub && !preventiveSub && !lateUse && !routineRotation && !finalFreshLegs) continue;
+
+    float score = (100.0f - condition) * 2.2f + playedMinutes * 0.35f;
+    if (role == e_PlayerRole_LB || role == e_PlayerRole_RB || role == e_PlayerRole_LM || role == e_PlayerRole_RM) score += 8.0f;
+    if (forced) score += 30.0f;
+    if (score > bestOffScore) {
+      bestOffScore = score;
+      offIdx = i;
+    }
+  }
+
+  if (offIdx < 0) return;
+  e_PlayerRole targetRole = players.at(offIdx)->GetFormationEntry().role;
+  float outgoingCondition = players.at(offIdx)->GetFatigueFactorInv() * 100.0f;
+
+  int onIdx = -1;
+  float bestOnScore = -9999.0f;
+  for (int i = playerNum; i < (int)players.size(); i++) {
+    Player *p = players.at(i);
+    if (!p || p->IsActive()) continue;
+    const std::vector<e_PlayerRole> &roles = p->GetPlayerData()->GetRoles();
+    if (!roles.empty() && roles.at(0) == e_PlayerRole_GK) continue;
+
+    bool cover = PlayerCanCoverRole(p, targetRole);
+    float condition = p->GetFatigueFactorInv() * 100.0f;
+    if (condition < 50.0f || condition < outgoingCondition + 8.0f) continue;
+
+    float fit = cover ? 45.0f : 0.0f;
+    float score = fit + condition * 0.8f + p->GetAverageStat() * 45.0f;
+    if (score > bestOnScore) {
+      bestOnScore = score;
+      onIdx = i;
+    }
+  }
+
+  if (onIdx >= 0) {
+    QueuedSub sub;
+    sub.pending = true;
+    sub.aiControlled = true;
+    sub.teamIdx = team->GetID();
+    sub.offIdx = offIdx;
+    sub.onIdx = onIdx;
+    sub.offPlayerDbId = players.at(offIdx)->GetPlayerData()->GetDatabaseID();
+    sub.onPlayerDbId = players.at(onIdx)->GetPlayerData()->GetDatabaseID();
+    sub.nameOut = players.at(offIdx)->GetPlayerData()->GetDisplayName();
+    sub.nameIn = players.at(onIdx)->GetPlayerData()->GetDisplayName();
+    if (team->GetTeamData()) {
+      sub.teamBadgePath = team->GetTeamData()->GetLogoUrl();
+      sub.teamBadgePath = NormalizeBadgePath(sub.teamBadgePath);
+      Vector3 c = team->GetTeamData()->GetColor1();
+      int r = clamp((int)c.coords[0], 0, 255);
+      int g = clamp((int)c.coords[1], 0, 255);
+      int b = clamp((int)c.coords[2], 0, 255);
+      sub.teamColor = (255u << 24) | ((unsigned int)b << 16) | ((unsigned int)g << 8) | (unsigned int)r;
+    }
+    QueueSubPush(sub);
+    printf("[AI SUB] queued team=%d minute=%.1f off=%d on=%d reason=fatigue\n",
+           team->GetID(), minute, offIdx, onIdx);
+  }
+}
+
 void TeamAIController::Process() {
 
   if (match->GetActualTime_ms() % 1000 == 0) UpdateTactics();
+  ProcessDynamicSubstitutions();
 
   CalculateSituation();
 
@@ -431,22 +552,27 @@ void TeamAIController::CalculateDynamicRoles() {
 
   std::vector<Player*> players;
   team->GetActivePlayers(players);
+  if (players.size() < 2) return;
 
   std::vector<Player*>::iterator iter = players.begin();
   while (iter != players.end()) {
-    if ((*iter)->GetFormationEntry().role == e_PlayerRole_GK) {
+    if (*iter && (*iter)->GetFormationEntry().role == e_PlayerRole_GK) {
       players.erase(iter);
       break;
     }
+    iter++;
   }
 
   unsigned int playerNum = players.size();
+  if (playerNum < 2) return;
 
   // collect adapted formation positions
   std::vector<Vector3> adaptedFormationPositions;
   for (unsigned int y = 0; y < playerNum; y++) {
+    if (!players.at(y)) return;
     adaptedFormationPositions.push_back(GetAdaptedFormationPosition(players.at(y), false));
   }
+  if (adaptedFormationPositions.size() != playerNum) return;
 
   // first make a sorted list on all possible distances between players and formation targets
   std::vector<int> distances;
@@ -460,6 +586,7 @@ void TeamAIController::CalculateDynamicRoles() {
   }
 
   std::sort(distances.begin(), distances.end());
+  if (distances.empty()) return;
 
   for (unsigned int i = playerNum; i < distances.size(); i += 5) {
 
@@ -594,11 +721,13 @@ void TeamAIController::CalculateManMarking() {
 
   std::vector<Player*> players;
   team->GetActivePlayers(players);
+  if (players.empty()) return;
 
   // reset previous man marking
   for (unsigned int i = 0; i < players.size(); i++) {
     players.at(i)->SetManMarkingID(-1);
   }
+  if (oppInfo.empty()) return;
 
   // most dangerous opponent gets closest player to cover him, and so on
   // (oppInfo is already sorted, most dangerous first. this is done in this->process() which is called earlier from team->process())
@@ -610,6 +739,7 @@ void TeamAIController::CalculateManMarking() {
     std::vector<Player*>::iterator iter = players.begin();
 
     Player *oppPlayer = oppInfo.at(opp).player;
+    if (!oppPlayer) continue;
 
     // find closest player for this opponent
     while (iter != players.end()) {

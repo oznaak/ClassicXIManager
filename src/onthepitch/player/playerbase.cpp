@@ -16,11 +16,21 @@
 
 int PlayerBase::playerCount = 0;
 
+static float FatigueFactorFromCondition(int condition) {
+  condition = clamp(condition, 1, 100);
+  if (condition >= 85) return 1.0f - (100 - condition) * 0.002f;
+  if (condition >= 70) return 0.92f + (condition - 70) / 15.0f * 0.08f;
+  if (condition >= 55) return 0.78f + (condition - 55) / 15.0f * 0.14f;
+  return 0.45f + condition / 55.0f * 0.33f;
+}
+
 PlayerBase::PlayerBase(Match *match, PlayerData *playerData) : match(match), playerData(playerData), id(playerCount++), humanoid(0), controller(0), externalController(0), isActive(false) {
   debug = false;
   lastTouchTime_ms = 0;
   lastTouchType = e_TouchType_None;
-  fatigueFactorInv = 1.0;
+  fatigueFactorInv = FatigueFactorFromCondition(playerData ? playerData->GetCurrentCondition() : 100);
+  startingFatigueFactorInv = fatigueFactorInv;
+  playedMatchTime_ms = 0;
   confidenceFactor = 1.0;
 
   averageStat = GetStat("physical_balance") +

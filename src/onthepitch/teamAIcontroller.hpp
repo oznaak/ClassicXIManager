@@ -53,6 +53,7 @@ class TeamAIController {
     void ApplyTeamPressure();
     void ApplyKeeperRush();
     void CalculateSituation();
+    void ProcessDynamicSubstitutions();
 
     void UpdateTactics();
 
@@ -105,6 +106,7 @@ class TeamAIController {
     unsigned long endApplyKeeperRush_ms;
 
     Player *forwardSupportPlayer; // sort of like the attacking run player, but more for a forward offset for a player close to the action, to support the player in possession
+    unsigned long lastSubCheck_ms = 0;
 
     std::vector<TacticalOpponentInfo> tacticalOpponentInfo;
 

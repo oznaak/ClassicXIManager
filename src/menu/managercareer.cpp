@@ -1888,6 +1888,22 @@ static void ProcessCompletedScouts(int managerId, const std::string &newDate) {
   delete dr;
 }
 
+static void ProcessDailyPlayerStaminaRecovery(int managerId) {
+  if (!TableHasColumn("players", "player_stamina")) return;
+  (void)managerId;
+
+  std::stringstream q;
+  q << "UPDATE players SET player_stamina = MIN(100, player_stamina + "
+    << "CASE "
+    << "WHEN stamina >= 85 THEN 16 "
+    << "WHEN stamina >= 70 THEN 14 "
+    << "WHEN stamina >= 55 THEN 12 "
+    << "ELSE 9 END"
+    << ");";
+  DatabaseResult *r = GetDB()->Query(q.str());
+  delete r;
+}
+
 void ManagerMainScreenPage::AdvanceDay() {
   // Read the stored date from in-memory state — do NOT use SQLite date('now')
   // or any real-world clock; current_date is also a SQLite keyword for the real
@@ -1909,6 +1925,9 @@ void ManagerMainScreenPage::AdvanceDay() {
 
   // Step 2c: process any pending transfer deals that resolve by the new date.
   ProcessDailyTransfers(managerId, clubId, newDate, g_CareerHub.seasonYear);
+
+  // Step 2d: recover current condition for resting squads.
+  ProcessDailyPlayerStaminaRecovery(managerId);
 
   // Step 3: write the literal new date string into the DB.
   std::stringstream uq;

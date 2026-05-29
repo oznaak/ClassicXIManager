@@ -92,6 +92,8 @@ class PlayerBase {
 
     float GetFatigueFactorInv() const { return fatigueFactorInv; }
     void RelaxFatigue(float howMuch) { fatigueFactorInv += howMuch; fatigueFactorInv = clamp(fatigueFactorInv, 0.01f, 1.0f); }
+    unsigned long GetPlayedMatchTime_ms() const { return playedMatchTime_ms; }
+    float GetStartingFatigueFactorInv() const { return startingFatigueFactorInv; }
     float GetConfidenceFactor() const { return confidenceFactor; }
 
     float GetAverageStat() { return averageStat; }
@@ -118,7 +120,9 @@ class PlayerBase {
     static int playerCount;
 
     float fatigueFactorInv;
+    float startingFatigueFactorInv;
     float confidenceFactor;
+    unsigned long playedMatchTime_ms;
 
     float averageStat;
 
