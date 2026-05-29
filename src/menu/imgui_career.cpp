@@ -266,10 +266,10 @@ void CareerHubState::Clear() {
   primaryTab    = 0;
   activeTab     = 0;
   pendingAction = 0;
-  onPlayMatch   = nullptr;
   onMainMenu    = nullptr;
   onAdvance     = nullptr;
   onPlayFixture = nullptr;
+  onAdvanceUntilMatch = nullptr;
   managerId     = 0;
   clubId        = 0;
   currentDate.clear();
@@ -281,6 +281,7 @@ void CareerHubState::Clear() {
   isAdvancing          = false;
   pendingAdvanceAction = ADVANCE_NONE;
   advanceFramesWaited  = 0;
+  advanceMode          = ADVANCE_MODE_NEXT_DAY;
   onStartNextSeason    = nullptr;
   manager = {};
   club    = {};
@@ -3045,10 +3046,10 @@ static void DrawNavItem(const char *label, e_ManagerPage page, int badge = 0) {
 
 // ---- Action flags (deferred, consumed after Handle()) -------------------
 
-static bool s_playClicked        = false; // test engine (hardcoded match)
 static bool s_advanceClicked     = false; // advance day or play fixture
 static bool s_startSeasonClicked = false; // start next season
 static bool s_menuClicked        = false;
+static bool s_advanceModePopupWasOpen = false;
 // Returns count of players with formationOrder 0-19 (active squad slots)
 static int CountActiveSquad() {
   int n = 0;
@@ -3297,8 +3298,9 @@ static void DrawTopHeader(float contentX, float contentW) {
     if (DrawNavArrow("##nav_fwd",  ">", kLeftMar + kArrowSz + kArrowGap, canFwd)) NavForward();
   }
 
-  // ---- Right: search + date + Advance/PlayMatch + Test Engine CTAs -------
+  // ---- Right: search + date + Advance/PlayMatch controls -----------------
   const float kBtnW    = 112.0f;  // each button width
+  const float kDropW   = 32.0f;
   const float kDateW   = 88.0f;   // wider for "31 Aug 2026"
   const float kSearchW = 210.0f;
   const float kElemH   = 30.0f;
@@ -3309,16 +3311,13 @@ static void DrawTopHeader(float contentX, float contentW) {
   ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f, 5.0f));
   PushMgrFont(g_ManagerFontBold);
 
-  // Test Engine button (rightmost) — hardcoded match launcher.
-  ImGui::SetCursorPos(ImVec2(rightEdge - kBtnW, elemY));
-  if (SecBtn("Test Engine", ImVec2(kBtnW, kElemH))) s_playClicked = true;
-
   // Advance / Play Match / Start Season button — priority:
   // 1. isAdvancing -> disabled "Advancing..."
   // 2. hasTodayFixture -> "Play Match"
   // 3. hasSeasonEnded -> "Start Season"
   // 4. else -> "Advance"
-  float advBtnX = rightEdge - kBtnW - kGap - kBtnW;
+  float dropBtnX = rightEdge - kDropW;
+  float advBtnX = dropBtnX - kGap - kBtnW;
   ImGui::SetCursorPos(ImVec2(advBtnX, elemY));
   if (g_CareerHub.isAdvancing) {
     ImGui::BeginDisabled();
@@ -3331,6 +3330,83 @@ static void DrawTopHeader(float contentX, float contentW) {
   } else {
     if (CTAButton("Advance", ImVec2(kBtnW, kElemH))) s_advanceClicked = true;
   }
+
+  ImGui::SetCursorPos(ImVec2(dropBtnX, elemY));
+  ImVec2 dropScreen = ImGui::GetCursorScreenPos();
+  bool advanceModeSelected = (g_CareerHub.advanceMode == ADVANCE_MODE_NEXT_MATCH);
+  if (g_CareerHub.isAdvancing || g_CareerHub.hasTodayFixture || g_CareerHub.hasSeasonEnded) {
+    ImGui::BeginDisabled();
+    SecBtn("##advance_mode_btn", ImVec2(kDropW, kElemH));
+    ImGui::EndDisabled();
+  } else {
+    if (advanceModeSelected) {
+      ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(25, 92, 160, 255));
+      ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(32, 112, 190, 255));
+      ImGui::PushStyleColor(ImGuiCol_ButtonActive,  IM_COL32(18, 76, 140, 255));
+    }
+    if (SecBtn("##advance_mode_btn", ImVec2(kDropW, kElemH))) ImGui::OpenPopup("##advance_mode_popup");
+    if (advanceModeSelected) ImGui::PopStyleColor(3);
+  }
+
+  ImDrawList *fg = ImGui::GetWindowDrawList();
+  ImU32 chevCol = advanceModeSelected ? IM_COL32(255, 255, 255, 245) : IM_COL32(180, 190, 215, 230);
+  ImVec2 c(dropScreen.x + kDropW * 0.5f, dropScreen.y + kElemH * 0.5f + 1.0f);
+  fg->AddTriangleFilled(ImVec2(c.x - 4.5f, c.y - 2.0f),
+                        ImVec2(c.x + 4.5f, c.y - 2.0f),
+                        ImVec2(c.x,        c.y + 3.5f),
+                        chevCol);
+
+  ImGui::SetNextWindowPos(ImVec2(dropScreen.x + kDropW - 218.0f, dropScreen.y + kElemH + 6.0f),
+                          ImGuiCond_Appearing);
+  ImGui::SetNextWindowSize(ImVec2(218.0f, 48.0f), ImGuiCond_Appearing);
+  bool advanceModePopupOpen = false;
+  if (ImGui::BeginPopup("##advance_mode_popup")) {
+    advanceModePopupOpen = true;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 8.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,   ImVec2(6.0f, 6.0f));
+    PushMgrFont(g_ManagerFontSmall);
+    bool selected = advanceModeSelected;
+    const ImVec2 rowSize(210.0f, 32.0f);
+    ImGui::PushID("advance_until_matchday");
+    if (selected) {
+      ImGui::PushStyleColor(ImGuiCol_Header,        IM_COL32(24, 92, 165, 255));
+      ImGui::PushStyleColor(ImGuiCol_HeaderHovered, IM_COL32(30, 105, 185, 255));
+      ImGui::PushStyleColor(ImGuiCol_HeaderActive,  IM_COL32(18, 76, 145, 255));
+    } else {
+      ImGui::PushStyleColor(ImGuiCol_Header,        IM_COL32(15, 24, 46, 255));
+      ImGui::PushStyleColor(ImGuiCol_HeaderHovered, IM_COL32(24, 36, 68, 255));
+      ImGui::PushStyleColor(ImGuiCol_HeaderActive,  IM_COL32(30, 46, 82, 255));
+    }
+    bool clicked = ImGui::Selectable("##until_next_matchday", selected, 0, rowSize);
+    ImGui::PopStyleColor(3);
+    ImVec2 r0 = ImGui::GetItemRectMin();
+    ImVec2 r1 = ImGui::GetItemRectMax();
+    ImDrawList *pdl = ImGui::GetWindowDrawList();
+    if (selected) {
+      pdl->AddCircleFilled(ImVec2(r0.x + 17.0f, (r0.y + r1.y) * 0.5f), 8.0f,
+                           IM_COL32(255, 255, 255, 245), 16);
+      ImVec2 checkA(r0.x + 12.5f, r0.y + 16.5f);
+      ImVec2 checkB(r0.x + 15.8f, r0.y + 19.5f);
+      ImVec2 checkC(r0.x + 21.8f, r0.y + 12.5f);
+      pdl->AddLine(checkA, checkB, IM_COL32(18, 76, 145, 255), 2.0f);
+      pdl->AddLine(checkB, checkC, IM_COL32(18, 76, 145, 255), 2.0f);
+    } else {
+      pdl->AddCircle(ImVec2(r0.x + 17.0f, (r0.y + r1.y) * 0.5f), 8.0f,
+                     IM_COL32(95, 115, 150, 200), 16, 1.5f);
+    }
+    pdl->AddText(g_ManagerFontSmall, 13.0f,
+                 ImVec2(r0.x + 36.0f, r0.y + 8.0f),
+                 selected ? IM_COL32(255, 255, 255, 255) : IM_COL32(205, 215, 235, 245),
+                 "Until Next Match Day");
+    if (clicked) {
+      g_CareerHub.advanceMode = selected ? ADVANCE_MODE_NEXT_DAY : ADVANCE_MODE_NEXT_MATCH;
+    }
+    ImGui::PopID();
+    PopMgrFont(g_ManagerFontSmall);
+    ImGui::PopStyleVar(2);
+    ImGui::EndPopup();
+  }
+  s_advanceModePopupWasOpen = advanceModePopupOpen;
 
   PopMgrFont(g_ManagerFontBold);
   ImGui::PopStyleVar();
@@ -4573,7 +4649,7 @@ static std::string FmtMoney(long long v);
 // Layout: Left 28% (Messages + Training + Board Objectives) | Center 42% (Story + Fixture + Agenda + Tactics) | Right 30% (Schedule + Snapshot + Medical)
 
 static void DrawHomePage(float w, float h) {
-  const bool kCanClick = !s_escMenuOpen; // block panel clicks while ESC menu is open
+  const bool kCanClick = !s_escMenuOpen && !s_advanceModePopupWasOpen;
   const float kPad = 16.0f, kGap = 10.0f;
 
   // Shared hover-glow helper — draws club-accent ring and sets hand cursor.
@@ -12595,7 +12671,6 @@ void RenderImGuiCareerHub() {
                ImGuiWindowFlags_NoScrollWithMouse);
   ImGui::PopStyleVar();
 
-  s_playClicked        = false;
   s_advanceClicked     = false;
   s_startSeasonClicked = false;
   s_menuClicked        = false;
@@ -12779,16 +12854,12 @@ void RenderImGuiCareerHub() {
   }
 
   // ---- Deferred action dispatch ----------------------------------------
-  // Immediate actions (Test Engine, Main Menu, Play Fixture) fire right away.
+  // Immediate actions (Main Menu, Play Fixture) fire right away.
   // Advance/Start Season set isAdvancing=true and defer work by one frame so
   // the overlay is guaranteed to appear before processing begins.
 
   if (g_CareerHub.pendingAction == 0) {
-    if (s_playClicked) {
-      g_CareerHub.pendingAction = 1;
-      printf("[IMGUI MANAGER] Test Engine requested\n");
-
-    } else if (s_menuClicked) {
+    if (s_menuClicked) {
       g_CareerHub.pendingAction = 2;
       printf("[IMGUI MANAGER] Main Menu requested\n");
 
@@ -12812,9 +12883,12 @@ void RenderImGuiCareerHub() {
         }
       } else {
         g_CareerHub.isAdvancing          = true;
-        g_CareerHub.pendingAdvanceAction = ADVANCE_NEXT_DAY;
+        g_CareerHub.pendingAdvanceAction = (g_CareerHub.advanceMode == ADVANCE_MODE_NEXT_MATCH)
+                                             ? ADVANCE_UNTIL_MATCH
+                                             : ADVANCE_NEXT_DAY;
         g_CareerHub.advanceFramesWaited  = 0;
-        printf("[IMGUI MANAGER] Advance Day: overlay shown, work deferred one frame\n");
+        printf("[IMGUI MANAGER] Advance: mode=%d overlay shown, work deferred one frame\n",
+               (int)g_CareerHub.pendingAdvanceAction);
       }
     }
 
@@ -12831,6 +12905,9 @@ void RenderImGuiCareerHub() {
         } else if (g_CareerHub.pendingAdvanceAction == ADVANCE_START_SEASON) {
           g_CareerHub.pendingAction = 5;
           printf("[IMGUI MANAGER] Firing StartNextSeason after overlay frame\n");
+        } else if (g_CareerHub.pendingAdvanceAction == ADVANCE_UNTIL_MATCH) {
+          g_CareerHub.pendingAction = 6;
+          printf("[IMGUI MANAGER] Firing AdvanceUntilNextMatchDay after overlay frame\n");
         }
         g_CareerHub.pendingAdvanceAction = ADVANCE_NONE;
       }

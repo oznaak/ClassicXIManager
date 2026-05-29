@@ -1225,11 +1225,11 @@ ManagerMainScreenPage::ManagerMainScreenPage(
 
   if (useImGuiCareerHub) {
     // Wire ImGui action callbacks before loading so they are ready when active=true.
-    g_CareerHub.onPlayMatch       = boost::bind(&ManagerMainScreenPage::PlayMatch,       this);
     g_CareerHub.onMainMenu        = boost::bind(&ManagerMainScreenPage::BackToMainMenu,  this);
     g_CareerHub.onAdvance         = boost::bind(&ManagerMainScreenPage::AdvanceDay,      this);
     g_CareerHub.onPlayFixture     = boost::bind(&ManagerMainScreenPage::PlayFixture,     this);
     g_CareerHub.onStartNextSeason = boost::bind(&ManagerMainScreenPage::StartNextSeason, this);
+    g_CareerHub.onAdvanceUntilMatch = boost::bind(&ManagerMainScreenPage::AdvanceUntilNextMatchDay, this);
     g_CareerHub.LoadFromDB(managerId, clubId);
     this->Show();
   } else {
@@ -1255,7 +1255,6 @@ void ManagerMainScreenPage::BuildNavigation() {
   clubButton      = new Gui2Button(windowManager, "mgr_nav_club",       0, 0, 14, 4, "Club");
   matchesButton   = new Gui2Button(windowManager, "mgr_nav_matches",    0, 0, 14, 4, "Matches");
   standingsButton = new Gui2Button(windowManager, "mgr_nav_standings",  0, 0, 14, 4, "Standings");
-  playMatchButton = new Gui2Button(windowManager, "mgr_nav_playmatch",  0, 0, 14, 4, "Play Match");
   mainMenuButton  = new Gui2Button(windowManager, "mgr_nav_mainmenu",   0, 0, 14, 4, "Main Menu");
 
   managerButton->sig_OnClick.connect(
@@ -1266,8 +1265,6 @@ void ManagerMainScreenPage::BuildNavigation() {
     boost::bind(&ManagerMainScreenPage::OpenTab, this, 2));
   standingsButton->sig_OnClick.connect(
     boost::bind(&ManagerMainScreenPage::OpenTab, this, 3));
-  playMatchButton->sig_OnClick.connect(
-    boost::bind(&ManagerMainScreenPage::PlayMatch, this));
   mainMenuButton->sig_OnClick.connect(
     boost::bind(&ManagerMainScreenPage::BackToMainMenu, this));
 
@@ -1275,8 +1272,7 @@ void ManagerMainScreenPage::BuildNavigation() {
   navGrid->AddView(clubButton,      0, 1);
   navGrid->AddView(matchesButton,   0, 2);
   navGrid->AddView(standingsButton, 0, 3);
-  navGrid->AddView(playMatchButton, 0, 4);
-  navGrid->AddView(mainMenuButton,  0, 5);
+  navGrid->AddView(mainMenuButton,  0, 4);
 
   navGrid->UpdateLayout(0.25, 0.25, 0.25, 0.25);
   this->AddView(navGrid);
@@ -1483,39 +1479,6 @@ void ManagerMainScreenPage::ShowActiveView() {
     case 3: standingsGrid->Show(); standingsButton->SetFocus(); break;
     default: managerGrid->Show();  managerButton->SetFocus();   break;
   }
-}
-
-void ManagerMainScreenPage::PlayMatch() {
-  if (clubId == 0) return;
-
-  // Test Engine: hardcoded teams, no fixture context.
-  g_CareerMatchContext.Clear();
-  printf("[CAREER MATCH] Test engine match; no fixture context\n");
-
-  printf("[IMGUI MANAGER] Setting up controller sides\n");
-  std::vector<SideSelection> sides;
-  GetMenuTask()->SetControllerSetup(sides);
-
-  std::string team1 = int_to_str(clubId);
-  std::string team2 = (clubId == 8) ? "3" : "8";
-  printf("[IMGUI MANAGER] Setting teams: %s vs %s\n", team1.c_str(), team2.c_str());
-  GetMenuTask()->SetTeamIDs(team1, team2);
-
-  GetConfiguration()->Set("manager_mode",           1.0f);
-  GetConfiguration()->Set("manager_ai_difficulty",  1.0f);
-  GetConfiguration()->Set("match_difficulty",       1.0f);
-  GetConfiguration()->Set("match_duration",         1.0f); // full manager-match duration; use x2/x4/x8 to watch faster
-  GetConfiguration()->Set("match_allow_extra_time", 0.0f); // test engine: no extra time
-  printf("[MANAGER MODE] Match duration set to full: match_duration=1.0 (use speed controls to watch faster)\n");
-
-  // Do NOT call CreatePage(LoadingMatch) here — this runs from the GL thread.
-  // LoadingMatchPage constructor calls LoadImage which needs the main-thread ObjectFactory.
-  // Calling it from the GL thread crashes. Queue it for MenuTask::ProcessPhase (main thread).
-  printf("[IMGUI MANAGER] Queued match start in MenuTask\n");
-  GetMenuTask()->RequestManagerMatchStart();
-
-  this->Exit();
-  delete this;
 }
 
 void ManagerMainScreenPage::BackToMainMenu() {
@@ -1940,6 +1903,29 @@ void ManagerMainScreenPage::AdvanceDay() {
 
   printf("[CAREER] Advance day manager=%d from=%s to=%s\n",
          managerId, fromDate.c_str(), g_CareerHub.currentDate.c_str());
+}
+
+void ManagerMainScreenPage::AdvanceUntilNextMatchDay() {
+  int daysAdvanced = 0;
+  const int maxDays = 370;
+
+  while (!g_CareerHub.hasTodayFixture && !g_CareerHub.hasSeasonEnded && daysAdvanced < maxDays) {
+    std::string before = g_CareerHub.currentDate;
+    AdvanceDay();
+    daysAdvanced++;
+
+    if (g_CareerHub.currentDate.empty() || g_CareerHub.currentDate == before) {
+      printf("[CAREER] AdvanceUntilNextMatchDay stopped: date did not change from=%s\n",
+             before.c_str());
+      break;
+    }
+  }
+
+  printf("[CAREER] AdvanceUntilNextMatchDay advanced=%d stopped date=%s fixture=%d seasonEnded=%d\n",
+         daysAdvanced,
+         g_CareerHub.currentDate.c_str(),
+         g_CareerHub.hasTodayFixture ? g_CareerHub.todayFixture.id : 0,
+         g_CareerHub.hasSeasonEnded ? 1 : 0);
 }
 
 void ManagerMainScreenPage::PlayFixture() {

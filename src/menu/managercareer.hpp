@@ -88,9 +88,9 @@ class ManagerMainScreenPage : public Gui2Page {
   virtual ~ManagerMainScreenPage();
 
   void OpenTab(int tab);
-  void PlayMatch();
   void BackToMainMenu();
   void AdvanceDay();
+  void AdvanceUntilNextMatchDay();
   void PlayFixture();
   void StartNextSeason();
 

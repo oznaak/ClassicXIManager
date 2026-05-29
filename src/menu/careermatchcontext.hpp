@@ -3,7 +3,7 @@
 #include <string>
 
 // Session-scoped context for a scheduled career fixture.
-// Set by PlayFixture(), cleared by Test Engine and after result is stored.
+// Set by PlayFixture() and cleared after result is stored.
 // Read by GameOverPage to capture the final score and update the DB.
 
 struct CareerMatchContext {

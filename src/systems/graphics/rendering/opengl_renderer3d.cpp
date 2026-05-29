@@ -2387,10 +2387,7 @@ struct GLfunctions {
       if (g_CareerHub.pendingAction != 0) {
         int action = g_CareerHub.pendingAction;
         g_CareerHub.pendingAction = 0;
-        if (action == 1 && g_CareerHub.onPlayMatch) {
-          printf("[IMGUI MANAGER] Processing Test Engine action\n");
-          g_CareerHub.onPlayMatch();
-        } else if (action == 2 && g_CareerHub.onMainMenu) {
+        if (action == 2 && g_CareerHub.onMainMenu) {
           printf("[IMGUI MANAGER] Processing Main Menu action\n");
           g_CareerHub.onMainMenu();
         } else if (action == 3 && g_CareerHub.onAdvance) {
@@ -2402,6 +2399,9 @@ struct GLfunctions {
         } else if (action == 5 && g_CareerHub.onStartNextSeason) {
           printf("[IMGUI MANAGER] Processing Start Next Season action\n");
           g_CareerHub.onStartNextSeason();
+        } else if (action == 6 && g_CareerHub.onAdvanceUntilMatch) {
+          printf("[IMGUI MANAGER] Processing Advance Until Next Match Day action\n");
+          g_CareerHub.onAdvanceUntilMatch();
         }
       }
 

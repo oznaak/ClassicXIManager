@@ -8,7 +8,13 @@
 enum AdvanceAction {
   ADVANCE_NONE         = 0,
   ADVANCE_NEXT_DAY     = 1,
-  ADVANCE_START_SEASON = 2
+  ADVANCE_START_SEASON = 2,
+  ADVANCE_UNTIL_MATCH  = 3
+};
+
+enum AdvanceMode {
+  ADVANCE_MODE_NEXT_DAY    = 0,
+  ADVANCE_MODE_NEXT_MATCH  = 1
 };
 
 // Shared state written by the menu thread, read by the GL render thread.
@@ -19,13 +25,13 @@ struct CareerHubState {
   bool active        = false;
   int  primaryTab    = 0; // 0=Portal 1=Squad 2=Recruitment 3=MatchDay 4=Club 5=Career
   int  activeTab     = 0; // portal sub-tab: 0=Overview 1=Manager 2=Club 3=Matches 4=Standings
-  int  pendingAction = 0; // 0=none 1=testEngine 2=mainMenu 3=advance 4=playFixture 5=startNextSeason
+  int  pendingAction = 0; // 0=none 2=mainMenu 3=advance 4=playFixture 5=startNextSeason 6=advanceUntilMatch
 
-  std::function<void()> onPlayMatch;       // hardcoded test engine (action 1)
   std::function<void()> onMainMenu;        // action 2
   std::function<void()> onAdvance;         // action 3: advance career day by 1
   std::function<void()> onPlayFixture;     // action 4: play today's scheduled fixture
   std::function<void()> onStartNextSeason; // action 5: rollover to next season
+  std::function<void()> onAdvanceUntilMatch; // action 6: advance until user's next fixture date
 
   // Career date state
   int managerId  = 0;
@@ -51,6 +57,7 @@ struct CareerHubState {
   bool         isAdvancing           = false; // true while modal overlay is shown
   AdvanceAction pendingAdvanceAction = ADVANCE_NONE; // queued advance type
   int           advanceFramesWaited  = 0;    // single-frame defer counter
+  AdvanceMode   advanceMode          = ADVANCE_MODE_NEXT_DAY;
 
   struct ManagerInfo {
     std::string name, age, nationality, gender, clubName;
