@@ -313,7 +313,11 @@ void Team::SetLastTouchPlayer(Player *player, e_TouchType touchType) {
   player->SetLastTouchTime_ms(match->GetActualTime_ms());
   player->SetLastTouchType(lastTouchType);
   match->SetLastTouchTeamID(GetID(), touchType);
-  match->GetMatchData()->RecordBallTouch(GetID());
+  int playerDatabaseID = player->GetPlayerData() ? player->GetPlayerData()->GetDatabaseID() : 0;
+  bool intentional = touchType == e_TouchType_Intentional_Kicked ||
+                     touchType == e_TouchType_Intentional_Nonkicked;
+  match->GetMatchData()->RecordBallTouch(GetID(), playerDatabaseID,
+                                         match->GetActualTime_ms(), intentional);
 }
 
 void Team::ResetSituation(const Vector3 &focusPos) {

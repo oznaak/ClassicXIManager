@@ -54,6 +54,19 @@ static void AddColumnIfMissing(const std::string &tableName,
   delete r;
 }
 
+static void ProcessDailyAvailabilityRecovery(int managerId) {
+  std::stringstream q;
+  q << "UPDATE player_availability SET injury_days_remaining=MAX(0, injury_days_remaining-1)"
+    << " WHERE manager_id=" << managerId << " AND injury_days_remaining > 0;";
+  DatabaseResult *r = GetDB()->Query(q.str());
+  delete r;
+  q.str("");
+  q << "UPDATE player_availability SET injury_type='', injury_severity=''"
+    << " WHERE manager_id=" << managerId << " AND injury_days_remaining=0;";
+  r = GetDB()->Query(q.str());
+  delete r;
+}
+
 // ---- Inbox helpers ---------------------------------------------------------
 
 
@@ -634,6 +647,44 @@ static void EnsureCareerTables() {
     "starts          INTEGER DEFAULT 0,"
     "sub_appearances INTEGER DEFAULT 0,"
     "PRIMARY KEY(manager_id, player_id, season_year));"
+  ); delete GetDB()->Query("SELECT 1;");
+
+  GetDB()->Query(
+    "CREATE TABLE IF NOT EXISTS player_discipline("
+    "manager_id INTEGER NOT NULL,"
+    "player_id INTEGER NOT NULL,"
+    "season_year INTEGER NOT NULL,"
+    "yellow_cards INTEGER DEFAULT 0,"
+    "suspension_matches_remaining INTEGER DEFAULT 0,"
+    "suspension_reason TEXT DEFAULT '',"
+    "PRIMARY KEY(manager_id, player_id, season_year));"
+  ); delete GetDB()->Query("SELECT 1;");
+
+  GetDB()->Query(
+    "CREATE TABLE IF NOT EXISTS player_availability("
+    "manager_id INTEGER NOT NULL,"
+    "player_id INTEGER NOT NULL,"
+    "injury_days_remaining INTEGER DEFAULT 0,"
+    "injury_type TEXT DEFAULT '',"
+    "injury_severity TEXT DEFAULT '',"
+    "PRIMARY KEY(manager_id, player_id));"
+  ); delete GetDB()->Query("SELECT 1;");
+
+  GetDB()->Query(
+    "CREATE TABLE IF NOT EXISTS player_match_stats("
+    "manager_id INTEGER NOT NULL,"
+    "fixture_id INTEGER NOT NULL,"
+    "season_year INTEGER NOT NULL,"
+    "player_id INTEGER NOT NULL,"
+    "team_id INTEGER NOT NULL,"
+    "started INTEGER DEFAULT 0,"
+    "minutes INTEGER DEFAULT 0,"
+    "goals INTEGER DEFAULT 0,"
+    "assists INTEGER DEFAULT 0,"
+    "yellow_cards INTEGER DEFAULT 0,"
+    "red_cards INTEGER DEFAULT 0,"
+    "rating REAL DEFAULT 6.5,"
+    "PRIMARY KEY(manager_id, fixture_id, player_id));"
   ); delete GetDB()->Query("SELECT 1;");
 
   GetDB()->Query(
@@ -1891,6 +1942,7 @@ void ManagerMainScreenPage::AdvanceDay() {
 
   // Step 2d: recover current condition for resting squads.
   ProcessDailyPlayerStaminaRecovery(managerId);
+  ProcessDailyAvailabilityRecovery(managerId);
 
   // Step 3: write the literal new date string into the DB.
   std::stringstream uq;

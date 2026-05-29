@@ -592,9 +592,20 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
       << " foot, stamina,"
       << (hasPlayerStamina ? " COALESCE(players.player_stamina,100)," : " 100,")
       << " height, reputation,"
+      << " COALESCE(pa.injury_days_remaining,0), COALESCE(pa.injury_type,''),"
+      << " COALESCE(pd.suspension_matches_remaining,0), COALESCE(pd.suspension_reason,''),"
+      << " COALESCE(pms.apps,0), COALESCE(pms.goals,0), COALESCE(pms.assists,0), COALESCE(pms.avg_rating,0),"
       << kPlayerAttrCols
       << " FROM players LEFT JOIN player_save_state pss"
       << " ON pss.manager_id=" << mgrId << " AND pss.player_id=players.id"
+      << " LEFT JOIN player_availability pa ON pa.manager_id=" << mgrId << " AND pa.player_id=players.id"
+      << " LEFT JOIN player_discipline pd ON pd.manager_id=" << mgrId
+      << " AND pd.player_id=players.id AND pd.season_year=" << seasonYear
+      << " LEFT JOIN (SELECT player_id, COUNT(*) apps, SUM(goals) goals,"
+      << " SUM(assists) assists, AVG(rating) avg_rating"
+      << " FROM player_match_stats WHERE manager_id=" << mgrId
+      << " AND season_year=" << seasonYear << " GROUP BY player_id) pms"
+      << " ON pms.player_id=players.id"
       << " WHERE COALESCE(pss.team_id, players.team_id) = " << clubId
       << " ORDER BY"
       << "  CASE WHEN formationorder IS NULL OR formationorder < 0 THEN 999"
@@ -626,7 +637,15 @@ void CareerHubState::LoadFromDB(int mgrId, int cId) {
       p.height           = htStr.empty() ? 0.0f : (float)atof(htStr.c_str());
       std::string repStr = DBCell(r, i, 14);
       p.reputation       = repStr.empty() ? 0.0f : (float)atof(repStr.c_str());
-      ParsePlayerAttrsFromRow(p, r, i, 15);
+      p.injuryDays       = atoi(DBCell(r, i, 15).c_str());
+      p.injuryType       = DBCell(r, i, 16);
+      p.suspensionMatches = atoi(DBCell(r, i, 17).c_str());
+      p.suspensionReason = DBCell(r, i, 18);
+      p.matchesPlayed    = atoi(DBCell(r, i, 19).c_str());
+      p.goals            = atoi(DBCell(r, i, 20).c_str());
+      p.assists          = atoi(DBCell(r, i, 21).c_str());
+      p.avgRating        = (float)atof(DBCell(r, i, 22).c_str());
+      ParsePlayerAttrsFromRow(p, r, i, 23);
       players.push_back(p);
     }
     delete r;
@@ -3054,7 +3073,8 @@ static bool s_advanceModePopupWasOpen = false;
 static int CountActiveSquad() {
   int n = 0;
   for (const auto &p : g_CareerHub.players)
-    if (p.formationOrder >= 0 && p.formationOrder <= 19) n++;
+    if (p.formationOrder >= 0 && p.formationOrder <= 19 &&
+        p.injuryDays <= 0 && p.suspensionMatches <= 0) n++;
   return n;
 }
 
@@ -7016,7 +7036,7 @@ static void DrawSquadPage(float w, float h) {
 
   ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(5.0f, 4.0f));
   // Col indices: 0=POS 1=Name 2=Position 3=AltPos 4=Wage 5=Age 6=Foot 7=Expires 8=Ability 9=Potential
-  //              10=Stamina 11=SHP 12=Morale 13=Happiness 14=L5 15=Apps
+  //              10=Stamina 11=Status 12=Morale 13=Happiness 14=L5 15=Season
   static const int kColAge = 5, kColFoot = 6, kColAbility = 8, kColPotential = 9;
   if (ImGui::BeginTable("##sqfm", 16,
         ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
@@ -7036,11 +7056,11 @@ static void DrawSquadPage(float w, float h) {
     ImGui::TableSetupColumn("Ability",   ImGuiTableColumnFlags_WidthFixed,  60.0f);
     ImGui::TableSetupColumn("Potential", ImGuiTableColumnFlags_WidthFixed,  60.0f);
     ImGui::TableSetupColumn("Stamina",   ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort,  72.0f);
-    ImGui::TableSetupColumn("SHP",       ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort,  36.0f);
+    ImGui::TableSetupColumn("Status",    ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort,  56.0f);
     ImGui::TableSetupColumn("Morale",    ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort,  60.0f);
     ImGui::TableSetupColumn("Happiness", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort,  72.0f);
     ImGui::TableSetupColumn("L5",        ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort,  60.0f);
-    ImGui::TableSetupColumn("Apps",      ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort,  36.0f);
+    ImGui::TableSetupColumn("Season",    ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort, 104.0f);
     PushMgrFont(g_ManagerFontSmall);
     ImGui::TableHeadersRow();
     PopMgrFont(g_ManagerFontSmall);
@@ -7091,7 +7111,8 @@ static void DrawSquadPage(float w, float h) {
     PushMgrFont(g_ManagerFontSmall);
     for (int si = 0; si < nPlayers; si++) {
       const auto &p = g_CareerHub.players[s_squadSortIdx[si]];
-      ImGui::TableNextRow(0, 28.0f);
+      bool unavailable = (p.injuryDays > 0 || p.suspensionMatches > 0);
+      ImGui::TableNextRow(0, unavailable ? 34.0f : 28.0f);
 
       // POS — dropdown button
       ImGui::TableSetColumnIndex(0);
@@ -7100,7 +7121,10 @@ static void DrawSquadPage(float w, float h) {
         bool isSub  = (p.formationOrder >= 11);
         bool isXI   = (p.formationOrder >= 0 && p.formationOrder <= 10);
         ImU32 badgeBg;
-        if (isXI) {
+        if (unavailable) {
+          badgeBg = p.injuryDays > 0 ? IM_COL32(170, 55, 65, 225)
+                                     : IM_COL32(205, 150, 45, 225);
+        } else if (isXI) {
           int fo = p.formationOrder;
           if      (fo == 0)  badgeBg = IM_COL32(220, 160,  30, 220); // GK  gold
           else if (fo <= 4)  badgeBg = IM_COL32( 80, 150, 255, 220); // DEF blue
@@ -7130,9 +7154,15 @@ static void DrawSquadPage(float w, float h) {
                     ImVec2(cp.x + (bW - tsz.x)*0.5f, cy + (bH - tsz.y)*0.5f),
                     badgeTxt, posLbl);
 
-        if (clicked) {
+        if (clicked && !unavailable) {
           char popId[32]; snprintf(popId, sizeof(popId), "##posdd_%d", p.id);
           ImGui::OpenPopup(popId);
+        }
+        if (ImGui::IsItemHovered() && unavailable) {
+          std::string tip = p.injuryDays > 0
+            ? ("Injured: " + p.injuryType + " (" + int_to_str(p.injuryDays) + "d)")
+            : ("Suspended: " + int_to_str(p.suspensionMatches) + " match");
+          ImGui::SetTooltip("%s", tip.c_str());
         }
         char popId2[32]; snprintf(popId2, sizeof(popId2), "##posdd_%d", p.id);
         if (ImGui::BeginPopup(popId2)) {
@@ -7173,8 +7203,18 @@ static void DrawSquadPage(float w, float h) {
         bool nhov     = ImGui::IsItemHovered();
         bool nclicked = ImGui::IsItemClicked();
         int ar2 = (int)(kAccent.x*255), ag2 = (int)(kAccent.y*255), ab2 = (int)(kAccent.z*255);
-        ImU32 nCol = nhov ? IM_COL32(ar2, ag2, ab2, 255) : IM_COL32(220, 230, 248, 230);
+        ImU32 nCol = unavailable ? IM_COL32(170, 180, 205, 210)
+                                  : (nhov ? IM_COL32(ar2, ag2, ab2, 255) : IM_COL32(220, 230, 248, 230));
         ndl->AddText(g_ManagerFontSmall, 17.0f, ImVec2(cp2.x, cp2.y + 2.0f), nCol, name.c_str());
+        if (unavailable) {
+          std::string status = p.injuryDays > 0
+            ? ("Injured " + int_to_str(p.injuryDays) + "d")
+            : ("Suspended " + int_to_str(p.suspensionMatches));
+          ndl->AddText(g_ManagerFontSmall, 11.0f, ImVec2(cp2.x, cp2.y + 20.0f),
+                       p.injuryDays > 0 ? IM_COL32(245, 105, 115, 230)
+                                        : IM_COL32(245, 190, 85, 230),
+                       status.c_str());
+        }
         if (nhov) {
           ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
           float nsz = g_ManagerFontSmall
@@ -7325,11 +7365,38 @@ static void DrawSquadPage(float w, float h) {
         }
         ImGui::Dummy(ImVec2(bW, bH + 10.0f));
       }
-      placeholder(11); // SHP
+      // Availability status (col 11)
+      ImGui::TableSetColumnIndex(11);
+      if (p.injuryDays > 0 || p.suspensionMatches > 0) {
+        std::string status = p.injuryDays > 0
+          ? ("INJ " + int_to_str(p.injuryDays) + "d")
+          : ("SUS " + int_to_str(p.suspensionMatches));
+        ImVec2 scp = ImGui::GetCursorScreenPos();
+        ImGui::GetWindowDrawList()->AddText(g_ManagerFontSmall, 14.0f,
+            ImVec2(scp.x, scp.y + 4.0f),
+            p.injuryDays > 0 ? IM_COL32(245,105,115,230)
+                             : IM_COL32(245,190,85,230),
+            status.c_str());
+        ImGui::Dummy(ImVec2(54.0f, 18.0f));
+      } else {
+        placeholder(11);
+      }
       placeholder(12); // Morale
       placeholder(13); // Happiness
       placeholder(14); // L5
-      placeholder(15); // Apps
+      // Season stats (col 15): appearances, goals/assists and average rating.
+      ImGui::TableSetColumnIndex(15);
+      if (p.matchesPlayed > 0) {
+        char sbuf[64];
+        snprintf(sbuf, sizeof(sbuf), "%d  %dG/%dA  %.2f",
+                 p.matchesPlayed, p.goals, p.assists, p.avgRating);
+        ImVec2 stp = ImGui::GetCursorScreenPos();
+        ImGui::GetWindowDrawList()->AddText(g_ManagerFontSmall, 14.0f,
+            ImVec2(stp.x, stp.y + 4.0f), IM_COL32(170,190,225,230), sbuf);
+        ImGui::Dummy(ImVec2(98.0f, 18.0f));
+      } else {
+        placeholder(15);
+      }
     }
 
     if (g_CareerHub.players.empty()) {

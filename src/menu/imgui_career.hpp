@@ -80,6 +80,14 @@ struct CareerHubState {
     std::string foot;          // "L" or "R"
     int         stamina       = 0; // Stamina attribute 0-99
     int         currentStamina = 100; // Current fitness bar 0-100
+    int         injuryDays      = 0;
+    int         suspensionMatches = 0;
+    std::string injuryType;
+    std::string suspensionReason;
+    int         matchesPlayed   = 0;
+    int         goals           = 0;
+    int         assists         = 0;
+    float       avgRating       = 0.0f;
     float       height        = 0.0f; // metres e.g. 1.80
     float       reputation    = 0.0f; // 1-20 scale (legacy)
     // New fields

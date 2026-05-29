@@ -25,6 +25,12 @@ MatchData::MatchData(int team1DatabaseID, int team2DatabaseID) {
   passesAttempted[0] = 0; passesAttempted[1] = 0;
   passesCompleted[0] = 0; passesCompleted[1] = 0;
   pendingPassTeamID = -1;
+  lastIntentionalTouch.teamID = -1;
+  lastIntentionalTouch.playerDatabaseID = 0;
+  lastIntentionalTouch.time_ms = 0;
+  previousIntentionalTouch.teamID = -1;
+  previousIntentionalTouch.playerDatabaseID = 0;
+  previousIntentionalTouch.time_ms = 0;
 
   possession60seconds = 0.0f;
 }
@@ -32,6 +38,24 @@ MatchData::MatchData(int team1DatabaseID, int team2DatabaseID) {
 MatchData::~MatchData() {
   delete teamData[0];
   delete teamData[1];
+}
+
+void MatchData::AddGoalEvent(int teamID, int scorerDatabaseID, int assistDatabaseID, bool ownGoal) {
+  GoalEvent event;
+  event.teamID = teamID;
+  event.scorerDatabaseID = scorerDatabaseID;
+  event.assistDatabaseID = assistDatabaseID;
+  event.ownGoal = ownGoal;
+  goalEvents.push_back(event);
+}
+
+int MatchData::GetAssistCandidate(int teamID, int scorerDatabaseID, unsigned long goalTime_ms) const {
+  if (previousIntentionalTouch.teamID != teamID) return 0;
+  if (previousIntentionalTouch.playerDatabaseID <= 0) return 0;
+  if (previousIntentionalTouch.playerDatabaseID == scorerDatabaseID) return 0;
+  if (goalTime_ms < previousIntentionalTouch.time_ms) return 0;
+  if (goalTime_ms - previousIntentionalTouch.time_ms > 10000) return 0;
+  return previousIntentionalTouch.playerDatabaseID;
 }
 
 void MatchData::AddPossessionTime_10ms(int teamID) {

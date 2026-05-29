@@ -27,6 +27,15 @@
 #include "../../AIsupport/AIfunctions.hpp"
 
 #include "../../../main.hpp"
+#include "../../../menu/careermatchcontext.hpp"
+#include "../../../menu/imgui_match.hpp"
+
+static int ManagerPlanAggressionForTeam(Team *team) {
+  if (!team || GetConfiguration()->GetReal("manager_mode", 0.0f) <= 0.5f) return 0;
+  if (!g_CareerMatchContext.active || !team->GetTeamData()) return 0;
+  if (team->GetTeamData()->GetDatabaseID() != g_CareerMatchContext.userClubId) return 0;
+  return g_MatchPlanAggression;
+}
 
 PlayerController::PlayerController(Match *match) : IController(match) {
   Reset();
@@ -369,7 +378,8 @@ void PlayerController::_InterfereCommand(PlayerCommandQueue &commandQueue, bool 
 
     if (!byAnyMeans) {
       // if dot nears 1, it means opp is somewhat between ball and me
-      if (CouldWinABallDuelLikeliness() < 0.2f) return;
+      float duelThreshold = clamp(0.2f - ManagerPlanAggressionForTeam(team) * 0.025f, 0.12f, 0.28f);
+      if (CouldWinABallDuelLikeliness() < duelThreshold) return;
     }
 
     PlayerCommand command;
@@ -389,7 +399,9 @@ void PlayerController::_InterfereCommand(PlayerCommandQueue &commandQueue, bool 
 void PlayerController::_SlidingCommand(PlayerCommandQueue &commandQueue) {
   if (team->GetHumanGamerCount() != 0) return;
   if (match->GetBallRetainer() != 0) return;
-  if (CouldWinABallDuelLikeliness() < 0.7f) return;
+  int planAggression = ManagerPlanAggressionForTeam(team);
+  float slideThreshold = clamp(0.7f - planAggression * 0.045f, 0.56f, 0.82f);
+  if (CouldWinABallDuelLikeliness() < slideThreshold) return;
 
   if (!teamHasBestPossession && possessionAmount < 0.6f && match->GetDesignatedPossessionPlayer() != player && oppTeamHasPossession) {
 
@@ -398,7 +410,9 @@ void PlayerController::_SlidingCommand(PlayerCommandQueue &commandQueue) {
     Vector3 oppPos = _oppPlayer->GetPosition() + _oppPlayer->GetMovement() * 0.2;
 
     float ballDist = (playerPos - ballPos).GetLength();
-    if ((ballDist > 0.7f && ballDist < 1.6f && oppTimeNeededToGetToBall > 260) || (ballDist > 0.6f && ballDist < 1.8f && _oppPlayer->GetCurrentFunctionType() == e_FunctionType_Shot && _oppPlayer->TouchPending())) {
+    float reachBias = planAggression * 0.08f;
+    if ((ballDist > 0.7f && ballDist < 1.6f + reachBias && oppTimeNeededToGetToBall > 260) ||
+        (ballDist > 0.6f && ballDist < 1.8f + reachBias && _oppPlayer->GetCurrentFunctionType() == e_FunctionType_Shot && _oppPlayer->TouchPending())) {
 
       // no opp in the way?
       PlayerCommand command;

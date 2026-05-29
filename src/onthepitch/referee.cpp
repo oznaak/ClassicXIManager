@@ -11,6 +11,8 @@
 #include "AIsupport/AIfunctions.hpp"
 
 #include "../main.hpp"
+#include "../menu/careermatchcontext.hpp"
+#include "../menu/imgui_match.hpp"
 
 Referee::Referee(Match *match) : match(match) {
   buffer.desiredSetPiece = e_SetPiece_KickOff;
@@ -366,6 +368,13 @@ void Referee::TripNotice(Player *tripee, Player *tripper, int tackleType) {
       }
       // from behind?
       severity += (tripee->GetPosition() - tripper->GetPosition()).GetNormalized(0).GetDotProduct(tripee->GetDirectionVec()) * 0.5 + 0.5;
+      if (GetConfiguration()->GetReal("manager_mode", 0.0f) > 0.5f &&
+          g_CareerMatchContext.active &&
+          tripper->GetTeam() &&
+          tripper->GetTeam()->GetTeamData() &&
+          tripper->GetTeam()->GetTeamData()->GetDatabaseID() == g_CareerMatchContext.userClubId) {
+        severity += g_MatchPlanAggression * 0.16f;
+      }
 
       if (severity > 1.0) {
         // uooooga uooooga foul!

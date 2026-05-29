@@ -61,6 +61,19 @@ void CompleteScheduledFixture(int managerId, int fixtureId,
   printf("[FIXTURE] Marked played fixture=%d score=%d-%d\n",
          fixtureId, homeScore, awayScore);
 
+  std::stringstream sq;
+  sq << "UPDATE player_discipline SET suspension_matches_remaining="
+     << "MAX(0,suspension_matches_remaining-1)"
+     << " WHERE manager_id=" << managerId
+     << " AND season_year=" << seasonYear
+     << " AND suspension_matches_remaining > 0"
+     << " AND player_id IN ("
+     << " SELECT p.id FROM players p LEFT JOIN player_save_state pss"
+     << " ON pss.manager_id=" << managerId << " AND pss.player_id=p.id"
+     << " WHERE COALESCE(pss.team_id,p.team_id) IN (" << homeTeamId << "," << awayTeamId << "));";
+  DatabaseResult *sr = GetDB()->Query(sq.str());
+  delete sr;
+
   // Compute outcome flags.
   int homeWin  = (homeScore > awayScore) ? 1 : 0;
   int awayWin  = (awayScore > homeScore) ? 1 : 0;

@@ -1022,6 +1022,13 @@ void Match::Process() {
           }
         }
 
+        int scorerDatabaseID = lastGoalScorer && lastGoalScorer->GetPlayerData()
+          ? lastGoalScorer->GetPlayerData()->GetDatabaseID()
+          : 0;
+        int assistDatabaseID = ownGoal ? 0 :
+          matchData->GetAssistCandidate(GetLastGoalTeamID(), scorerDatabaseID, GetActualTime_ms());
+        matchData->AddGoalEvent(GetLastGoalTeamID(), scorerDatabaseID, assistDatabaseID, ownGoal);
+
       }
     }
 

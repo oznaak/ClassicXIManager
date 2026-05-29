@@ -1108,6 +1108,12 @@ void TeamAIController::UpdateTactics() {
   //printf("timefactor: %f\n", timeFactor);
 
   float offenseBias = clamp(0.5f + (goalFactor - 0.5f) * (timeFactor * 1.0f), 0.0f, 1.0f);
+  if (GetConfiguration()->GetReal("manager_mode", 0.0f) > 0.5f &&
+      g_CareerMatchContext.active &&
+      team->GetTeamData() &&
+      team->GetTeamData()->GetDatabaseID() == g_CareerMatchContext.userClubId) {
+    offenseBias = clamp(offenseBias + g_MatchPlanMentality * 0.11f, 0.05f, 0.95f);
+  }
   // todo: add skills/opp skills and difficulty as factors
   // todo: add off/def slider/tactics
   //if (team->GetHumanGamerCount() == 0) offenseBias = offenseBias * 0.8f + 0.2f; // let's assume human gamers want more offensive play

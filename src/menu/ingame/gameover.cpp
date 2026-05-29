@@ -8,10 +8,13 @@
 
 #include "../pagefactory.hpp"
 #include "../careermatchcontext.hpp"
+#include "../imgui_match.hpp"
 #include "utils/database.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <map>
 #include <sstream>
 
 using namespace blunted;
@@ -47,6 +50,243 @@ bool DBHasColumn(const std::string &table, const std::string &column) {
   }
   delete r;
   return found;
+}
+
+std::string SQLQuote(const std::string &value) {
+  std::string out;
+  for (unsigned int i = 0; i < value.size(); i++) {
+    if (value[i] == '\'') out += "''";
+    else out += value[i];
+  }
+  return out;
+}
+
+std::string DBCell(DatabaseResult *r, unsigned int row, unsigned int col) {
+  if (!r || row >= r->data.size() || col >= r->data.at(row).size()) return "";
+  return r->data.at(row).at(col);
+}
+
+int CurrentFixtureSeasonYear(int managerId, int fixtureId) {
+  std::stringstream q;
+  q << "SELECT season_year FROM fixtures WHERE manager_id=" << managerId
+    << " AND id=" << fixtureId << " LIMIT 1;";
+  DatabaseResult *r = GetDB()->Query(q.str());
+  int seasonYear = 0;
+  if (r && !r->data.empty()) seasonYear = atoi(DBCell(r, 0, 0).c_str());
+  delete r;
+  return seasonYear;
+}
+
+std::string MatchStatsJson(Match *match) {
+  MatchData *md = match->GetMatchData();
+  unsigned long poss0 = md->GetPossessionTime_ms(0);
+  unsigned long poss1 = md->GetPossessionTime_ms(1);
+  unsigned long possTotal = std::max((unsigned long)1, poss0 + poss1);
+  int passPct0 = md->GetPassesAttempted(0) > 0
+    ? (int)round(md->GetPassesCompleted(0) * 100.0f / md->GetPassesAttempted(0))
+    : 0;
+  int passPct1 = md->GetPassesAttempted(1) > 0
+    ? (int)round(md->GetPassesCompleted(1) * 100.0f / md->GetPassesAttempted(1))
+    : 0;
+
+  std::stringstream ss;
+  ss << "{"
+     << "\"home\":{\"possession\":" << (int)round(poss0 * 100.0f / possTotal)
+     << ",\"shots\":" << md->GetShots(0)
+     << ",\"shots_on_target\":" << md->GetShotsOnTarget(0)
+     << ",\"corners\":" << md->GetCorners(0)
+     << ",\"fouls\":" << md->GetFouls(0)
+     << ",\"offsides\":" << md->GetOffsides(0)
+     << ",\"passes\":" << md->GetPassesAttempted(0)
+     << ",\"passes_completed\":" << md->GetPassesCompleted(0)
+     << ",\"pass_accuracy\":" << passPct0
+     << ",\"yellow_cards\":" << md->GetYellowCards(0)
+     << ",\"red_cards\":" << md->GetRedCards(0) << "},"
+     << "\"away\":{\"possession\":" << (int)round(poss1 * 100.0f / possTotal)
+     << ",\"shots\":" << md->GetShots(1)
+     << ",\"shots_on_target\":" << md->GetShotsOnTarget(1)
+     << ",\"corners\":" << md->GetCorners(1)
+     << ",\"fouls\":" << md->GetFouls(1)
+     << ",\"offsides\":" << md->GetOffsides(1)
+     << ",\"passes\":" << md->GetPassesAttempted(1)
+     << ",\"passes_completed\":" << md->GetPassesCompleted(1)
+     << ",\"pass_accuracy\":" << passPct1
+     << ",\"yellow_cards\":" << md->GetYellowCards(1)
+     << ",\"red_cards\":" << md->GetRedCards(1) << "}"
+     << "}";
+  return ss.str();
+}
+
+int ExistingSeasonYellows(int managerId, int playerId, int seasonYear) {
+  std::stringstream q;
+  q << "SELECT yellow_cards FROM player_discipline WHERE manager_id=" << managerId
+    << " AND player_id=" << playerId << " AND season_year=" << seasonYear
+    << " LIMIT 1;";
+  DatabaseResult *r = GetDB()->Query(q.str());
+  int yellows = 0;
+  if (r && !r->data.empty()) yellows = atoi(DBCell(r, 0, 0).c_str());
+  delete r;
+  return yellows;
+}
+
+int BestPhysioRating(int managerId) {
+  std::stringstream q;
+  q << "SELECT MAX(sl.rating) FROM career_staff cs"
+    << " JOIN staff_list sl ON sl.staff_id=cs.staff_id"
+    << " WHERE cs.manager_id=" << managerId
+    << " AND sl.role='Physio';";
+  DatabaseResult *r = GetDB()->Query(q.str());
+  int rating = 0;
+  if (r && !r->data.empty()) rating = atoi(DBCell(r, 0, 0).c_str());
+  delete r;
+  return clamp(rating, 0, 5);
+}
+
+float PhysioRecoveryFactor(int rating) {
+  if (rating <= 0) return 1.0f;
+  if (rating == 1) return 0.96f;
+  if (rating == 2) return 0.91f;
+  if (rating == 3) return 0.85f;
+  if (rating == 4) return 0.78f;
+  return 0.70f;
+}
+
+void PersistPlayerDiscipline(int managerId, int playerId, int seasonYear,
+                             int yellows, int reds) {
+  if (playerId <= 0 || (yellows <= 0 && reds <= 0)) return;
+
+  int oldYellows = ExistingSeasonYellows(managerId, playerId, seasonYear);
+  int suspensionAdd = 0;
+  std::string reason;
+  if (reds > 0) {
+    suspensionAdd += 2;
+    reason = "straight red";
+  } else if (yellows >= 2) {
+    suspensionAdd += 1;
+    reason = "two yellows";
+  }
+  if (yellows > 0 && oldYellows / 5 < (oldYellows + yellows) / 5) {
+    suspensionAdd += 1;
+    reason = reason.empty() ? "yellow accumulation" : reason + " + accumulation";
+  }
+
+  std::stringstream q;
+  q << "INSERT INTO player_discipline(manager_id,player_id,season_year,yellow_cards,"
+    << "suspension_matches_remaining,suspension_reason) VALUES("
+    << managerId << "," << playerId << "," << seasonYear << ","
+    << yellows << "," << suspensionAdd << ",'" << SQLQuote(reason) << "') "
+    << "ON CONFLICT(manager_id,player_id,season_year) DO UPDATE SET "
+    << "yellow_cards=yellow_cards+" << yellows << ","
+    << "suspension_matches_remaining=suspension_matches_remaining+" << suspensionAdd;
+  if (!reason.empty()) q << ",suspension_reason='" << SQLQuote(reason) << "'";
+  q << ";";
+  DatabaseResult *r = GetDB()->Query(q.str());
+  delete r;
+}
+
+void MaybePersistInjury(int managerId, int fixtureId, int playerId,
+                        Player *player, int minutes, int aggressionBias,
+                        float physioRecoveryFactor) {
+  if (playerId <= 0 || minutes <= 0 || !player) return;
+
+  float condition = player->GetFatigueFactorInv() * 100.0f;
+  float stamina = player->GetStat("physical_stamina");
+  float resilience = player->GetStat("mental_resilience");
+  float risk = 1.4f;
+  risk += std::max(0.0f, 70.0f - condition) * 0.10f;
+  risk += std::max(0.0f, 0.62f - stamina) * 6.0f;
+  risk += std::max(0.0f, 0.58f - resilience) * 4.0f;
+  risk += std::max(0, aggressionBias) * 0.7f;
+  if (minutes >= 80) risk += 0.8f;
+
+  int seed = fixtureId * 1103515245 + playerId * 97 + minutes * 13;
+  float roll = (float)(abs(seed) % 10000) / 100.0f;
+  if (roll > risk) return;
+
+  int days = 3 + (abs(seed / 17) % 8);
+  std::string severity = "minor";
+  std::string type = "knock";
+  if (condition < 40.0f || roll < risk * 0.30f) {
+    days += 7 + (abs(seed / 31) % 12);
+    severity = "moderate";
+    type = "muscle strain";
+  }
+  if (condition < 25.0f && roll < risk * 0.12f) {
+    days += 14 + (abs(seed / 43) % 18);
+    severity = "major";
+    type = "muscle tear";
+  }
+  days = std::max(1, (int)round(days * physioRecoveryFactor));
+
+  std::stringstream q;
+  q << "INSERT INTO player_availability(manager_id,player_id,injury_days_remaining,"
+    << "injury_type,injury_severity) VALUES("
+    << managerId << "," << playerId << "," << days << ",'"
+    << SQLQuote(type) << "','" << SQLQuote(severity) << "') "
+    << "ON CONFLICT(manager_id,player_id) DO UPDATE SET "
+    << "injury_days_remaining=MAX(injury_days_remaining," << days << "),"
+    << "injury_type=CASE WHEN injury_days_remaining<" << days << " THEN '"
+    << SQLQuote(type) << "' ELSE injury_type END,"
+    << "injury_severity=CASE WHEN injury_days_remaining<" << days << " THEN '"
+    << SQLQuote(severity) << "' ELSE injury_severity END;";
+  DatabaseResult *r = GetDB()->Query(q.str());
+  delete r;
+}
+
+void PersistWatchedPlayerStats(Match *match, int managerId, int fixtureId, int seasonYear) {
+  if (!match || managerId <= 0 || fixtureId <= 0 || seasonYear <= 0) return;
+
+  float physioRecoveryFactor = PhysioRecoveryFactor(BestPhysioRating(managerId));
+  std::map<int, int> goalsByPlayer;
+  std::map<int, int> assistsByPlayer;
+  const std::vector<GoalEvent> &events = match->GetMatchData()->GetGoalEvents();
+  for (unsigned int i = 0; i < events.size(); i++) {
+    if (!events.at(i).ownGoal && events.at(i).scorerDatabaseID > 0) goalsByPlayer[events.at(i).scorerDatabaseID]++;
+    if (events.at(i).assistDatabaseID > 0) assistsByPlayer[events.at(i).assistDatabaseID]++;
+  }
+
+  for (int teamId = 0; teamId < 2; teamId++) {
+    Team *team = match->GetTeam(teamId);
+    if (!team || !team->GetTeamData()) continue;
+    int clubId = team->GetTeamData()->GetDatabaseID();
+    const std::vector<Player*> &players = team->GetAllPlayers();
+    for (unsigned int i = 0; i < players.size(); i++) {
+      Player *player = players.at(i);
+      if (!player || !player->GetPlayerData()) continue;
+
+      int playerId = player->GetPlayerData()->GetDatabaseID();
+      if (playerId <= 0) continue;
+      int minutes = (int)round(player->GetPlayedMatchTime_ms() / 60000.0f);
+      int cards = player->GetCards();
+      int reds = cards >= 3 ? 1 : 0;
+      int yellows = reds ? 0 : std::min(cards, 2);
+      int goals = goalsByPlayer[playerId];
+      int assists = assistsByPlayer[playerId];
+      if (minutes <= 0 && yellows <= 0 && reds <= 0 && goals <= 0 && assists <= 0) continue;
+
+      float rating = 6.45f + std::min(minutes, 90) / 90.0f * 0.12f
+                   + goals * 1.05f + assists * 0.55f
+                   - yellows * 0.22f - reds * 0.80f;
+      if (rating < 3.0f) rating = 3.0f;
+      if (rating > 10.0f) rating = 10.0f;
+
+      std::stringstream q;
+      q << "INSERT OR REPLACE INTO player_match_stats("
+        << "manager_id,fixture_id,season_year,player_id,team_id,started,minutes,"
+        << "goals,assists,yellow_cards,red_cards,rating) VALUES("
+        << managerId << "," << fixtureId << "," << seasonYear << ","
+        << playerId << "," << clubId << "," << (minutes >= 45 ? 1 : 0) << ","
+        << minutes << "," << goals << "," << assists << ","
+        << yellows << "," << reds << "," << rating << ");";
+      DatabaseResult *r = GetDB()->Query(q.str());
+      delete r;
+
+      PersistPlayerDiscipline(managerId, playerId, seasonYear, yellows, reds);
+      int aggr = (clubId == g_CareerMatchContext.userClubId) ? g_MatchPlanAggression : 0;
+      MaybePersistInjury(managerId, fixtureId, playerId, player, minutes, aggr,
+                         physioRecoveryFactor);
+    }
+  }
 }
 
 void PersistWatchedMatchStamina(Match *match) {
@@ -108,11 +348,19 @@ GameOverPage::GameOverPage(Gui2WindowManager *windowManager, const Gui2PageData 
 
   // Capture result for scheduled career fixture.
   if (g_CareerMatchContext.active) {
+    int seasonYear = CurrentFixtureSeasonYear(g_CareerMatchContext.managerId,
+                                              g_CareerMatchContext.fixtureId);
+    std::string statsJson = MatchStatsJson(match);
     printf("[CAREER MATCH] Finished fixture=%d score=%d-%d\n",
            g_CareerMatchContext.fixtureId, homeScore, awayScore);
     CompleteScheduledFixture(g_CareerMatchContext.managerId,
                              g_CareerMatchContext.fixtureId,
-                             homeScore, awayScore);
+                             homeScore, awayScore,
+                             statsJson);
+    PersistWatchedPlayerStats(match,
+                              g_CareerMatchContext.managerId,
+                              g_CareerMatchContext.fixtureId,
+                              seasonYear);
     // Context cleared in GoMainMenu after navigation is queued.
   } else {
     printf("[CAREER MATCH] No active fixture context; skipping result processing\n");

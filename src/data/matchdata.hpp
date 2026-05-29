@@ -11,6 +11,21 @@
 
 #include "teamdata.hpp"
 
+#include <vector>
+
+struct GoalEvent {
+  int teamID;
+  int scorerDatabaseID;
+  int assistDatabaseID;
+  bool ownGoal;
+};
+
+struct TouchEvent {
+  int teamID;
+  int playerDatabaseID;
+  unsigned long time_ms;
+};
+
 class MatchData {
 
   public:
@@ -20,6 +35,9 @@ class MatchData {
     TeamData *GetTeamData(int id) { return teamData[id]; }
     int GetGoalCount(int id) { return goalCount[id]; }
     void SetGoalCount(int id, int amount) { goalCount[id] = amount; }
+    void AddGoalEvent(int teamID, int scorerDatabaseID, int assistDatabaseID, bool ownGoal);
+    const std::vector<GoalEvent> &GetGoalEvents() const { return goalEvents; }
+    int GetAssistCandidate(int teamID, int scorerDatabaseID, unsigned long goalTime_ms) const;
     void AddPossessionTime_10ms(int teamID);
     unsigned long GetPossessionTime_ms(int teamID) { return possessionTime_ms[teamID]; }
     float GetPossessionFactor_60seconds() { return possession60seconds / 60.0f * 0.5f + 0.5f; } // REMEMBER THESE ARE IRL INGAME SECONDS (because, I guess the tactics should be based on irl possession time instead of gametime? not sure yet, think about this)
@@ -41,10 +59,19 @@ class MatchData {
 
     // Ball-touch notification for pass-completion tracking.
     // Call before any ball touch; call RecordPassAttempt after a pass fires.
-    void RecordBallTouch(int teamID) {
+    void RecordBallTouch(int teamID, int playerDatabaseID = 0,
+                         unsigned long time_ms = 0, bool intentional = false) {
       if (pendingPassTeamID >= 0) {
         if (teamID == pendingPassTeamID) passesCompleted[pendingPassTeamID]++;
         pendingPassTeamID = -1;
+      }
+      if (intentional && playerDatabaseID > 0) {
+        if (lastIntentionalTouch.playerDatabaseID != playerDatabaseID) {
+          previousIntentionalTouch = lastIntentionalTouch;
+        }
+        lastIntentionalTouch.teamID = teamID;
+        lastIntentionalTouch.playerDatabaseID = playerDatabaseID;
+        lastIntentionalTouch.time_ms = time_ms;
       }
     }
     void RecordPassAttempt(int teamID) {
@@ -71,6 +98,9 @@ class MatchData {
     int passesAttempted[2];
     int passesCompleted[2];
     int pendingPassTeamID;
+    std::vector<GoalEvent> goalEvents;
+    TouchEvent lastIntentionalTouch;
+    TouchEvent previousIntentionalTouch;
 
 };
 

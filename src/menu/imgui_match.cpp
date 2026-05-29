@@ -42,6 +42,9 @@ bool       g_ImGuiTopBarPauseRequest = false;
 bool       g_TopBarSoftPause         = false;
 bool       g_MatchStatsVisible       = false;
 bool       g_TacticsPanelVisible     = false;
+bool       g_MatchPlanPanelVisible   = false;
+int        g_MatchPlanMentality      = 0;
+int        g_MatchPlanAggression     = 0;
 std::vector<TacticChange> g_PendingTacticsChanges;
 
 static boost::mutex g_QueuedSubMutex;
@@ -136,6 +139,8 @@ static float s_statsPanelY   = -1.f;
 static bool  s_statsCompact  = false;
 static float s_tacticsPanelX = -1.f;
 static float s_tacticsPanelY = -1.f;
+static float s_matchPlanPanelX = -1.f;
+static float s_matchPlanPanelY = -1.f;
 
 // ---------------------------------------------------------------------------
 // Per-match cached state
@@ -336,9 +341,14 @@ void ResetMatchOverlayState() {
   g_SubWindowOpen = false;
   g_MatchStatsVisible     = false;
   g_TacticsPanelVisible   = false;
+  g_MatchPlanPanelVisible = false;
+  g_MatchPlanMentality    = 0;
+  g_MatchPlanAggression   = 0;
   g_PendingTacticsChanges.clear();
   s_tacticsPanelX         = -1.f;
   s_tacticsPanelY         = -1.f;
+  s_matchPlanPanelX       = -1.f;
+  s_matchPlanPanelY       = -1.f;
 }
 
 // ---------------------------------------------------------------------------
@@ -729,6 +739,7 @@ static void DrawSubsList(ImDrawList *dl, ImVec2 origin, float w, float h,
 // Forward declarations — defined after RenderImGuiMatchOverlay.
 void RenderMatchStatsPanel();
 void RenderTacticsPanel();
+void RenderMatchPlanPanel();
 // ---------------------------------------------------------------------------
 
 void RenderImGuiMatchOverlay() {
@@ -1297,11 +1308,11 @@ void RenderImGuiMatchOverlay() {
     }
 
     // ---- Floating tab buttons: above the radar, no background ---------------
-    const char *tabLabels[] = {"MATCH FACTS", "TACTICS", "SHOUTS"};
+    const char *tabLabels[] = {"MATCH FACTS", "TACTICS", "MATCH PLAN", "SHOUTS"};
     const float tbtnW   = 86.0f;
     const float tbtnH   = 26.0f;
     const float tbtnGap = 5.0f;
-    float tabRowW = tbtnW * 3 + tbtnGap * 2;
+    float tabRowW = tbtnW * 4 + tbtnGap * 3;
     float tabCX   = radarL + boardW * 0.5f;  // center of radar
     float tabX0   = tabCX - tabRowW * 0.5f;
     float tabY0   = radarT - tbtnH - 10.0f;  // 10px above radar top
@@ -1320,7 +1331,7 @@ void RenderImGuiMatchOverlay() {
     ImVec2      tpos = ImGui::GetWindowPos();
     float tabX = tpos.x;
     float tabY = tpos.y;
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 4; i++) {
       ImVec2 bmin(tabX, tabY);
       ImVec2 bmax(tabX + tbtnW, tabY + tbtnH);
       ImGui::SetCursorScreenPos(bmin);
@@ -1329,7 +1340,9 @@ void RenderImGuiMatchOverlay() {
       bool tabClicked = ImGui::InvisibleButton(cid, ImVec2(tbtnW, tbtnH));
       ImGui::PopID();
       bool hov    = ImGui::IsItemHovered();
-      bool active = (i == 0 && g_MatchStatsVisible) || (i == 1 && g_TacticsPanelVisible);
+      bool active = (i == 0 && g_MatchStatsVisible) ||
+                    (i == 1 && g_TacticsPanelVisible) ||
+                    (i == 2 && g_MatchPlanPanelVisible);
       ImU32 bg = active ? IM_COL32(255, 200, 40, 255)
                : hov    ? IM_COL32(50, 70, 120, 240)
                         : IM_COL32(18, 26, 52, 210);
@@ -1339,6 +1352,7 @@ void RenderImGuiMatchOverlay() {
       AddTextCentered(tdl, g_ManagerFontBold, 11.0f, bmin, bmax, tc, tabLabels[i]);
       if (tabClicked && i == 0) g_MatchStatsVisible  = !g_MatchStatsVisible;
       if (tabClicked && i == 1) g_TacticsPanelVisible = !g_TacticsPanelVisible;
+      if (tabClicked && i == 2) g_MatchPlanPanelVisible = !g_MatchPlanPanelVisible;
       tabX += tbtnW + tbtnGap;
     }
     ImGui::End();
@@ -1517,6 +1531,7 @@ void RenderImGuiMatchOverlay() {
 
   // Live tactics panel (non-pausing overlay)
   RenderTacticsPanel();
+  RenderMatchPlanPanel();
 }
 
 // ---------------------------------------------------------------------------
@@ -2583,6 +2598,113 @@ void RenderTacticsPanel() {
   ImGui::End();
   ImGui::PopStyleColor();
   ImGui::PopStyleVar(4);
+}
+
+static void DrawPlanSegment(ImDrawList *dl, const char *title,
+                            const char **labels, int *value,
+                            float x, float y, float w) {
+  const float rowH = 34.0f;
+  const float labelW = 92.0f;
+  dl->AddText(g_ManagerFontSmall, 14.0f, ImVec2(x, y + 9.0f),
+              IM_COL32(185, 200, 230, 255), title);
+  float bx = x + labelW;
+  float bw = (w - labelW) / 5.0f;
+  for (int i = 0; i < 5; i++) {
+    int v = i - 2;
+    ImVec2 bmin(bx + bw * i + 2.0f, y + 4.0f);
+    ImVec2 bmax(bx + bw * (i + 1) - 2.0f, y + rowH - 4.0f);
+    char id[64]; snprintf(id, sizeof(id), "##plan_%s_%d", title, i);
+    ImGui::SetCursorScreenPos(bmin);
+    bool clicked = ImGui::InvisibleButton(id, ImVec2(bmax.x - bmin.x, bmax.y - bmin.y));
+    bool hov = ImGui::IsItemHovered();
+    bool sel = (*value == v);
+    ImU32 bg = sel ? s_pauseUserColor
+             : hov ? IM_COL32(40, 55, 110, 230)
+                   : IM_COL32(18, 28, 58, 220);
+    dl->AddRectFilled(bmin, bmax, bg, 5.0f);
+    dl->AddRect(bmin, bmax, IM_COL32(70, 95, 150, 130), 5.0f);
+    AddTextCentered(dl, g_ManagerFontSmall, 12.0f, bmin, bmax,
+                    sel ? TextColorForBg(s_pauseUserColor) : IM_COL32(175, 195, 230, 235),
+                    labels[i]);
+    if (clicked) *value = v;
+  }
+}
+
+void RenderMatchPlanPanel() {
+  if (!g_MatchPlanPanelVisible) return;
+
+  ImGuiIO &io = ImGui::GetIO();
+  const float sw = io.DisplaySize.x, sh = io.DisplaySize.y;
+  const float panW = 560.0f, panH = 166.0f, hdrH = 42.0f;
+
+  if (s_matchPlanPanelX < 0.f) {
+    s_matchPlanPanelX = (sw - panW) * 0.5f + 230.0f;
+    s_matchPlanPanelY = (sh - panH) * 0.5f - 50.0f;
+  }
+  if (s_matchPlanPanelX < 0.f)       s_matchPlanPanelX = 0.f;
+  if (s_matchPlanPanelY < 0.f)       s_matchPlanPanelY = 0.f;
+  if (s_matchPlanPanelX + panW > sw) s_matchPlanPanelX = sw - panW;
+  if (s_matchPlanPanelY + panH > sh) s_matchPlanPanelY = sh - panH;
+
+  ImGui::SetNextWindowPos(ImVec2(s_matchPlanPanelX, s_matchPlanPanelY), ImGuiCond_Always);
+  ImGui::SetNextWindowSize(ImVec2(panW, panH), ImGuiCond_Always);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+  ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(10, 16, 34, 252));
+  ImGui::Begin("##match_plan_panel", nullptr,
+    ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+    ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+    ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav);
+
+  ImDrawList *dl = ImGui::GetWindowDrawList();
+  ImVec2 wp = ImGui::GetWindowPos();
+  dl->AddRectFilled(wp, ImVec2(wp.x + panW, wp.y + hdrH),
+                    IM_COL32(16, 24, 52, 255), 12.0f, ImDrawFlags_RoundCornersTop);
+  dl->AddRectFilled(wp, ImVec2(wp.x + 4.0f, wp.y + hdrH), s_pauseUserColor);
+  AddTextCentered(dl, g_ManagerFontBold, 17.0f, wp, ImVec2(wp.x + panW, wp.y + hdrH),
+                  IM_COL32(200, 215, 255, 255), "MATCH PLAN");
+
+  ImGui::SetCursorScreenPos(wp);
+  ImGui::InvisibleButton("##drag_plan", ImVec2(panW - 40.0f, hdrH));
+  if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+    ImVec2 delta = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
+    ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
+    s_matchPlanPanelX += delta.x;
+    s_matchPlanPanelY += delta.y;
+    if (s_matchPlanPanelX < 0.f)       s_matchPlanPanelX = 0.f;
+    if (s_matchPlanPanelY < 0.f)       s_matchPlanPanelY = 0.f;
+    if (s_matchPlanPanelX + panW > sw) s_matchPlanPanelX = sw - panW;
+    if (s_matchPlanPanelY + panH > sh) s_matchPlanPanelY = sh - panH;
+  }
+  if (ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+
+  ImVec2 closeMin(wp.x + panW - 34.0f, wp.y + 7.0f);
+  ImVec2 closeMax(wp.x + panW - 7.0f, wp.y + hdrH - 7.0f);
+  ImGui::SetCursorScreenPos(closeMin);
+  ImGui::InvisibleButton("##close_plan", ImVec2(closeMax.x - closeMin.x, closeMax.y - closeMin.y));
+  bool hov = ImGui::IsItemHovered();
+  dl->AddRectFilled(closeMin, closeMax, hov ? IM_COL32(220,60,60,220) : IM_COL32(40,50,90,180), 4.0f);
+  AddTextCentered(dl, g_ManagerFontBold, 17.0f, closeMin, closeMax, IM_COL32(255,255,255,255), "X");
+  if (ImGui::IsItemClicked()) g_MatchPlanPanelVisible = false;
+
+  static const char *mentalityLabels[5] = {"Full Def", "Def", "Default", "Attack", "Full Att"};
+  static const char *aggressionLabels[5] = {"Soft", "Calm", "Default", "Agg", "Extreme"};
+  float rowX = wp.x + 16.0f, rowW = panW - 32.0f;
+  DrawPlanSegment(dl, "Mentality", mentalityLabels, &g_MatchPlanMentality,
+                  rowX, wp.y + hdrH + 18.0f, rowW);
+  DrawPlanSegment(dl, "Aggression", aggressionLabels, &g_MatchPlanAggression,
+                  rowX, wp.y + hdrH + 62.0f, rowW);
+
+  dl->AddText(g_ManagerFontSmall, 12.0f, ImVec2(rowX, wp.y + panH - 24.0f),
+              IM_COL32(125, 145, 185, 210),
+              "Higher attack/aggression increases risk, fatigue, fouls and card pressure.");
+  dl->AddRect(wp, ImVec2(wp.x + panW, wp.y + panH),
+              IM_COL32(55, 75, 140, 180), 12.0f, 0, 1.5f);
+
+  ImGui::End();
+  ImGui::PopStyleColor();
+  ImGui::PopStyleVar(3);
 }
 
 void RenderImGuiMatchPauseOverlay() {

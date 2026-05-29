@@ -81,6 +81,9 @@ void ResetMatchOverlayState();
 
 // Live tactics panel (non-pausing floating overlay).
 extern bool g_TacticsPanelVisible;
+extern bool g_MatchPlanPanelVisible;
+extern int  g_MatchPlanMentality;  // -2 full defensive .. 0 default .. +2 full attacking
+extern int  g_MatchPlanAggression; // -2 soft .. 0 default .. +2 extreme
 
 // Tactic change queued by GL thread — applied to TeamData by gametask.cpp each frame.
 struct TacticChange {

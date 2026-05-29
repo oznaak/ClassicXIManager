@@ -22,6 +22,8 @@
 
 #include "../match.hpp"
 #include "../team.hpp"
+#include "../../menu/careermatchcontext.hpp"
+#include "../../menu/imgui_match.hpp"
 
 #include "controller/elizacontroller.hpp"
 #include "controller/strategies/strategy.hpp"
@@ -421,7 +423,16 @@ void Player::Process() {
     Vector3 posAfter = CastHumanoid()->GetPosition();
 
     float distance = (posAfter - posBefore).GetLength();
-    fatigueFactorInv -= distance * 0.00003f * (2.0f - GetStaminaStat()) * (1.0f / match->GetMatchDurationFactor());
+    float planFatigue = 1.0f;
+    if (GetConfiguration()->GetReal("manager_mode", 0.0f) > 0.5f &&
+        g_CareerMatchContext.active &&
+        team->GetTeamData() &&
+        team->GetTeamData()->GetDatabaseID() == g_CareerMatchContext.userClubId) {
+      planFatigue += g_MatchPlanMentality * 0.08f;
+      planFatigue += g_MatchPlanAggression * 0.04f;
+      planFatigue = clamp(planFatigue, 0.78f, 1.30f);
+    }
+    fatigueFactorInv -= distance * 0.00003f * (2.0f - GetStaminaStat()) * planFatigue * (1.0f / match->GetMatchDurationFactor());
     fatigueFactorInv = clamp(fatigueFactorInv, 0.01f, 1.0f);
     //if (GetDebug() && match->GetActualTime_ms() % 1000 == 0) printf("fatigue: %f\n", GetFatigueFactorInv());
 

@@ -2008,7 +2008,7 @@ void ProcessSquadHarmonyOnSale(int managerId, int playerId, int userClubId,
   bool isCaptain = false;
   { std::stringstream cq; cq << "SELECT id FROM fixtures WHERE manager_id=" << managerId
       << " AND (home_team_id=" << userClubId << " OR away_team_id=" << userClubId << ")"
-      << " AND status='completed' LIMIT 1;";
+      << " AND (status='played' OR status='completed') LIMIT 1;";
     // Simplified: treat international_reputation >= 4 at club >= 3 seasons as captain proxy
     if (intlRep >= 4) isCaptain = true; }
 
@@ -2080,7 +2080,7 @@ void TrackPlayerAppearances(int managerId, int fixtureId, int seasonYear) {
   int awayId = atoi(UTCell(fr,0,1).c_str());
   std::string status = UTCell(fr,0,2);
   delete fr;
-  if (status != "completed") return;
+  if (status != "played" && status != "completed") return;
 
   // For both clubs, count all their players as starters (simplified — no formation data)
   // Count players on each team as having started
@@ -2112,7 +2112,7 @@ void EvaluatePromiseFulfillment(int managerId, const std::string &currentDate, i
   // Count completed fixtures so far this season
   int totalFixtures = 0;
   { std::stringstream fq; fq << "SELECT COUNT(*) FROM fixtures WHERE manager_id=" << managerId
-      << " AND season_year=" << seasonYear << " AND status='completed';";
+      << " AND season_year=" << seasonYear << " AND (status='played' OR status='completed');";
     DatabaseResult *fr = GetDB()->Query(fq.str().c_str());
     if (fr && fr->data.size() > 0) totalFixtures = atoi(UTCell(fr,0,0).c_str());
     if (fr) delete fr; }
