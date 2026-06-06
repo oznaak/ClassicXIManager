@@ -450,12 +450,14 @@ static GLuint TryLoadImage(const std::string &path) {
     static FnGenMip fnGenMip = (FnGenMip)SDL_GL_GetProcAddress("glGenerateMipmap");
     if (fnGenMip) fnGenMip(GL_TEXTURE_2D);
   }
+  const int width = rgba->w;
+  const int height = rgba->h;
   glBindTexture(GL_TEXTURE_2D, 0);
   SDL_FreeSurface(rgba);
 
-  s_ImageDims[texID] = { rgba->w, rgba->h };
+  s_ImageDims[texID] = { width, height };
   printf("[IMG LOAD] success: %s texture=%u size=%dx%d\n",
-         path.c_str(), texID, (int)rgba->w, (int)rgba->h);
+         path.c_str(), texID, width, height);
   return texID;
 }
 
